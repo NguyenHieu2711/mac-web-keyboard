@@ -1334,6 +1334,13 @@ def start_notification_auto_dismisser(max_seconds: float = 4.0) -> None:
             import Foundation  # type: ignore
             import objc  # type: ignore
 
+            try:
+                AppKit.NSApplication.sharedApplication().setActivationPolicy_(
+                    AppKit.NSApplicationActivationPolicyProhibited
+                )
+            except Exception:
+                pass
+
             app_services = ctypes.cdll.LoadLibrary(
                 ctypes.util.find_library("ApplicationServices")
             )

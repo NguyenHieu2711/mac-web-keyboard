@@ -264,48 +264,10 @@ body[data-layout="pad"] .kb-shell {
   width: 100%;
   background: #1c1c21;
   padding: 7px 4px calc(20px + env(safe-area-inset-bottom)) 4px;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: 38px 43px 43px 43px 45px;
   gap: 6px;
   border-top: 1px solid #2a2a32;
-}
-
-.ss-top-block {
-  display: flex;
-  align-items: stretch;
-  gap: 3.5px;
-}
-
-.ss-left-col {
-  width: 44px;
-  flex: 0 0 44px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.ss-left-esc {
-  flex: 1 1 0;
-}
-
-.ss-left-tab {
-  flex: 1.25 1 0;
-}
-
-.ss-left-shift {
-  flex: 1.45 1 0;
-}
-
-.ss-right-rows {
-  flex: 1 1 0;
-  min-width: 0;
-  display: grid;
-  grid-template-rows: 38px 43px 43px 43px;
-  gap: 6px;
-}
-
-.ss-row-bottom {
-  height: 45px;
 }
 
 .ss-row {
@@ -319,10 +281,11 @@ body[data-layout="pad"] .kb-shell {
   gap: 3px;
 }
 
-/* Hàng 3 (A S D F G H J K L) thẳng tắp sát lề trái và lề phải, không thụt lề để đồng bộ cột dọc */
+/* Hàng 3 (Caps + A S D F G H J K L): A nằm đúng khe giữa Q-W, L nằm đúng khe giữa O-P chuẩn Messenger */
 .ss-row-asdf {
-  padding: 0;
-  gap: 3.5px;
+  padding-left: 0;
+  padding-right: 4.1%;
+  gap: 3px;
 }
 
 .ss-key {
@@ -346,33 +309,45 @@ body[data-layout="pad"] .kb-shell {
   color: #e4e4e9;
 }
 
-/* Cột trái chuẩn bàn phím ngoài: Esc, Tab, Shift, Ctrl, Win, Alt */
+/* Bậc thang thò thụt tự nhiên bên trái (Esc -> Tab -> Caps -> Shift) khớp hoàn toàn với Q -> A -> Z */
 .ss-key-left-mod {
-  flex: 1.05 1 0;
   background: #202431;
   border: 1px solid #2e374d;
 }
 
 .ss-key-left-mod .key-main {
-  font-size: 12.5px !important;
+  font-size: 11.5px !important;
   font-weight: 600;
   color: #93c5fd !important;
 }
 
-.ss-key-shift {
+.ss-mod-r1 {
+  flex: 0.88 1 0;
+}
+
+.ss-mod-r2 {
+  flex: 0.94 1 0;
+}
+
+.ss-mod-r3 {
   flex: 1.45 1 0;
+}
+
+.ss-key-shift,
+.ss-mod-r4 {
+  flex: 1.98 1 0;
   background: #202431;
   border: 1px solid #2e374d;
 }
 
 .ss-key-shift .key-main {
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
   color: #93c5fd;
 }
 
 .ss-key-back {
-  flex: 1.45 1 0;
+  flex: 1.92 1 0;
   background: #22232a;
 }
 

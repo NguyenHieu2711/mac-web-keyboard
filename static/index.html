@@ -457,79 +457,73 @@
       </div>
 
       <div class="ss-kb">
-        <!-- Khối 4 hàng trên: Cột trái [Esc / Tab / Shift] chia đều chèn xuyên qua cả dòng A, bên phải là 4 hàng số & chữ đồng nhất -->
-        <div class="ss-top-block">
-          <!-- Cột trái xuyên suốt 4 hàng: Esc -> Tab -> Shift -->
-          <div class="ss-left-col">
-            <button type="button" class="key ss-key ss-key-left-mod ss-left-esc" data-action="press" data-key="esc">
-              <span class="key-main">Esc</span>
-            </button>
-            <button type="button" class="key ss-key ss-key-left-mod ss-left-tab" data-action="press" data-key="tab">
-              <span class="key-main">Tab</span>
-            </button>
-            <button type="button" class="key ss-key ss-key-shift ss-left-shift key-mod" data-action="modifier" data-mod="shift">
-              <span class="mod-dot"></span>
-              <span class="key-main">Shift</span>
-            </button>
-          </div>
+        <!-- Hàng 1: [Esc nhỏ gọn] + 1 2 3 4 5 6 7 8 9 0 -->
+        <div class="ss-row ss-row-num ss-row-tight">
+          <button type="button" class="key ss-key ss-key-left-mod ss-mod-r1" data-action="press" data-key="esc">
+            <span class="key-main">Esc</span>
+          </button>
+          <button type="button" class="key ss-key" data-action="press" data-key="1"><span class="key-main">1</span></button>
+          <button type="button" class="key ss-key" data-action="press" data-key="2"><span class="key-main">2</span></button>
+          <button type="button" class="key ss-key" data-action="press" data-key="3"><span class="key-main">3</span></button>
+          <button type="button" class="key ss-key" data-action="press" data-key="4"><span class="key-main">4</span></button>
+          <button type="button" class="key ss-key" data-action="press" data-key="5"><span class="key-main">5</span></button>
+          <button type="button" class="key ss-key" data-action="press" data-key="6"><span class="key-main">6</span></button>
+          <button type="button" class="key ss-key" data-action="press" data-key="7"><span class="key-main">7</span></button>
+          <button type="button" class="key ss-key" data-action="press" data-key="8"><span class="key-main">8</span></button>
+          <button type="button" class="key ss-key" data-action="press" data-key="9"><span class="key-main">9</span></button>
+          <button type="button" class="key ss-key" data-action="press" data-key="0"><span class="key-main">0</span></button>
+        </div>
 
-          <!-- Khối 4 hàng số & chữ bên phải cột Esc/Tab/Shift -->
-          <div class="ss-right-rows">
-            <!-- Hàng 1: 1 2 3 4 5 6 7 8 9 0 -->
-            <div class="ss-row ss-row-num ss-row-tight">
-              <button type="button" class="key ss-key" data-action="press" data-key="1"><span class="key-main">1</span></button>
-              <button type="button" class="key ss-key" data-action="press" data-key="2"><span class="key-main">2</span></button>
-              <button type="button" class="key ss-key" data-action="press" data-key="3"><span class="key-main">3</span></button>
-              <button type="button" class="key ss-key" data-action="press" data-key="4"><span class="key-main">4</span></button>
-              <button type="button" class="key ss-key" data-action="press" data-key="5"><span class="key-main">5</span></button>
-              <button type="button" class="key ss-key" data-action="press" data-key="6"><span class="key-main">6</span></button>
-              <button type="button" class="key ss-key" data-action="press" data-key="7"><span class="key-main">7</span></button>
-              <button type="button" class="key ss-key" data-action="press" data-key="8"><span class="key-main">8</span></button>
-              <button type="button" class="key ss-key" data-action="press" data-key="9"><span class="key-main">9</span></button>
-              <button type="button" class="key ss-key" data-action="press" data-key="0"><span class="key-main">0</span></button>
-            </div>
+        <!-- Hàng 2: [Tab] + Q W E R T Y U I O P -->
+        <div class="ss-row ss-row-tight">
+          <button type="button" class="key ss-key ss-key-left-mod ss-mod-r2" data-action="press" data-key="tab">
+            <span class="key-main">Tab</span>
+          </button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="q"><span class="key-main">Q</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="w"><span class="key-main">W</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="e"><span class="key-main">E</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="r"><span class="key-main">R</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="t"><span class="key-main">T</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="y"><span class="key-main">Y</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="u"><span class="key-main">U</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="i"><span class="key-main">I</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="o"><span class="key-main">O</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="p"><span class="key-main">P</span></button>
+        </div>
 
-            <!-- Hàng 2: Q W E R T Y U I O P -->
-            <div class="ss-row ss-row-tight">
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="q"><span class="key-main">Q</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="w"><span class="key-main">W</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="e"><span class="key-main">E</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="r"><span class="key-main">R</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="t"><span class="key-main">T</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="y"><span class="key-main">Y</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="u"><span class="key-main">U</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="i"><span class="key-main">I</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="o"><span class="key-main">O</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="p"><span class="key-main">P</span></button>
-            </div>
+        <!-- Hàng 3: Bậc thò thụt tự nhiên chuẩn Messenger — A nằm đúng khe giữa Q-W, L nằm đúng khe giữa O-P -->
+        <div class="ss-row ss-row-asdf ss-row-tight">
+          <button type="button" class="key ss-key ss-key-left-mod ss-mod-r3 key-caps" data-action="caps" data-key="capslock">
+            <span class="caps-led"></span>
+            <span class="key-main">Caps</span>
+          </button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="a"><span class="key-main">A</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="s"><span class="key-main">S</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="d"><span class="key-main">D</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="f"><span class="key-main">F</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="g"><span class="key-main">G</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="h"><span class="key-main">H</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="j"><span class="key-main">J</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="k"><span class="key-main">K</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="l"><span class="key-main">L</span></button>
+        </div>
 
-            <!-- Hàng 3: A S D F G H J K L (đồng nhất bên phải cột Tab/Shift) -->
-            <div class="ss-row ss-row-asdf ss-row-tight">
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="a"><span class="key-main">A</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="s"><span class="key-main">S</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="d"><span class="key-main">D</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="f"><span class="key-main">F</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="g"><span class="key-main">G</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="h"><span class="key-main">H</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="j"><span class="key-main">J</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="k"><span class="key-main">K</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="l"><span class="key-main">L</span></button>
-            </div>
-
-            <!-- Hàng 4: Z X C V B N M + [⌫ Backspace] -->
-            <div class="ss-row ss-row-tight">
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="z"><span class="key-main">Z</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="x"><span class="key-main">X</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="c"><span class="key-main">C</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="v"><span class="key-main">V</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="b"><span class="key-main">B</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="n"><span class="key-main">N</span></button>
-              <button type="button" class="key ss-key key-alpha" data-action="press" data-key="m"><span class="key-main">M</span></button>
-              <button type="button" class="key ss-key ss-key-back" data-action="press" data-key="backspace" data-repeat="true">
-                <span class="key-main">⌫</span>
-              </button>
-            </div>
-          </div>
+        <!-- Hàng 4: [Shift bậc rộng đẩy Z nằm đúng khe giữa A-S] + Z X C V B N M + [⌫ Backspace] -->
+        <div class="ss-row ss-row-tight">
+          <button type="button" class="key ss-key ss-key-shift ss-mod-r4 key-mod" data-action="modifier" data-mod="shift">
+            <span class="mod-dot"></span>
+            <span class="key-main">Shift</span>
+          </button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="z"><span class="key-main">Z</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="x"><span class="key-main">X</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="c"><span class="key-main">C</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="v"><span class="key-main">V</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="b"><span class="key-main">B</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="n"><span class="key-main">N</span></button>
+          <button type="button" class="key ss-key key-alpha" data-action="press" data-key="m"><span class="key-main">M</span></button>
+          <button type="button" class="key ss-key ss-key-back" data-action="press" data-key="backspace" data-repeat="true">
+            <span class="key-main">⌫</span>
+          </button>
         </div>
 
         <!-- Hàng 5 (Đáy): [Ctrl] [⊞ Win] [Alt] [?123] + [Space kéo dài] + [✥ 1 Nút Mũi tên gạt 4 hướng] + [⏎] -->
