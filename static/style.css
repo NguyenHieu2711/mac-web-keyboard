@@ -538,22 +538,10 @@ body[data-layout="pad"] .kb-shell {
 }
 
 /* Phím đôi chuẩn PC (`~, -_, =+, [{, ]}, \|, ;:, '", ,<, .>, /?):
-   Hiển thị rõ cả ký tự trên (Shift) và ký tự dưới như phím thật,
-   chạm nửa trên gõ ký tự trên, chạm nửa dưới gõ ký tự dưới (hoặc bật ⇧ Shift) */
+   Hiển thị rõ cả ký tự trên (Shift) và ký tự dưới như phím thật, không có vạch ngăn giữa */
 .sym-item.sym-dual {
   justify-content: space-between;
-  padding: 2px 0;
-}
-
-.sym-item.sym-dual::after {
-  content: "";
-  position: absolute;
-  left: 18%;
-  right: 18%;
-  top: 50%;
-  height: 1px;
-  background: rgba(148, 163, 184, 0.16);
-  pointer-events: none;
+  padding: 3px 0;
 }
 
 .sym-item.sym-dual .sym-top {
