@@ -35,7 +35,7 @@
   const STORAGE_VN_KEY = "mac_kb_vn_mode";
 
   const LAYOUT_LABELS = {
-    pad: "📱 Mac dọc",
+    pad: "📱 Windows dọc",
     win: "🖥 Win",
     mac: " Mac",
   };
@@ -74,7 +74,7 @@
 
   function syncModeUI() {
     document.body.dataset.layout = kbLayout;
-    const lbl = LAYOUT_LABELS[kbLayout] || "📱 Mac dọc";
+    const lbl = LAYOUT_LABELS[kbLayout] || "📱 Windows dọc";
     layoutLabels.forEach((el) => {
       el.textContent = lbl;
     });
@@ -1084,7 +1084,7 @@
   // ============================================================================
   // 8. KIỂM TRA BẮT BUỘC CẬP NHẬT NGAY KHI BẤM MỞ APP (MANDATORY UPDATE GATE)
   // ============================================================================
-  const CURRENT_APP_VERSION = "1.6.1";
+  const CURRENT_APP_VERSION = "1.7.0";
   const updateModal = document.getElementById("mandatory-update-modal");
   const updateTitle = document.getElementById("update-title");
   const updateDesc = document.getElementById("update-desc");

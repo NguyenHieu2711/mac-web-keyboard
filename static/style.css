@@ -256,10 +256,48 @@ body[data-layout="pad"] .kb-shell {
   width: 100%;
   background: #1c1c21;
   padding: 7px 4px 8px 4px;
-  display: grid;
-  grid-template-rows: 38px 43px 43px 43px 45px;
+  display: flex;
+  flex-direction: column;
   gap: 6px;
   border-top: 1px solid #2a2a32;
+}
+
+.ss-top-block {
+  display: flex;
+  align-items: stretch;
+  gap: 3.5px;
+}
+
+.ss-left-col {
+  width: 44px;
+  flex: 0 0 44px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ss-left-esc {
+  flex: 1 1 0;
+}
+
+.ss-left-tab {
+  flex: 1.25 1 0;
+}
+
+.ss-left-shift {
+  flex: 1.45 1 0;
+}
+
+.ss-right-rows {
+  flex: 1 1 0;
+  min-width: 0;
+  display: grid;
+  grid-template-rows: 38px 43px 43px 43px;
+  gap: 6px;
+}
+
+.ss-row-bottom {
+  height: 45px;
 }
 
 .ss-row {
