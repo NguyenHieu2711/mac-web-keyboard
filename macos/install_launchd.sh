@@ -38,6 +38,9 @@ launchctl bootout "gui/$(id -u)" "${PLIST_DEST}" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "${PLIST_DEST}"
 launchctl kickstart -k "gui/$(id -u)/${PLIST_LABEL}"
 
+REAL_PY_EXEC="$("${VENV_DIR}/bin/python" -c 'import os, sys; print(os.path.realpath(sys.executable))')"
+PYTHON_APP_BUNDLE="$(echo "${REAL_PY_EXEC}" | sed -E 's|(/Python\.app)/.*|\1|')"
+
 echo ""
 echo "=================================================================="
 echo "✅ ĐÃ CÀI ĐẶT CHẠY NGẦM THÀNH CÔNG TRÊN MACOS!"
@@ -49,8 +52,19 @@ fi
 LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || true)"
 [[ -n "${LAN_IP}" ]] && echo "   👉 IP Wi-Fi LAN nhập vào S24+: ${LAN_IP}:5050"
 echo ""
-echo "⚠️ QUAN TRỌNG (chỉ cấp 1 lần trên MacBook M3 Pro):"
-echo "   Mở System Settings -> Privacy & Security -> Accessibility"
-echo "   Nhấn dấu (+) thêm file thực thi Python dưới đây và gạt BẬT:"
-echo "   ${VENV_DIR}/bin/python"
+echo "⚠️ BẮT BUỘC TRÊN MACOS (nếu gõ chưa ra chữ):"
+echo "   Trên Apple Silicon, .venv/bin/python chỉ là symlink nên macOS kiểm tra quyền trên Python.app gốc!"
+echo "   1) Hộp thoại cấp quyền Accessibility vừa tự bật trên màn hình Mac -> bấm 'Open System Settings' và gạt BẬT 'Python'."
+echo "   2) Nếu không thấy 'Python' trong danh sách Accessibility, kéo thả file dưới đây (vừa mở sẵn trong Finder) vào ô Accessibility:"
+echo "      ${PYTHON_APP_BUNDLE}"
+echo "   3) Sau khi gạt BẬT xong, chạy lệnh sau để nhận quyền ngay:"
+echo "      launchctl kickstart -k gui/$(id -u)/${PLIST_LABEL}"
 echo "=================================================================="
+
+IS_TRUSTED="$("${VENV_DIR}/bin/python" -c 'import ctypes, ctypes.util; s=ctypes.cdll.LoadLibrary(ctypes.util.find_library("ApplicationServices")); s.AXIsProcessTrusted.restype=ctypes.c_bool; print(int(bool(s.AXIsProcessTrusted())))' 2>/dev/null || echo 1)"
+if [[ "${IS_TRUSTED}" == "0" ]]; then
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" >/dev/null 2>&1 || true
+  if [[ -e "${PYTHON_APP_BUNDLE}" ]]; then
+    open -R "${PYTHON_APP_BUNDLE}" >/dev/null 2>&1 || true
+  fi
+fi

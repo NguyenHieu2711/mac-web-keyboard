@@ -175,8 +175,9 @@ class KeyboardInjector:
                 import Quartz  # type: ignore
 
                 self._quartz = Quartz
+                # kCGEventSourceStatePrivate (-1): chuẩn của Hammerspoon/Espanso khi chạy ngầm qua launchd
                 self._event_source = Quartz.CGEventSourceCreate(
-                    Quartz.kCGEventSourceStateHIDSystemState
+                    Quartz.kCGEventSourceStatePrivate
                 )
                 self._use_quartz = True
                 logger.info(
@@ -243,7 +244,15 @@ class KeyboardInjector:
         q = self._quartz
         ev = q.CGEventCreateKeyboardEvent(self._event_source, vk, is_down)
         flags = self._compute_quartz_flags(extra_mods)
-        q.CGEventSetFlags(ev, flags)
+        existing = q.CGEventGetFlags(ev)
+        mod_mask = (
+            q.kCGEventFlagMaskCommand
+            | q.kCGEventFlagMaskShift
+            | q.kCGEventFlagMaskAlternate
+            | q.kCGEventFlagMaskControl
+            | q.kCGEventFlagMaskAlphaShift
+        )
+        q.CGEventSetFlags(ev, (existing & ~mod_mask) | flags)
         q.CGEventPost(q.kCGHIDEventTap, ev)
 
     # -------------------- Pynput Cross-Platform Fallback --------------------
@@ -452,7 +461,13 @@ async def health() -> dict:
 async def keyboard_ws(ws: WebSocket) -> None:
     await ws.accept()
     client_host = ws.client.host if ws.client else "unknown"
-    logger.info("Đã kết nối điện thoại từ: %s", client_host)
+    trusted = check_macos_accessibility(prompt=True)
+    logger.info(
+        "Đã kết nối điện thoại từ: %s (Accessibility=%s)", client_host, trusted
+    )
+    warned_untrusted = not trusted
+    if IS_MACOS and not trusted:
+        await ws.send_text('{"type":"error","reason":"accessibility_denied"}')
     try:
         while True:
             raw_msg = await ws.receive_text()
@@ -462,6 +477,14 @@ async def keyboard_ws(ws: WebSocket) -> None:
                 continue
 
             msg_type = data.get("type")
+            if warned_untrusted and msg_type in ("press", "down", "combo") and IS_MACOS:
+                if check_macos_accessibility(prompt=False):
+                    warned_untrusted = False
+                else:
+                    await ws.send_text(
+                        '{"type":"error","reason":"accessibility_denied"}'
+                    )
+
             if msg_type == "press":
                 key = str(data.get("key", ""))
                 injector.press_key(key)
@@ -489,28 +512,55 @@ async def keyboard_ws(ws: WebSocket) -> None:
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-def check_macos_accessibility() -> None:
+def check_macos_accessibility(prompt: bool = True) -> bool:
     if not IS_MACOS:
-        return
+        return True
     try:
         import ctypes
         import ctypes.util
 
         app_services_path = ctypes.util.find_library("ApplicationServices")
+        cf_path = ctypes.util.find_library("CoreFoundation")
         if not app_services_path:
-            return
+            return True
         app_services = ctypes.cdll.LoadLibrary(app_services_path)
-        app_services.AXIsProcessTrusted.restype = ctypes.c_bool
-        trusted = bool(app_services.AXIsProcessTrusted())
-        if not trusted:
-            logger.warning(
-                "⚠️ CHƯA CẤP QUYỀN ACCESSIBILITY CHO TERMINAL / PYTHON! "
-                "Vào System Settings -> Privacy & Security -> Accessibility -> Bật Terminal / iTerm / VS Code."
+
+        if prompt and cf_path:
+            cf = ctypes.cdll.LoadLibrary(cf_path)
+            prompt_key = ctypes.c_void_p.in_dll(
+                app_services, "kAXTrustedCheckOptionPrompt"
             )
+            k_true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
+            cf.CFDictionaryCreate.restype = ctypes.c_void_p
+            cf.CFDictionaryCreate.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.c_long,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            keys = (ctypes.c_void_p * 1)(prompt_key)
+            vals = (ctypes.c_void_p * 1)(k_true)
+            opts = cf.CFDictionaryCreate(None, keys, vals, 1, None, None)
+            app_services.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+            app_svc_fn = app_services.AXIsProcessTrustedWithOptions
+            app_svc_fn.argtypes = [ctypes.c_void_p]
+            trusted = bool(app_svc_fn(opts))
         else:
-            logger.info("✅ Quyền Accessibility macOS đã được cấp đầy đủ.")
+            app_services.AXIsProcessTrusted.restype = ctypes.c_bool
+            trusted = bool(app_services.AXIsProcessTrusted())
+
+        if not trusted:
+            real_exe = Path(sys.executable).resolve()
+            logger.warning(
+                "⚠️ CHƯA CẤP QUYỀN ACCESSIBILITY CHO PYTHON (%s)! "
+                "Vào System Settings -> Privacy & Security -> Accessibility -> Bật Python.",
+                real_exe,
+            )
+        return trusted
     except Exception:
-        pass
+        return True
 
 
 def detect_network_ips() -> List[str]:
