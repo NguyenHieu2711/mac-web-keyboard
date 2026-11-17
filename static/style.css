@@ -158,6 +158,14 @@ body[data-layout="pad"] .kb-shell {
   opacity: 1;
 }
 
+.apple-ico {
+  display: inline-block;
+  width: 0.88em;
+  height: 0.88em;
+  vertical-align: -0.08em;
+  margin-right: 2px;
+}
+
 /* ============================================================================
    CHẾ ĐỘ MAC DỌC (TRACKPAD Ở TRÊN + BÀN PHÍM KIỂU 5 CẢI TIẾN Ở DƯỚI)
    ============================================================================ */
