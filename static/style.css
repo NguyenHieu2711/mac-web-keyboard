@@ -255,7 +255,7 @@ body[data-layout="pad"] .kb-shell {
 .ss-kb {
   width: 100%;
   background: #1c1c21;
-  padding: 7px 4px 8px 4px;
+  padding: 7px 4px calc(20px + env(safe-area-inset-bottom)) 4px;
   display: flex;
   flex-direction: column;
   gap: 6px;
