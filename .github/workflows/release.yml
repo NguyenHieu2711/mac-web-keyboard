@@ -56,7 +56,7 @@ jobs:
         with:
           gradle-version: "8.7"
 
-      - name: Giải mã Keystore cố định từ GitHub Secrets
+      - name: Chuẩn bị Keystore cố định (ưu tiên GitHub Secrets, tự động fallback Keystore dự án)
         id: keystore
         shell: bash
         env:
@@ -65,21 +65,29 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          if [[ -z "${KEYSTORE_BASE64}" || -z "${KEYSTORE_PASSWORD}" || -z "${KEY_ALIAS}" || -z "${KEY_PASSWORD}" ]]; then
-            echo "::error::Thiếu GitHub Secrets ký APK! Hãy thêm đủ 4 Secrets: KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD trong Settings -> Secrets and variables -> Actions để cài đè bản cập nhật không lỗi chữ ký."
-            exit 1
+          if [[ -n "${KEYSTORE_BASE64}" && -n "${KEYSTORE_PASSWORD}" && -n "${KEY_ALIAS}" && -n "${KEY_PASSWORD}" ]]; then
+            echo "Sử dụng Keystore từ GitHub Secrets."
+            echo "${KEYSTORE_BASE64}" | tr -d ' \n\r\t' | base64 --decode > "${RUNNER_TEMP}/release-keystore.jks"
+            echo "keystore_path=${RUNNER_TEMP}/release-keystore.jks" >> "$GITHUB_OUTPUT"
+            echo "keystore_password=${KEYSTORE_PASSWORD}" >> "$GITHUB_OUTPUT"
+            echo "key_alias=${KEY_ALIAS}" >> "$GITHUB_OUTPUT"
+            echo "key_password=${KEY_PASSWORD}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Sử dụng Keystore cố định đi kèm dự án (sideload-release.jks) để ký APK đồng nhất qua các phiên bản."
+            echo "keystore_path=${GITHUB_WORKSPACE}/android/keystore/sideload-release.jks" >> "$GITHUB_OUTPUT"
+            echo "keystore_password=mackeyboard2026" >> "$GITHUB_OUTPUT"
+            echo "key_alias=mackeyboard" >> "$GITHUB_OUTPUT"
+            echo "key_password=mackeyboard2026" >> "$GITHUB_OUTPUT"
           fi
-          echo "${KEYSTORE_BASE64}" | tr -d ' \n\r\t' | base64 --decode > "${RUNNER_TEMP}/release-keystore.jks"
-          echo "keystore_path=${RUNNER_TEMP}/release-keystore.jks" >> "$GITHUB_OUTPUT"
 
       - name: Build & Ký số app-release.apk
         working-directory: android
         shell: bash
         env:
           KEYSTORE_PATH: ${{ steps.keystore.outputs.keystore_path }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PASSWORD: ${{ steps.keystore.outputs.keystore_password }}
+          KEY_ALIAS: ${{ steps.keystore.outputs.key_alias }}
+          KEY_PASSWORD: ${{ steps.keystore.outputs.key_password }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           gradle assembleRelease \

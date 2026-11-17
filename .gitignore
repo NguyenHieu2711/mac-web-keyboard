@@ -16,6 +16,7 @@ android/local.properties
 *.apk
 *.aab
 *.jks
+!android/keystore/sideload-release.jks
 *.keystore
 
 # OS / IDE
