@@ -845,6 +845,72 @@
     e.preventDefault();
   });
 
+  // ============================================================================
+  // 7. KIỂM TRA BẮT BUỘC CẬP NHẬT NGAY KHI BẤM MỞ APP (MANDATORY UPDATE GATE)
+  // ============================================================================
+  const CURRENT_APP_VERSION = "1.1.0";
+  const updateModal = document.getElementById("mandatory-update-modal");
+  const updateTitle = document.getElementById("update-title");
+  const updateDesc = document.getElementById("update-desc");
+  const btnDoUpdate = document.getElementById("btn-do-update");
+
+  function isNewerVer(remoteTag, currentVer) {
+    const cleanR = String(remoteTag || "").trim().replace(/^[vV]/, "").split("-")[0];
+    const cleanC = String(currentVer || "").trim().replace(/^[vV]/, "").split("-")[0];
+    if (!cleanR || cleanR === cleanC) return false;
+    const rParts = cleanR.split(".").map((n) => parseInt(n, 10) || 0);
+    const cParts = cleanC.split(".").map((n) => parseInt(n, 10) || 0);
+    const len = Math.max(rParts.length, cParts.length);
+    for (let i = 0; i < len; i += 1) {
+      const rv = rParts[i] || 0;
+      const cv = cParts[i] || 0;
+      if (rv > cv) return true;
+      if (rv < cv) return false;
+    }
+    return false;
+  }
+
+  async function checkMandatoryUpdateGate() {
+    if (!hasAndroidBridge) return;
+    try {
+      const resp = await fetch(
+        `https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json?t=${Date.now()}`,
+        { cache: "no-store" }
+      );
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const tag = String(data.tag_name || "").trim();
+      const apkUrl = String(data.apk_url || "").trim();
+      if (tag && isNewerVer(tag, CURRENT_APP_VERSION) && updateModal) {
+        if (updateTitle) {
+          updateTitle.textContent = `Có bản cập nhật mới (${tag})`;
+        }
+        if (updateDesc) {
+          updateDesc.textContent = `Phiên bản ${tag} đã sẵn sàng (bản hiện tại: v${CURRENT_APP_VERSION}). Bạn bắt buộc phải cập nhật ngay để tiếp tục sử dụng ứng dụng.`;
+        }
+        updateModal.classList.remove("is-hidden");
+        if (btnDoUpdate) {
+          btnDoUpdate.onclick = () => {
+            btnDoUpdate.textContent = "Đang tải bản cập nhật...";
+            btnDoUpdate.disabled = true;
+            if (apkUrl) {
+              window.location.href = apkUrl;
+            }
+          };
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      void checkMandatoryUpdateGate();
+    }
+  });
+
   syncModifierVisuals();
   connectWebSocket();
+  void checkMandatoryUpdateGate();
 })();
