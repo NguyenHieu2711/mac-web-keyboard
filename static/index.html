@@ -10,16 +10,16 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <title>Mac &amp; PC Wired Keyboard + Trackpad</title>
+  <title>Mac &amp; PC Keyboard + Trackpad</title>
   <link rel="manifest" href="./manifest.json" />
   <link rel="stylesheet" href="./style.css" />
 </head>
-<body data-layout="win" data-rot="ccw">
+<body data-layout="win">
   <!-- =========================================================================
-       CHẾ ĐỘ 1 & 2 (XOAY NGANG): BÀN PHÍM DÂY WINDOWS (WIN) & BÀN PHÍM MAC (MAC)
+       CHẾ ĐỘ XOAY NGANG: BÀN PHÍM DÂY WINDOWS (WIN) & BÀN PHÍM MAC (MAC)
        ========================================================================= -->
   <main id="kb-shell" class="kb-shell">
-    <!-- HÀNG 1: Hàng phím chức năng F1-F12 (WIN) / Macro (MAC) + Chuyển đổi WIN/MAC/DỌC & VN/EN -->
+    <!-- HÀNG 1: F1-F12 (WIN) / Macro (MAC) + Nút mở Pop-up chọn chế độ & VN/EN -->
     <div class="kb-row kb-row-fn">
       <button type="button" class="key key-fn" data-action="press" data-key="esc" data-flex="1.0">
         <span class="key-main">Esc</span>
@@ -62,10 +62,10 @@
         <span class="key-sub">Xóa dòng</span><span class="key-main">⌘⌫</span>
       </button>
 
-      <!-- Nút chuyển đổi 3 chế độ: 🖥 WIN ->  MAC -> 📱 DỌC -->
-      <button type="button" class="key key-toggle key-layout-toggle" data-action="toggle-layout" data-flex="1.55">
-        <span class="key-sub">Chế độ</span>
-        <span class="key-main js-layout-label">🖥 WIN</span>
+      <!-- Nút mở Pop-up chọn chế độ bàn phím -->
+      <button type="button" class="key key-toggle key-layout-toggle" data-action="open-layout-popup" data-flex="1.55">
+        <span class="key-sub">Giao diện ▾</span>
+        <span class="key-main js-layout-label">🖥 Win</span>
       </button>
 
       <!-- Nút bật/tắt gõ dấu Tiếng Việt Telex chuẩn PC -->
@@ -298,184 +298,216 @@
   </main>
 
   <!-- =========================================================================
-       CHẾ ĐỘ 3 (CẦM DỌC - PORTRAIT): TRACKPAD CHUỘT Ở TRÊN + BÀN PHÍM Ở DƯỚI
+       CHẾ ĐỘ MAC DỌC: TRACKPAD Ở TRÊN + BÀN PHÍM SAMSUNG S24+ Ở DƯỚI
        ========================================================================= -->
-  <section id="pad-shell" class="pad-shell">
-    <!-- Thanh điều khiển trên cùng của chế độ Dọc -->
-    <div class="pad-topbar">
-      <button type="button" class="key key-fn" data-action="press" data-key="esc" data-flex="1">
-        <span class="key-main">Esc</span>
-      </button>
-      <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,z" data-flex="1.15">
-        <span class="key-main">⌘Z</span>
-      </button>
-      <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,c" data-flex="1.15">
-        <span class="key-main">⌘C</span>
-      </button>
-      <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,v" data-flex="1.15">
-        <span class="key-main">⌘V</span>
-      </button>
-      <button type="button" class="key key-toggle key-rot-toggle" data-action="flip-rot" data-flex="0.95" title="Đổi chiều xoay dọc">
-        <span class="key-main">↻</span>
-      </button>
-      <button type="button" class="key key-toggle key-layout-toggle" data-action="toggle-layout" data-flex="1.65">
-        <span class="key-sub">Chế độ</span>
-        <span class="key-main js-layout-label">📱 DỌC</span>
-      </button>
-      <button type="button" class="key key-toggle key-vn-toggle js-vn-btn is-active" data-action="toggle-vn" data-flex="1.35">
-        <span class="key-sub">Bộ gõ</span>
-        <span class="key-main js-vn-label">🇻🇳 VN</span>
-      </button>
-      <button type="button" class="key key-util" data-action="util" data-flex="0.95">
-        <span class="key-main js-util-icon">⛶</span>
-        <span class="ws-dot js-ws-dot is-offline"></span>
-      </button>
-    </div>
-
-    <!-- VÙNG TRACKPAD CHUỘT ĐA ĐIỂM NỬA TRÊN -->
-    <div id="trackpad-surface" class="trackpad-surface">
-      <div class="trackpad-hint">
-        <div class="trackpad-title">MAGIC TRACKPAD</div>
-        <div class="trackpad-sub">1 ngón: Di chuột / Chạm Click • 2 ngón: Cuộn trang / Chạm Chuột phải</div>
-      </div>
-    </div>
-
-    <!-- Thanh nút Chuột Trái / Cuộn / Chuột Phải ngay dưới Trackpad -->
-    <div class="pad-mouse-bar">
-      <button type="button" class="key key-mouse-btn" data-action="mouse-left" data-flex="3.2">
-        <span class="key-main">Chuột Trái (Giữ kéo)</span>
-      </button>
-      <button type="button" class="key key-mouse-btn" data-action="scroll-up" data-repeat="true" data-flex="1.1">
-        <span class="key-main">▲ Cuộn</span>
-      </button>
-      <button type="button" class="key key-mouse-btn" data-action="scroll-down" data-repeat="true" data-flex="1.1">
-        <span class="key-main">▼ Cuộn</span>
-      </button>
-      <button type="button" class="key key-mouse-btn" data-action="mouse-right" data-flex="2.4">
-        <span class="key-main">Chuột Phải</span>
-      </button>
-    </div>
-
-    <!-- NỬA DƯỚI: BÀN PHÍM GÕ CHỮ KIỂU MAC + ĐẦY ĐỦ CTRL / ALT / SHIFT / CMD -->
-    <div class="pad-kb-area">
-      <!-- Hàng 1: Số 1-0 + Dấu trừ/bằng -->
-      <div class="kb-row">
-        <button type="button" class="key" data-action="press" data-key="1" data-shift="!" data-flex="1"><span class="key-shift">!</span><span class="key-main">1</span></button>
-        <button type="button" class="key" data-action="press" data-key="2" data-shift="@" data-flex="1"><span class="key-shift">@</span><span class="key-main">2</span></button>
-        <button type="button" class="key" data-action="press" data-key="3" data-shift="#" data-flex="1"><span class="key-shift">#</span><span class="key-main">3</span></button>
-        <button type="button" class="key" data-action="press" data-key="4" data-shift="$" data-flex="1"><span class="key-shift">$</span><span class="key-main">4</span></button>
-        <button type="button" class="key" data-action="press" data-key="5" data-shift="%" data-flex="1"><span class="key-shift">%</span><span class="key-main">5</span></button>
-        <button type="button" class="key" data-action="press" data-key="6" data-shift="^" data-flex="1"><span class="key-shift">^</span><span class="key-main">6</span></button>
-        <button type="button" class="key" data-action="press" data-key="7" data-shift="&amp;" data-flex="1"><span class="key-shift">&amp;</span><span class="key-main">7</span></button>
-        <button type="button" class="key" data-action="press" data-key="8" data-shift="*" data-flex="1"><span class="key-shift">*</span><span class="key-main">8</span></button>
-        <button type="button" class="key" data-action="press" data-key="9" data-shift="(" data-flex="1"><span class="key-shift">(</span><span class="key-main">9</span></button>
-        <button type="button" class="key" data-action="press" data-key="0" data-shift=")" data-flex="1"><span class="key-shift">)</span><span class="key-main">0</span></button>
-        <button type="button" class="key" data-action="press" data-key="-" data-shift="_" data-flex="0.95"><span class="key-shift">_</span><span class="key-main">-</span></button>
-        <button type="button" class="key" data-action="press" data-key="=" data-shift="+" data-flex="0.95"><span class="key-shift">+</span><span class="key-main">=</span></button>
-      </div>
-
-      <!-- Hàng 2: QWERTYUIOP + [ ] -->
-      <div class="kb-row">
-        <button type="button" class="key key-alpha" data-action="press" data-key="q" data-flex="1"><span class="key-main">Q</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="w" data-flex="1"><span class="key-main">W</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="e" data-flex="1"><span class="key-main">E</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="r" data-flex="1"><span class="key-main">R</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="t" data-flex="1"><span class="key-main">T</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="y" data-flex="1"><span class="key-main">Y</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="u" data-flex="1"><span class="key-main">U</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="i" data-flex="1"><span class="key-main">I</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="o" data-flex="1"><span class="key-main">O</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="p" data-flex="1"><span class="key-main">P</span></button>
-        <button type="button" class="key" data-action="press" data-key="[" data-shift="{" data-flex="0.95"><span class="key-shift">{</span><span class="key-main">[</span></button>
-        <button type="button" class="key" data-action="press" data-key="]" data-shift="}" data-flex="0.95"><span class="key-shift">}</span><span class="key-main">]</span></button>
-      </div>
-
-      <!-- Hàng 3: Caps + ASDFGHJKL + ; ' -->
-      <div class="kb-row">
-        <button type="button" class="key key-special key-caps" data-action="caps" data-key="capslock" data-flex="1.2">
-          <span class="caps-led"></span>
-          <span class="key-main">Caps</span>
+  <section id="pad-shell" class="pad-shell" data-sym="0">
+    <!-- NỬA TRÊN: MAGIC TRACKPAD + THANH ĐIỀU KHIỂN GỌN -->
+    <div class="pad-top-section">
+      <div class="pad-topbar">
+        <button type="button" class="key key-toggle key-layout-toggle" data-action="open-layout-popup" data-flex="1.8">
+          <span class="key-sub">Giao diện ▾</span>
+          <span class="key-main js-layout-label">📱 Mac dọc</span>
         </button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="a" data-flex="1"><span class="key-main">A</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="s" data-flex="1"><span class="key-main">S</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="d" data-flex="1"><span class="key-main">D</span></button>
-        <button type="button" class="key key-alpha key-home-bump" data-action="press" data-key="f" data-flex="1"><span class="key-main">F</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="g" data-flex="1"><span class="key-main">G</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="h" data-flex="1"><span class="key-main">H</span></button>
-        <button type="button" class="key key-alpha key-home-bump" data-action="press" data-key="j" data-flex="1"><span class="key-main">J</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="k" data-flex="1"><span class="key-main">K</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="l" data-flex="1"><span class="key-main">L</span></button>
-        <button type="button" class="key" data-action="press" data-key=";" data-shift=":" data-flex="0.9"><span class="key-shift">:</span><span class="key-main">;</span></button>
-        <button type="button" class="key" data-action="press" data-key="'" data-shift="&quot;" data-flex="0.9"><span class="key-shift">&quot;</span><span class="key-main">'</span></button>
+        <button type="button" class="key key-toggle key-vn-toggle js-vn-btn is-active" data-action="toggle-vn" data-flex="1.2">
+          <span class="key-sub">Bộ gõ</span>
+          <span class="key-main js-vn-label">🇻🇳 VN</span>
+        </button>
+        <button type="button" class="key key-util" data-action="util" data-flex="0.9">
+          <span class="key-main js-util-icon">⛶</span>
+          <span class="ws-dot js-ws-dot is-offline"></span>
+        </button>
       </div>
 
-      <!-- Hàng 4: Shift trái + ZXCVBNM , . / + Backspace lớn -->
-      <div class="kb-row">
-        <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="shift" data-flex="1.45">
+      <div id="trackpad-surface" class="trackpad-surface">
+        <div class="trackpad-hint">
+          <div class="trackpad-title">TRACKPAD</div>
+          <div class="trackpad-sub">1 ngón: Di chuột / Chạm Click • 2 ngón: Cuộn / Chuột phải</div>
+        </div>
+      </div>
+
+      <div class="pad-mouse-bar">
+        <button type="button" class="key key-mouse-btn" data-action="mouse-left" data-flex="1">
+          <span class="key-main">Chuột Trái</span>
+        </button>
+        <button type="button" class="key key-mouse-btn" data-action="mouse-right" data-flex="1">
+          <span class="key-main">Chuột Phải</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- NỬA DƯỚI: BÀN PHÍM SAMSUNG ONE UI (Y HỆT S24+) + THÊM TAB, CTRL, ALT, SHIFT -->
+    <div class="ss-kb">
+      <!-- Hàng phím bổ trợ mỏng phía trên (Tab, Ctrl, Alt, Cmd, Esc) -->
+      <div class="ss-row ss-row-mods">
+        <button type="button" class="key ss-key ss-key-fn" data-action="press" data-key="esc"><span class="key-main">Esc</span></button>
+        <button type="button" class="key ss-key ss-key-fn" data-action="press" data-key="tab"><span class="key-main">Tab</span></button>
+        <button type="button" class="key ss-key ss-key-fn key-mod" data-action="modifier" data-mod="ctrl">
+          <span class="mod-dot"></span><span class="key-main">Ctrl</span>
+        </button>
+        <button type="button" class="key ss-key ss-key-fn key-mod" data-action="modifier" data-mod="alt">
+          <span class="mod-dot"></span><span class="key-main">Alt</span>
+        </button>
+        <button type="button" class="key ss-key ss-key-fn key-mod" data-action="modifier" data-mod="cmd">
+          <span class="mod-dot"></span><span class="key-main">⌘ Cmd</span>
+        </button>
+        <button type="button" class="key ss-key ss-key-fn" data-action="press" data-key="left" data-repeat="true"><span class="key-main">←</span></button>
+        <button type="button" class="key ss-key ss-key-fn" data-action="press" data-key="down" data-repeat="true"><span class="key-main">↓</span></button>
+        <button type="button" class="key ss-key ss-key-fn" data-action="press" data-key="up" data-repeat="true"><span class="key-main">↑</span></button>
+        <button type="button" class="key ss-key ss-key-fn" data-action="press" data-key="right" data-repeat="true"><span class="key-main">→</span></button>
+      </div>
+
+      <!-- Hàng 1 Samsung: Dãy số 1 2 3 4 5 6 7 8 9 0 -->
+      <div class="ss-row ss-row-num">
+        <button type="button" class="key ss-key" data-action="press" data-key="1"><span class="key-main">1</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="2"><span class="key-main">2</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="3"><span class="key-main">3</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="4"><span class="key-main">4</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="5"><span class="key-main">5</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="6"><span class="key-main">6</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="7"><span class="key-main">7</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="8"><span class="key-main">8</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="9"><span class="key-main">9</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="0"><span class="key-main">0</span></button>
+      </div>
+
+      <!-- Hàng 2 Samsung (Chữ): Q W E R T Y U I O P -->
+      <div class="ss-row ss-layer-alpha">
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="q"><span class="key-main">Q</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="w"><span class="key-main">W</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="e"><span class="key-main">E</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="r"><span class="key-main">R</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="t"><span class="key-main">T</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="y"><span class="key-main">Y</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="u"><span class="key-main">U</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="i"><span class="key-main">I</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="o"><span class="key-main">O</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="p"><span class="key-main">P</span></button>
+      </div>
+
+      <!-- Hàng 3 Samsung (Chữ - 9 phím thụt lề 2 bên chuẩn Samsung): A S D F G H J K L -->
+      <div class="ss-row ss-row-asdf ss-layer-alpha">
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="a"><span class="key-main">A</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="s"><span class="key-main">S</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="d"><span class="key-main">D</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="f"><span class="key-main">F</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="g"><span class="key-main">G</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="h"><span class="key-main">H</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="j"><span class="key-main">J</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="k"><span class="key-main">K</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="l"><span class="key-main">L</span></button>
+      </div>
+
+      <!-- Hàng 4 Samsung (Chữ): ⇧ Shift + Z X C V B N M + ⌫ Backspace -->
+      <div class="ss-row ss-layer-alpha">
+        <button type="button" class="key ss-key ss-key-fn ss-key-wide key-mod" data-action="modifier" data-mod="shift">
           <span class="mod-dot"></span>
-          <span class="key-main">⇧ Shift</span>
+          <span class="key-main">⇧</span>
         </button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="z" data-flex="1"><span class="key-main">Z</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="x" data-flex="1"><span class="key-main">X</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="c" data-flex="1"><span class="key-main">C</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="v" data-flex="1"><span class="key-main">V</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="b" data-flex="1"><span class="key-main">B</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="n" data-flex="1"><span class="key-main">N</span></button>
-        <button type="button" class="key key-alpha" data-action="press" data-key="m" data-flex="1"><span class="key-main">M</span></button>
-        <button type="button" class="key" data-action="press" data-key="," data-shift="&lt;" data-flex="0.9"><span class="key-shift">&lt;</span><span class="key-main">,</span></button>
-        <button type="button" class="key" data-action="press" data-key="." data-shift="&gt;" data-flex="0.9"><span class="key-shift">&gt;</span><span class="key-main">.</span></button>
-        <button type="button" class="key" data-action="press" data-key="/" data-shift="?" data-flex="0.9"><span class="key-shift">?</span><span class="key-main">/</span></button>
-        <button type="button" class="key key-special key-backspace" data-action="press" data-key="backspace" data-repeat="true" data-flex="1.65">
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="z"><span class="key-main">Z</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="x"><span class="key-main">X</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="c"><span class="key-main">C</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="v"><span class="key-main">V</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="b"><span class="key-main">B</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="n"><span class="key-main">N</span></button>
+        <button type="button" class="key ss-key key-alpha" data-action="press" data-key="m"><span class="key-main">M</span></button>
+        <button type="button" class="key ss-key ss-key-fn ss-key-wide" data-action="press" data-key="backspace" data-repeat="true">
           <span class="key-main">⌫</span>
         </button>
       </div>
 
-      <!-- Hàng 5 (DƯỚI CÙNG): Tab + Ctrl + Alt + Cmd + Shift + Space + Mũi tên + Enter -->
-      <div class="kb-row kb-row-bottom">
-        <button type="button" class="key key-special" data-action="press" data-key="tab" data-flex="1.05">
-          <span class="key-main">Tab</span>
+      <!-- LỚP KÝ TỰ SAMSUNG (!#1) KHI BẤM NÚT !#1 -->
+      <div class="ss-row ss-layer-sym">
+        <button type="button" class="key ss-key" data-action="press" data-key="+"><span class="key-main">+</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="="><span class="key-main">=</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="/"><span class="key-main">/</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="_"><span class="key-main">_</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="&lt;"><span class="key-main">&lt;</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="&gt;"><span class="key-main">&gt;</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="["><span class="key-main">[</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="]"><span class="key-main">]</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="{"><span class="key-main">{</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="}"><span class="key-main">}</span></button>
+      </div>
+      <div class="ss-row ss-layer-sym">
+        <button type="button" class="key ss-key" data-action="press" data-key="!"><span class="key-main">!</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="@"><span class="key-main">@</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="#"><span class="key-main">#</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="$"><span class="key-main">$</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="%"><span class="key-main">%</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="^"><span class="key-main">^</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="&amp;"><span class="key-main">&amp;</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="*"><span class="key-main">*</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="("><span class="key-main">(</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key=")"><span class="key-main">)</span></button>
+      </div>
+      <div class="ss-row ss-layer-sym">
+        <button type="button" class="key ss-key" data-action="press" data-key="-"><span class="key-main">-</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="'"><span class="key-main">'</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="&quot;"><span class="key-main">&quot;</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key=":"><span class="key-main">:</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key=";"><span class="key-main">;</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="?"><span class="key-main">?</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="~"><span class="key-main">~</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="`"><span class="key-main">`</span></button>
+        <button type="button" class="key ss-key" data-action="press" data-key="\"><span class="key-main">\</span></button>
+        <button type="button" class="key ss-key ss-key-fn ss-key-wide" data-action="press" data-key="backspace" data-repeat="true">
+          <span class="key-main">⌫</span>
         </button>
-        <button type="button" class="key key-special key-mod key-win-ctrl" data-action="modifier" data-mod="ctrl" data-flex="1.2">
-          <span class="mod-dot"></span>
-          <span class="key-main">Ctrl</span>
-        </button>
-        <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="alt" data-flex="1.15">
-          <span class="mod-dot"></span>
-          <span class="key-main">Alt</span>
-        </button>
-        <button type="button" class="key key-special key-mod key-cmd" data-action="modifier" data-mod="cmd" data-flex="1.2">
-          <span class="mod-dot"></span>
-          <span class="key-main">⌘ Cmd</span>
-        </button>
-        <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="shift" data-flex="1.2">
-          <span class="mod-dot"></span>
-          <span class="key-main">⇧ Shift</span>
-        </button>
+      </div>
 
-        <button type="button" class="key key-space" data-action="press" data-key="space" data-repeat="true" data-flex="3.1">
-          <span class="space-bar-label">SPACE</span>
-          <span class="space-bar-mark"></span>
+      <!-- Hàng 5 Samsung (Hàng đáy): !#1 | , | Space | . | ⏎ Enter -->
+      <div class="ss-row ss-row-bottom">
+        <button type="button" id="btn-ss-sym" class="key ss-key ss-key-fn ss-key-sym" data-action="toggle-sym">
+          <span id="ss-sym-label" class="key-main">!#1</span>
         </button>
-
-        <button type="button" class="key key-arrow" data-action="press" data-key="left" data-repeat="true" data-flex="0.8">
-          <span class="key-main">←</span>
+        <button type="button" class="key ss-key" data-action="press" data-key=",">
+          <span class="key-main">,</span>
         </button>
-        <button type="button" class="key key-arrow" data-action="press" data-key="up" data-repeat="true" data-flex="0.8">
-          <span class="key-main">↑</span>
+        <button type="button" class="key ss-key ss-key-space" data-action="press" data-key="space" data-repeat="true">
+          <span class="key-main">Tiếng Việt</span>
         </button>
-        <button type="button" class="key key-arrow" data-action="press" data-key="down" data-repeat="true" data-flex="0.8">
-          <span class="key-main">↓</span>
+        <button type="button" class="key ss-key" data-action="press" data-key=".">
+          <span class="key-main">.</span>
         </button>
-        <button type="button" class="key key-arrow" data-action="press" data-key="right" data-repeat="true" data-flex="0.8">
-          <span class="key-main">→</span>
-        </button>
-
-        <button type="button" class="key key-special key-enter" data-action="press" data-key="enter" data-flex="1.5">
+        <button type="button" class="key ss-key ss-key-enter" data-action="press" data-key="enter">
           <span class="key-main">⏎</span>
         </button>
       </div>
     </div>
   </section>
+
+  <!-- =========================================================================
+       POP-UP MENU SỔ RA CHỌN GIỮA MAC DỌC / WIN / MAC NGANG
+       ========================================================================= -->
+  <div id="layout-popup-backdrop" class="popup-backdrop is-hidden">
+    <div class="popup-sheet">
+      <div class="popup-header">Chọn chế độ bàn phím</div>
+      <button type="button" class="popup-option" data-select-layout="pad">
+        <span class="popup-opt-icon">📱</span>
+        <span class="popup-opt-text">
+          <strong>Mac Dọc (Trackpad + Bàn phím Samsung)</strong>
+          <small>Cầm dọc: Trackpad chuột ở trên, phím Samsung + Shift/Tab/Ctrl/Alt ở dưới</small>
+        </span>
+        <span class="popup-opt-check" data-check-for="pad">✓</span>
+      </button>
+      <button type="button" class="popup-option" data-select-layout="win">
+        <span class="popup-opt-icon">🖥</span>
+        <span class="popup-opt-text">
+          <strong>Bàn phím dây Windows (Xoay ngang)</strong>
+          <small>Chuẩn ANSI 15u, dãy F1–F12, phím Ctrl góc trái chuẩn PC</small>
+        </span>
+        <span class="popup-opt-check" data-check-for="win">✓</span>
+      </button>
+      <button type="button" class="popup-option" data-select-layout="mac">
+        <span class="popup-opt-icon"></span>
+        <span class="popup-opt-text">
+          <strong>Bàn phím Mac (Xoay ngang)</strong>
+          <small>Chuẩn Magic Keyboard với fn, Control, Option, Command</small>
+        </span>
+        <span class="popup-opt-check" data-check-for="mac">✓</span>
+      </button>
+    </div>
+  </div>
 
   <!-- HỘP THOẠI BẮT BUỘC CẬP NHẬT KHI MỞ APP -->
   <div id="mandatory-update-modal" class="update-modal is-hidden">

@@ -42,7 +42,7 @@ body {
   touch-action: none;
 }
 
-/* Ẩn/hiện giữa 2 chế độ ngang (WIN / MAC) và chế độ cầm dọc (PAD) */
+/* Ẩn/hiện giữa 2 chế độ ngang (WIN / MAC) và chế độ Mac dọc (PAD) */
 body[data-layout="win"] .layout-mac-only {
   display: none !important;
 }
@@ -73,51 +73,40 @@ body[data-layout="pad"] .kb-shell {
 }
 
 /* ============================================================================
-   CHẾ ĐỘ CẦM DỌC (PORTRAIT TRACKPAD + KEYBOARD)
+   CHẾ ĐỘ MAC DỌC (TRACKPAD Ở TRÊN + BÀN PHÍM SAMSUNG ONE UI Ở DƯỚI)
    ============================================================================ */
 .pad-shell {
   width: 100%;
   height: 100dvh;
-  display: grid;
-  grid-template-rows: 40px 1fr 38px 1.15fr;
-  gap: 5px;
-  padding: 6px;
-  background: var(--bg-canvas);
+  display: flex;
+  flex-direction: column;
+  background: #121215;
+  padding-top: max(6px, env(safe-area-inset-top));
+  padding-bottom: max(6px, env(safe-area-inset-bottom));
 }
 
-/* Nếu mở trong APK đang khóa ngang (landscape), tự xoay dọc 90° để cầm dọc tự nhiên */
-@media (orientation: landscape) {
-  body[data-layout="pad"] .pad-shell {
-    position: fixed;
-    top: 50%;
-    left: 50%;
-    width: 100dvh;
-    height: 100dvw;
-    transform: translate(-50%, -50%) rotate(-90deg);
-    transform-origin: center center;
-  }
-
-  body[data-layout="pad"][data-rot="cw"] .pad-shell {
-    transform: translate(-50%, -50%) rotate(90deg);
-  }
+.pad-top-section {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 8px 6px 8px;
 }
 
-.pad-topbar,
-.pad-mouse-bar {
+.pad-topbar {
+  height: 40px;
   display: flex;
   align-items: stretch;
-  gap: 4px;
-  min-height: 0;
+  gap: 6px;
 }
 
 .trackpad-surface {
-  position: relative;
-  width: 100%;
-  height: 100%;
+  flex: 1 1 0;
   min-height: 0;
-  border-radius: 12px;
-  background: radial-gradient(circle at 50% 35%, #162032 0%, #0d131f 100%);
-  border: 1.5px solid #28364e;
+  border-radius: 14px;
+  background: radial-gradient(circle at 50% 35%, #1d2432 0%, #121620 100%);
+  border: 1.5px solid #2b3548;
   box-shadow: inset 0 0 24px rgba(0, 0, 0, 0.55);
   display: flex;
   align-items: center;
@@ -139,51 +128,245 @@ body[data-layout="pad"] .kb-shell {
 }
 
 .trackpad-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
-  letter-spacing: 2.5px;
-  color: #94a3b8;
+  letter-spacing: 3px;
+  color: #cbd5e1;
   margin-bottom: 4px;
 }
 
 .trackpad-sub {
-  font-size: 10.5px;
-  color: #64748b;
+  font-size: 11px;
+  color: #94a3b8;
   line-height: 1.35;
 }
 
+.pad-mouse-bar {
+  height: 36px;
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
 .key-mouse-btn {
-  background: #131d2e;
-  border-color: #2b3c56;
+  background: #1d222c;
+  border-color: #2e3748;
 }
 
 .key-mouse-btn .key-main {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
   color: #cbd5e1;
 }
 
-.pad-kb-area {
+/* BÀN PHÍM SAMSUNG ONE UI DARK THEME Ở NỬA DƯỚI */
+.ss-kb {
+  height: 48dvh;
+  min-height: 290px;
+  max-height: 390px;
+  background: #19191d;
+  padding: 6px 4px 6px 4px;
   display: grid;
-  grid-template-rows: 0.88fr 1fr 1fr 1fr 1.08fr;
-  gap: 4px;
+  grid-template-rows: 0.78fr 0.86fr 1fr 1fr 1fr 1.05fr;
+  gap: 6px;
+  border-top: 1px solid #28282f;
+}
+
+.pad-shell[data-sym="0"] .ss-layer-sym {
+  display: none !important;
+}
+
+.pad-shell[data-sym="1"] .ss-layer-alpha {
+  display: none !important;
+}
+
+.ss-row {
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
   min-height: 0;
 }
 
-.pad-shell .kb-row {
-  gap: 3.5px;
+/* Thụt lề hàng A S D F G H J K L đúng tỷ lệ bàn phím Samsung S24+ */
+.ss-row-asdf {
+  padding: 0 4.8%;
 }
 
-.pad-shell .key-main {
-  font-size: clamp(12px, 2.2vh, 15px);
+.ss-key {
+  flex: 1 1 0;
+  background: #2d2d34;
+  border: none;
+  border-bottom: 1.5px solid #121216;
+  border-radius: 7px;
+  color: #f4f4f6;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
 }
 
-.pad-shell .key-special .key-main,
-.pad-shell .key-fn .key-main,
-.pad-shell .key-arrow .key-main {
-  font-size: clamp(10.5px, 1.9vh, 12.5px);
+.ss-key .key-main {
+  font-size: clamp(17px, 2.5vh, 21px);
+  font-weight: 400;
+  color: #f4f4f6;
 }
 
+.ss-row-num .ss-key .key-main {
+  font-size: clamp(15px, 2.1vh, 18px);
+  color: #e4e4e9;
+}
+
+.ss-key-fn {
+  background: #212127;
+}
+
+.ss-key-fn .key-main {
+  font-size: clamp(12.5px, 1.8vh, 14.5px);
+  font-weight: 500;
+  color: #d4d4dc;
+}
+
+.ss-row-mods {
+  gap: 4px;
+}
+
+.ss-row-mods .ss-key-fn {
+  background: #222530;
+  border: 1px solid #303646;
+}
+
+.ss-key-wide {
+  flex: 1.48 1 0;
+}
+
+.ss-key-sym {
+  flex: 1.35 1 0;
+}
+
+.ss-key-space {
+  flex: 4.5 1 0;
+  background: #2d2d34;
+}
+
+.ss-key-space .key-main {
+  font-size: 13px;
+  color: #9ca3af;
+  font-weight: 400;
+}
+
+.ss-key-enter {
+  flex: 1.45 1 0;
+  background: #387aff;
+}
+
+.ss-key-enter .key-main {
+  font-size: 18px;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.ss-key.is-pressed {
+  background: #484854 !important;
+  transform: scale(0.97);
+}
+
+/* ============================================================================
+   POP-UP MENU SỔ RA CHỌN CHẾ ĐỘ BÀN PHÍM (MAC DỌC / WIN / MAC NGANG)
+   ============================================================================ */
+.popup-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  background: rgba(5, 8, 14, 0.72);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.popup-backdrop.is-hidden {
+  display: none !important;
+}
+
+.popup-sheet {
+  width: min(400px, 92vw);
+  background: #161d2a;
+  border: 1px solid #2e3d56;
+  border-radius: 16px;
+  padding: 14px;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.75);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.popup-header {
+  font-size: 13px;
+  font-weight: 700;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  padding: 4px 6px 6px 6px;
+  border-bottom: 1px solid #232f44;
+}
+
+.popup-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 12px;
+  background: #1d2638;
+  border: 1.5px solid #2a3750;
+  border-radius: 11px;
+  color: #f1f5f9;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.popup-option.is-selected {
+  background: #172b46;
+  border-color: #38bdf8;
+}
+
+.popup-opt-icon {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.popup-opt-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.popup-opt-text strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.popup-opt-text small {
+  font-size: 11.5px;
+  color: #94a3b8;
+  line-height: 1.3;
+}
+
+.popup-opt-check {
+  font-size: 16px;
+  font-weight: 700;
+  color: #38bdf8;
+  opacity: 0;
+}
+
+.popup-option.is-selected .popup-opt-check {
+  opacity: 1;
+}
+
+/* ============================================================================
+   CHẾ ĐỘ BÀN PHÍM NGANG (WIN / MAC ANSI 15u)
+   ============================================================================ */
 .kb-row {
   display: flex;
   align-items: stretch;
@@ -191,8 +374,9 @@ body[data-layout="pad"] .kb-shell {
   min-height: 0;
 }
 
-/* Công thức hình học keycap chuẩn ANSI 15u */
-.key {
+.kb-shell .key,
+.pad-topbar .key,
+.pad-mouse-bar .key {
   --u: 1;
   position: relative;
   flex: var(--u) 0 calc((var(--u) - 1) * var(--gap));
@@ -211,6 +395,19 @@ body[data-layout="pad"] .kb-shell {
   cursor: pointer;
   outline: none;
   transition: background-color 40ms ease, border-color 40ms ease, transform 30ms ease;
+}
+
+.key {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
 }
 
 .key-main {
@@ -336,8 +533,8 @@ body.is-lowercase .key-alpha .key-main {
 }
 
 .key-mod.is-held {
-  background: #172b42;
-  border-color: var(--accent-cyan);
+  background: #172b42 !important;
+  border-color: var(--accent-cyan) !important;
 }
 
 .key-mod.is-held .mod-dot {
@@ -346,8 +543,8 @@ body.is-lowercase .key-alpha .key-main {
 }
 
 .key-mod.is-sticky {
-  background: #281b12;
-  border-color: var(--accent-amber);
+  background: #281b12 !important;
+  border-color: var(--accent-amber) !important;
 }
 
 .key-mod.is-sticky .mod-dot {

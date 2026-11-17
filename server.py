@@ -13,6 +13,7 @@ import logging
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -1317,8 +1318,119 @@ def detect_network_ips() -> List[str]:
     return ips
 
 
+def start_notification_auto_dismisser(max_seconds: float = 4.0) -> None:
+    """
+    Tự động đóng mọi thông báo hệ thống cứng đầu (Pin yếu, Cài đặt hệ thống, Background Items...)
+    nếu chúng treo ở góc màn hình quá `max_seconds` giây.
+    """
+    if not IS_MACOS:
+        return
+
+    def _worker() -> None:
+        try:
+            import ctypes
+            import ctypes.util
+            import AppKit  # type: ignore
+            import Foundation  # type: ignore
+            import objc  # type: ignore
+
+            app_services = ctypes.cdll.LoadLibrary(
+                ctypes.util.find_library("ApplicationServices")
+            )
+            app_services.AXUIElementCreateApplication.restype = ctypes.c_void_p
+            app_services.AXUIElementCreateApplication.argtypes = [ctypes.c_int]
+            app_services.AXUIElementCopyAttributeValue.restype = ctypes.c_int
+            app_services.AXUIElementCopyAttributeValue.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            app_services.AXUIElementCopyActionNames.restype = ctypes.c_int
+            app_services.AXUIElementCopyActionNames.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            app_services.AXUIElementPerformAction.restype = ctypes.c_int
+            app_services.AXUIElementPerformAction.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+
+            def ax_attr(elem_ptr: int, attr_name: str):
+                out = ctypes.c_void_p()
+                ns_str = Foundation.NSString.stringWithString_(attr_name)
+                err = app_services.AXUIElementCopyAttributeValue(
+                    elem_ptr, objc.pyobjc_id(ns_str), ctypes.byref(out)
+                )
+                if err == 0 and out.value:
+                    return objc.objc_object(c_void_p=out.value)
+                return None
+
+            def ax_dismiss_recursive(elem_ptr: int, depth: int = 0) -> bool:
+                if depth > 6 or not elem_ptr:
+                    return False
+                acts_out = ctypes.c_void_p()
+                if (
+                    app_services.AXUIElementCopyActionNames(
+                        elem_ptr, ctypes.byref(acts_out)
+                    )
+                    == 0
+                    and acts_out.value
+                ):
+                    acts = objc.objc_object(c_void_p=acts_out.value)
+                    for a in acts:
+                        a_str = str(a)
+                        if any(
+                            k in a_str
+                            for k in ("Close", "Đóng", "Clear", "Xóa", "Cancel")
+                        ):
+                            ns_act = Foundation.NSString.stringWithString_(a_str)
+                            app_services.AXUIElementPerformAction(
+                                elem_ptr, objc.pyobjc_id(ns_act)
+                            )
+                            return True
+                children = ax_attr(elem_ptr, "AXChildren")
+                if children:
+                    for ch in children:
+                        if ax_dismiss_recursive(ch.__c_void_p__(), depth + 1):
+                            return True
+                return False
+
+            visible_since: Optional[float] = None
+            while True:
+                time.sleep(1.2)
+                nc_pid = None
+                for app in AppKit.NSWorkspace.sharedWorkspace().runningApplications():
+                    if app.bundleIdentifier() == "com.apple.notificationcenterui":
+                        nc_pid = int(app.processIdentifier())
+                        break
+                if not nc_pid:
+                    visible_since = None
+                    continue
+
+                ax_app = app_services.AXUIElementCreateApplication(nc_pid)
+                wins = ax_attr(ax_app, "AXWindows")
+                if not wins or len(wins) == 0:
+                    visible_since = None
+                    continue
+
+                now = time.monotonic()
+                if visible_since is None:
+                    visible_since = now
+                elif now - visible_since >= max_seconds:
+                    for w in wins:
+                        ax_dismiss_recursive(w.__c_void_p__(), 0)
+                    visible_since = None
+        except Exception as exc:
+            logger.debug("Notification auto-dismisser stopped: %s", exc)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+
 if __name__ == "__main__":
     check_macos_accessibility()
+    start_notification_auto_dismisser(max_seconds=4.0)
     banner_ips = detect_network_ips()
     print("\n" + "=" * 62)
     print("  ⌨️  MAC WEB VIRTUAL KEYBOARD SERVER ĐANG CHẠY (PORT 5050)")

@@ -6,6 +6,10 @@
   const layoutLabels = Array.from(document.querySelectorAll(".js-layout-label"));
   const vnBtns = Array.from(document.querySelectorAll(".js-vn-btn"));
   const vnLabels = Array.from(document.querySelectorAll(".js-vn-label"));
+  const padShell = document.getElementById("pad-shell");
+  const ssSymLabel = document.getElementById("ss-sym-label");
+  const popupBackdrop = document.getElementById("layout-popup-backdrop");
+  const popupOptions = Array.from(document.querySelectorAll(".popup-option[data-select-layout]"));
   const allKeys = Array.from(document.querySelectorAll(".key"));
   const hasAndroidBridge =
     typeof window.AndroidBridge !== "undefined" && window.AndroidBridge !== null;
@@ -17,41 +21,37 @@
   }
 
   for (const btn of allKeys) {
-    const flexVal = parseFloat(btn.dataset.flex || "1");
-    btn.style.setProperty("--u", String(flexVal));
+    if (btn.dataset.flex) {
+      const flexVal = parseFloat(btn.dataset.flex || "1");
+      btn.style.setProperty("--u", String(flexVal));
+    }
   }
 
   // ============================================================================
-  // 1. TRẠNG THÁI 3 CHẾ ĐỘ (WIN NGANG / MAC NGANG / PAD DỌC) & BỘ GÕ (VN / EN)
+  // 1. QUẢN LÝ 3 CHẾ ĐỘ QUA POP-UP SỔ RA (MAC DỌC / WIN / MAC NGANG) & VN/EN
   // ============================================================================
   const STORAGE_HOST_KEY = "mac_kb_server_host";
   const STORAGE_LAYOUT_KEY = "mac_kb_layout_mode";
   const STORAGE_VN_KEY = "mac_kb_vn_mode";
-  const STORAGE_ROT_KEY = "mac_kb_pad_rot";
 
-  const LAYOUT_ORDER = ["win", "mac", "pad"];
   const LAYOUT_LABELS = {
-    win: "🖥 WIN",
-    mac: " MAC",
-    pad: "📱 DỌC",
+    pad: "📱 Mac dọc",
+    win: "🖥 Win",
+    mac: " Mac",
   };
 
-  let kbLayout = "win";
+  let kbLayout = "pad"; // Mặc định: Mac dọc (hoặc lấy từ localStorage)
   let vnEnabled = true;
-  let padRot = "ccw"; // "ccw" (-90deg) hoặc "cw" (+90deg) khi xoay dọc trong khung ngang
+  let symLayer = false;
 
   try {
     const savedLayout = localStorage.getItem(STORAGE_LAYOUT_KEY);
-    if (LAYOUT_ORDER.includes(savedLayout)) {
+    if (savedLayout === "win" || savedLayout === "mac" || savedLayout === "pad") {
       kbLayout = savedLayout;
     }
     const savedVn = localStorage.getItem(STORAGE_VN_KEY);
     if (savedVn === "0" || savedVn === "false") {
       vnEnabled = false;
-    }
-    const savedRot = localStorage.getItem(STORAGE_ROT_KEY);
-    if (savedRot === "ccw" || savedRot === "cw") {
-      padRot = savedRot;
     }
   } catch {
     // ignore
@@ -73,8 +73,7 @@
 
   function syncModeUI() {
     document.body.dataset.layout = kbLayout;
-    document.body.dataset.rot = padRot;
-    const lbl = LAYOUT_LABELS[kbLayout] || "🖥 WIN";
+    const lbl = LAYOUT_LABELS[kbLayout] || "🖥 Win";
     layoutLabels.forEach((el) => {
       el.textContent = lbl;
     });
@@ -84,6 +83,15 @@
     vnLabels.forEach((el) => {
       el.textContent = vnEnabled ? "🇻🇳 VN" : "🇬🇧 EN";
     });
+    popupOptions.forEach((opt) => {
+      opt.classList.toggle("is-selected", opt.dataset.selectLayout === kbLayout);
+    });
+    if (padShell) {
+      padShell.dataset.sym = symLayer ? "1" : "0";
+    }
+    if (ssSymLabel) {
+      ssSymLabel.textContent = symLayer ? "ABC" : "!#1";
+    }
     applyOrientationForLayout();
   }
 
@@ -95,27 +103,64 @@
     });
   }
 
-  function toggleKeyboardLayout() {
+  function openLayoutPopup() {
     releaseAllActiveTouches();
-    const idx = LAYOUT_ORDER.indexOf(kbLayout);
-    kbLayout = LAYOUT_ORDER[(idx + 1) % LAYOUT_ORDER.length];
+    syncModeUI();
+    if (popupBackdrop) {
+      popupBackdrop.classList.remove("is-hidden");
+    }
+  }
+
+  function closeLayoutPopup() {
+    if (popupBackdrop) {
+      popupBackdrop.classList.add("is-hidden");
+    }
+  }
+
+  function selectKeyboardLayout(newLayout) {
+    if (!LAYOUT_LABELS[newLayout]) return;
+    releaseAllActiveTouches();
+    kbLayout = newLayout;
+    symLayer = false;
     try {
       localStorage.setItem(STORAGE_LAYOUT_KEY, kbLayout);
     } catch {
       // ignore
     }
+    closeLayoutPopup();
     syncModeUI();
     pushConfigToServer();
   }
 
-  function flipPortraitRotation() {
-    padRot = padRot === "ccw" ? "cw" : "ccw";
-    try {
-      localStorage.setItem(STORAGE_ROT_KEY, padRot);
-    } catch {
-      // ignore
-    }
-    syncModeUI();
+  if (popupBackdrop) {
+    popupBackdrop.addEventListener("click", (e) => {
+      const opt = e.target.closest(".popup-option[data-select-layout]");
+      if (opt) {
+        triggerHaptic(10);
+        selectKeyboardLayout(opt.dataset.selectLayout);
+        return;
+      }
+      if (e.target === popupBackdrop) {
+        closeLayoutPopup();
+      }
+    });
+    popupBackdrop.addEventListener(
+      "touchstart",
+      (e) => {
+        const opt = e.target.closest(".popup-option[data-select-layout]");
+        if (opt) {
+          e.preventDefault();
+          triggerHaptic(10);
+          selectKeyboardLayout(opt.dataset.selectLayout);
+          return;
+        }
+        if (e.target === popupBackdrop) {
+          e.preventDefault();
+          closeLayoutPopup();
+        }
+      },
+      { passive: false }
+    );
   }
 
   function toggleVietnameseMode() {
@@ -127,6 +172,11 @@
     }
     syncModeUI();
     pushConfigToServer();
+  }
+
+  function toggleSymbolLayer() {
+    symLayer = !symLayer;
+    syncModeUI();
   }
 
   syncModeUI();
@@ -304,7 +354,7 @@
   });
 
   // ============================================================================
-  // 3. FULLSCREEN + PHẢN HỒI XÚC GIÁC (HAPTIC)
+  // 3. FULLSCREEN + HAPTIC
   // ============================================================================
   let fullscreenAttempted = false;
 
@@ -354,7 +404,7 @@
   }
 
   // ============================================================================
-  // 4. MODIFIERS & BÀN PHÍM CẢM ỨNG ĐA ĐIỂM
+  // 4. MODIFIERS & BÀN PHÍM ĐA ĐIỂM
   // ============================================================================
   const MOD_NAMES = ["ctrl", "alt", "cmd", "shift"];
   const modState = {
@@ -471,18 +521,18 @@
   function fireKeyButtonAction(btn) {
     const action = btn.dataset.action;
 
-    if (action === "toggle-layout") {
-      toggleKeyboardLayout();
-      return;
-    }
-
-    if (action === "flip-rot") {
-      flipPortraitRotation();
+    if (action === "open-layout-popup" || action === "toggle-layout") {
+      openLayoutPopup();
       return;
     }
 
     if (action === "toggle-vn") {
       toggleVietnameseMode();
+      return;
+    }
+
+    if (action === "toggle-sym") {
+      toggleSymbolLayer();
       return;
     }
 
@@ -620,29 +670,15 @@
   }
 
   // ============================================================================
-  // 5. BỘ XỬ LÝ MAGIC TRACKPAD ĐA ĐIỂM (1 NGÓN DI CHUỘT/CLICK, 2 NGÓN CUỘN/CHUỘT PHẢI)
+  // 5. BỘ XỬ LÝ MAGIC TRACKPAD ĐA ĐIỂM
   // ============================================================================
   const trackpad = document.getElementById("trackpad-surface");
-  const tpTouches = new Map(); // identifier -> { x, y, startX, startY }
+  const tpTouches = new Map();
   let tpGestureStartAt = 0;
   let tpMaxTouches = 0;
   let tpTotalMoved = 0;
   let tpLastTapAt = 0;
   let tpIsTapDragging = false;
-
-  // Chuyển đổi vector (rawDx, rawDy) trên màn hình sang hệ tọa độ dọc thực tế khi cầm điện thoại
-  function mapTrackpadDelta(rawDx, rawDy) {
-    if (kbLayout === "pad" && window.innerWidth > window.innerHeight) {
-      // Màn hình đang bị khóa ngang nhưng giao diện đã xoay dọc 90°
-      if (padRot === "ccw") {
-        // rotate(-90deg)
-        return { dx: -rawDy, dy: rawDx };
-      }
-      // rotate(90deg)
-      return { dx: rawDy, dy: -rawDx };
-    }
-    return { dx: rawDx, dy: rawDy };
-  }
 
   function applyPointerAcceleration(dx, dy) {
     const dist = Math.hypot(dx, dy);
@@ -710,20 +746,17 @@
         }
 
         if (movedCount === 0) return;
-        const avgRawDx = sumDx / movedCount;
-        const avgRawDy = sumDy / movedCount;
-        const { dx, dy } = mapTrackpadDelta(avgRawDx, avgRawDy);
+        const dx = sumDx / movedCount;
+        const dy = sumDy / movedCount;
         tpTotalMoved += Math.hypot(dx, dy);
 
         if (tpTouches.size >= 2) {
-          // Vuốt 2 ngón: Cuộn trang (Scroll)
           sendPayload({
             type: "mouse_scroll",
             dx: -dx * 2.2,
             dy: -dy * 2.2,
           });
         } else {
-          // Rê 1 ngón: Di chuyển con trỏ chuột (hoặc kéo thả)
           const accel = applyPointerAcceleration(dx, dy);
           sendPayload({
             type: "mouse_move",
@@ -750,7 +783,6 @@
           tpIsTapDragging = false;
           sendPayload({ type: "mouse_up", button: "left" });
           if (tpTotalMoved < 6 && duration < 240) {
-            // Chạm đúp nhanh (Double click)
             sendPayload({ type: "mouse_click", button: "left", count: 2 });
             tpLastTapAt = 0;
           }
@@ -778,7 +810,7 @@
   }
 
   // ============================================================================
-  // 6. LẮNG NGHE PHÍM TRÊN CẢ KHUNG NGANG (#kb-shell) & KHUNG DỌC (#pad-shell)
+  // 6. LẮNG NGHE PHÍM TRÊN KHUNG NGANG (#kb-shell) & KHUNG DỌC (#pad-shell)
   // ============================================================================
   function bindShellEvents(container) {
     if (!container) return;
@@ -848,7 +880,7 @@
   // ============================================================================
   // 7. KIỂM TRA BẮT BUỘC CẬP NHẬT NGAY KHI BẤM MỞ APP (MANDATORY UPDATE GATE)
   // ============================================================================
-  const CURRENT_APP_VERSION = "1.1.0";
+  const CURRENT_APP_VERSION = "1.2.0";
   const updateModal = document.getElementById("mandatory-update-modal");
   const updateTitle = document.getElementById("update-title");
   const updateDesc = document.getElementById("update-desc");
