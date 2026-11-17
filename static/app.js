@@ -702,11 +702,11 @@
   }
 
   // ============================================================================
-  // 5. NÚT MŨI TÊN THÔNG MINH 1 NÚT DUY NHẤT (ẤN & GẠT LÊN/XUỐNG/TRÁI/PHẢI)
+  // 5. NÚT MŨI TÊN THÔNG MINH 1 NÚT DUY NHẤT (MỖI LẦN ẤN GẠT CHỈ ĐI ĐÚNG 1 NẤC)
   // ============================================================================
   const joyBtn = document.getElementById("btn-joy-arrow");
   const joyLabel = document.getElementById("joy-arrow-label");
-  let joyState = null; // { id, startX, startY, activeDir, repeatTimer }
+  let joyState = null; // { id, startX, startY, fired }
 
   const DIR_ICONS = {
     up: "▲",
@@ -715,13 +715,6 @@
     right: "▶",
   };
 
-  function stopJoyRepeat() {
-    if (joyState && joyState.repeatTimer) {
-      clearInterval(joyState.repeatTimer);
-      joyState.repeatTimer = null;
-    }
-  }
-
   function fireArrowDirection(dir) {
     markModifiersUsedInChord();
     sendPayload({ type: "press", key: dir });
@@ -729,11 +722,11 @@
   }
 
   function updateJoyDirection(curX, curY) {
-    if (!joyState) return;
+    if (!joyState || joyState.fired) return;
     const dx = curX - joyState.startX;
     const dy = curY - joyState.startY;
     const dist = Math.hypot(dx, dy);
-    if (dist < 8) return;
+    if (dist < 10) return;
 
     let newDir = "";
     if (Math.abs(dx) > Math.abs(dy)) {
@@ -742,23 +735,18 @@
       newDir = dy > 0 ? "down" : "up";
     }
 
-    if (newDir && newDir !== joyState.activeDir) {
-      joyState.activeDir = newDir;
-      stopJoyRepeat();
+    if (newDir) {
+      joyState.fired = true;
       triggerHaptic(10);
       if (joyLabel) {
         joyLabel.textContent = DIR_ICONS[newDir] || "✥";
       }
       fireArrowDirection(newDir);
-      joyState.repeatTimer = setInterval(() => {
-        fireArrowDirection(newDir);
-      }, 65);
     }
   }
 
   function endJoyGesture() {
     if (!joyState) return;
-    stopJoyRepeat();
     joyState = null;
     if (joyBtn) {
       joyBtn.classList.remove("is-active-joy");
@@ -778,13 +766,11 @@
         closeSymbolPopup();
         const t = e.changedTouches[0];
         if (!t) return;
-        stopJoyRepeat();
         joyState = {
           id: t.identifier,
           startX: t.clientX,
           startY: t.clientY,
-          activeDir: "",
-          repeatTimer: null,
+          fired: false,
         };
         joyBtn.classList.add("is-active-joy");
         triggerHaptic(8);
@@ -797,7 +783,7 @@
       (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (!joyState) return;
+        if (!joyState || joyState.fired) return;
         for (let i = 0; i < e.changedTouches.length; i += 1) {
           const t = e.changedTouches[i];
           if (t.identifier === joyState.id) {
@@ -828,19 +814,17 @@
       if (e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
-      stopJoyRepeat();
       joyState = {
         id: "mouse",
         startX: e.clientX,
         startY: e.clientY,
-        activeDir: "",
-        repeatTimer: null,
+        fired: false,
       };
       joyBtn.classList.add("is-active-joy");
     });
 
     window.addEventListener("mousemove", (e) => {
-      if (joyState && joyState.id === "mouse") {
+      if (joyState && joyState.id === "mouse" && !joyState.fired) {
         updateJoyDirection(e.clientX, e.clientY);
       }
     });
@@ -1100,7 +1084,7 @@
   // ============================================================================
   // 8. KIỂM TRA BẮT BUỘC CẬP NHẬT NGAY KHI BẤM MỞ APP (MANDATORY UPDATE GATE)
   // ============================================================================
-  const CURRENT_APP_VERSION = "1.6.0";
+  const CURRENT_APP_VERSION = "1.6.1";
   const updateModal = document.getElementById("mandatory-update-modal");
   const updateTitle = document.getElementById("update-title");
   const updateDesc = document.getElementById("update-desc");
