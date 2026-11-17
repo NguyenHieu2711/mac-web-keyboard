@@ -273,10 +273,10 @@ body[data-layout="pad"] .kb-shell {
   gap: 3px;
 }
 
-/* Hàng 3 (A S D F G H J K L) không có Caps Lock, căn giữa tự nhiên như Samsung */
+/* Hàng 3 (A S D F G H J K L) thẳng tắp sát lề trái và lề phải, không thụt lề để đồng bộ cột dọc */
 .ss-row-asdf {
-  padding: 0 4.5%;
-  gap: 4.5px;
+  padding: 0;
+  gap: 3.5px;
 }
 
 .ss-key {
@@ -435,17 +435,25 @@ body[data-layout="pad"] .kb-shell {
 .sym-popup-row {
   display: flex;
   align-items: stretch;
-  gap: 4px;
+  gap: 3px;
+}
+
+.sym-blank {
+  flex: 1 1 0;
+  height: 38px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .sym-item {
   position: relative;
   flex: 1 1 0;
-  height: 42px;
-  border: 1px solid #2e3b52;
+  height: 38px;
+  border: 1px solid #354660;
   border-bottom-width: 1.5px;
-  border-radius: 6px;
-  background: #252e40;
+  border-radius: 5px;
+  background: #263145;
   color: #f8fafc;
   display: flex;
   flex-direction: column;

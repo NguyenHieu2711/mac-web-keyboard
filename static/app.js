@@ -178,13 +178,6 @@
 
   if (symPopup) {
     const handleSymSelect = (e) => {
-      const closeBtn = e.target.closest("#btn-close-sym-popup");
-      if (closeBtn) {
-        e.preventDefault();
-        e.stopPropagation();
-        closeSymbolPopup();
-        return;
-      }
       const item = e.target.closest(".sym-item[data-sym-key]");
       if (item) {
         e.preventDefault();
@@ -196,6 +189,12 @@
           sendPayload({ type: "press", key: symKey });
           consumeStickyModifiersAfterKey();
         }
+        closeSymbolPopup();
+        return;
+      }
+      if (e.target.closest(".sym-blank")) {
+        e.preventDefault();
+        e.stopPropagation();
         closeSymbolPopup();
       }
     };
@@ -1101,7 +1100,7 @@
   // ============================================================================
   // 8. KIỂM TRA BẮT BUỘC CẬP NHẬT NGAY KHI BẤM MỞ APP (MANDATORY UPDATE GATE)
   // ============================================================================
-  const CURRENT_APP_VERSION = "1.5.0";
+  const CURRENT_APP_VERSION = "1.6.0";
   const updateModal = document.getElementById("mandatory-update-modal");
   const updateTitle = document.getElementById("update-title");
   const updateDesc = document.getElementById("update-desc");
