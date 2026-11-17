@@ -416,6 +416,38 @@ async def index() -> FileResponse:
     )
 
 
+@app.get("/style.css")
+async def style_css() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "style.css",
+        media_type="text/css",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/app.js")
+async def app_js() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "app.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/manifest.json")
+async def manifest_json() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "manifest.json",
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"ok": True, "platform": sys.platform}
+
+
 @app.websocket("/ws")
 async def keyboard_ws(ws: WebSocket) -> None:
     await ws.accept()

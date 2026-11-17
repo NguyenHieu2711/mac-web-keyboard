@@ -2,7 +2,14 @@
   "use strict";
 
   const wsDot = document.getElementById("ws-dot");
+  const utilIcon = document.getElementById("util-icon");
   const allKeys = Array.from(document.querySelectorAll(".key"));
+  const hasAndroidBridge =
+    typeof window.AndroidBridge !== "undefined" && window.AndroidBridge !== null;
+
+  if (hasAndroidBridge && utilIcon) {
+    utilIcon.textContent = "⚙";
+  }
 
   // Áp dụng tỷ lệ độ rộng chuẩn PC/Mac cho từng phím theo data-flex
   for (const btn of allKeys) {
@@ -11,12 +18,61 @@
   }
 
   // ============================================================================
-  // 1. QUẢN LÝ KẾT NỐI WEBSOCKET TỰ ĐỘNG RECONNECT ĐỘ TRỄ 0MS
+  // 1. QUẢN LÝ KẾT NỐI WEBSOCKET TỰ ĐỘNG RECONNECT ĐỘ TRỄ 0MS (LAN / TAILSCALE)
   // ============================================================================
+  const STORAGE_HOST_KEY = "mac_kb_server_host";
   let ws = null;
   let reconnectDelay = 400;
   let reconnectTimer = null;
   let pingInterval = null;
+  let hostCycleIndex = 0;
+
+  function normalizeEndpoint(item) {
+    let clean = String(item || "").trim();
+    if (!clean) return "";
+    clean = clean.replace(/^https?:\/\//i, "").replace(/^wss?:\/\//i, "");
+    clean = clean.replace(/\/.*$/, "");
+    if (!clean) return "";
+    if (!clean.includes(":")) {
+      clean = `${clean}:5050`;
+    }
+    return clean;
+  }
+
+  function resolveCandidateHosts() {
+    let raw = "";
+    if (hasAndroidBridge && typeof window.AndroidBridge.getServerHost === "function") {
+      try {
+        raw = String(window.AndroidBridge.getServerHost() || "").trim();
+      } catch {
+        raw = "";
+      }
+    }
+    if (!raw) {
+      try {
+        raw = String(localStorage.getItem(STORAGE_HOST_KEY) || "").trim();
+      } catch {
+        raw = "";
+      }
+    }
+    if (raw) {
+      const list = raw
+        .split(",")
+        .map(normalizeEndpoint)
+        .filter(Boolean);
+      if (list.length > 0) return list;
+    }
+
+    const host = window.location.host || "";
+    if (
+      host &&
+      host !== "appassets.androidplatform.net" &&
+      window.location.protocol !== "file:"
+    ) {
+      return [host];
+    }
+    return [];
+  }
 
   function setOnlineUI(online) {
     if (!wsDot) return;
@@ -35,8 +91,32 @@
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${proto}//${window.location.host}/ws`;
+
+    const candidates = resolveCandidateHosts();
+    if (candidates.length === 0) {
+      setOnlineUI(false);
+      return;
+    }
+
+    const targetHost = candidates[hostCycleIndex % candidates.length];
+    hostCycleIndex = (hostCycleIndex + 1) % candidates.length;
+
+    const useSecure =
+      window.location.protocol === "https:" &&
+      window.location.host !== "appassets.androidplatform.net";
+    const proto = useSecure ? "wss:" : "ws:";
+    const url = `${proto}//${targetHost}/ws`;
+
+    if (ws) {
+      try {
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.close();
+      } catch {
+        // ignore
+      }
+      ws = null;
+    }
 
     try {
       ws = new WebSocket(url);
@@ -71,6 +151,22 @@
       }
     });
   }
+
+  window.__applyServerHost = (newRawHost) => {
+    const cleaned = String(newRawHost || "").trim();
+    try {
+      if (cleaned) {
+        localStorage.setItem(STORAGE_HOST_KEY, cleaned);
+      } else {
+        localStorage.removeItem(STORAGE_HOST_KEY);
+      }
+    } catch {
+      // ignore
+    }
+    hostCycleIndex = 0;
+    reconnectDelay = 200;
+    connectWebSocket();
+  };
 
   function scheduleReconnect() {
     if (reconnectTimer) return;
@@ -120,12 +216,21 @@
   }
 
   function ensureAutoFullscreenOnce() {
+    if (hasAndroidBridge) return;
     if (fullscreenAttempted) return;
     fullscreenAttempted = true;
     void enterLandscapeFullscreen(false);
   }
 
   function triggerHaptic(ms = 10) {
+    if (hasAndroidBridge && typeof window.AndroidBridge.vibrate === "function") {
+      try {
+        window.AndroidBridge.vibrate(ms);
+        return;
+      } catch {
+        // fallback navigator.vibrate
+      }
+    }
     if (navigator.vibrate) {
       try {
         navigator.vibrate(ms);
@@ -258,8 +363,15 @@
   function fireKeyButtonAction(btn) {
     const action = btn.dataset.action;
 
-    if (action === "fullscreen") {
-      void enterLandscapeFullscreen(true);
+    if (action === "util" || action === "fullscreen") {
+      if (
+        hasAndroidBridge &&
+        typeof window.AndroidBridge.openServerDialog === "function"
+      ) {
+        window.AndroidBridge.openServerDialog();
+      } else {
+        void enterLandscapeFullscreen(true);
+      }
       return;
     }
 

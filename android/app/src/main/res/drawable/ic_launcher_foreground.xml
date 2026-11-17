@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Khung bàn phím viền Cyan tối giản -->
+    <path
+        android:fillColor="#151B26"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="2.4"
+        android:pathData="M24,35h60c3.3,0 6,2.7 6,6v26c0,3.3 -2.7,6 -6,6h-60c-3.3,0 -6,-2.7 -6,-6v-26c0,-3.3 2.7,-6 6,-6z" />
+    <!-- Hàng phím 1 -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M26,42h7v6h-7zM36,42h7v6h-7zM46,42h7v6h-7zM56,42h7v6h-7zM66,42h7v6h-7zM76,42h6v6h-6z" />
+    <!-- Hàng phím 2 -->
+    <path
+        android:fillColor="#94A3B8"
+        android:pathData="M26,51h9v6h-9zM38,51h7v6h-7zM48,51h7v6h-7zM58,51h7v6h-7zM68,51h14v6h-14z" />
+    <!-- Thanh Spacebar -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M35,60h38v6h-38z" />
+</vector>

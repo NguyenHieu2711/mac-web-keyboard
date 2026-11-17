@@ -11,8 +11,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>Mac Web Keyboard</title>
-  <link rel="manifest" href="/static/manifest.json" />
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
   <main id="kb-shell" class="kb-shell">
@@ -47,8 +47,8 @@
         <span class="key-main">Del</span>
       </button>
 
-      <button type="button" id="btn-fullscreen" class="key key-util" data-action="fullscreen" data-flex="0.85">
-        <span class="key-main">⛶</span>
+      <button type="button" id="btn-fullscreen" class="key key-util" data-action="util" data-flex="0.95">
+        <span id="util-icon" class="key-main">⛶</span>
         <span id="ws-dot" class="ws-dot is-offline"></span>
       </button>
     </div>
@@ -213,6 +213,6 @@
     </div>
   </main>
 
-  <script src="/static/app.js"></script>
+  <script src="./app.js"></script>
 </body>
 </html>

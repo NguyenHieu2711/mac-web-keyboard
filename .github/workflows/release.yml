@@ -1,0 +1,111 @@
+name: Build & Release Android APK
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Tag phiên bản cần phát hành (ví dụ: v1.0.1)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  release-apk:
+    name: Build Signed app-release.apk & Create GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout mã nguồn
+        uses: actions/checkout@v4
+
+      - name: Xác định Version Name & Version Code từ Git Tag
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            RAW_TAG="${{ inputs.tag_name }}"
+          else
+            RAW_TAG="${GITHUB_REF_NAME}"
+          fi
+          CLEAN_VER="${RAW_TAG#v}"
+          CLEAN_VER="${CLEAN_VER#V}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${CLEAN_VER%%-*}"
+          MAJOR=${MAJOR:-1}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+          VER_CODE=$(( MAJOR * 10000 + MINOR * 100 + PATCH ))
+
+          echo "tag_name=${RAW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${CLEAN_VER}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VER_CODE}" >> "$GITHUB_OUTPUT"
+          echo "Building tag=${RAW_TAG} -> versionName=${CLEAN_VER}, versionCode=${VER_CODE}"
+
+      - name: Cài đặt JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Cài đặt Gradle 8.7 (có cache tăng tốc)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Giải mã Keystore cố định từ GitHub Secrets
+        id: keystore
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [[ -z "${KEYSTORE_BASE64}" || -z "${KEYSTORE_PASSWORD}" || -z "${KEY_ALIAS}" || -z "${KEY_PASSWORD}" ]]; then
+            echo "::error::Thiếu GitHub Secrets ký APK! Hãy thêm đủ 4 Secrets: KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD trong Settings -> Secrets and variables -> Actions để cài đè bản cập nhật không lỗi chữ ký."
+            exit 1
+          fi
+          echo "${KEYSTORE_BASE64}" | tr -d ' \n\r\t' | base64 --decode > "${RUNNER_TEMP}/release-keystore.jks"
+          echo "keystore_path=${RUNNER_TEMP}/release-keystore.jks" >> "$GITHUB_OUTPUT"
+
+      - name: Build & Ký số app-release.apk
+        working-directory: android
+        shell: bash
+        env:
+          KEYSTORE_PATH: ${{ steps.keystore.outputs.keystore_path }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          gradle assembleRelease \
+            -PversionName="${{ steps.version.outputs.version_name }}" \
+            -PversionCode="${{ steps.version.outputs.version_code }}" \
+            -PgithubRepo="${GITHUB_REPOSITORY}" \
+            --no-daemon
+
+          APK_FOUND=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [[ -z "${APK_FOUND}" ]]; then
+            echo "::error::Không tìm thấy file APK sau khi build!"
+            exit 1
+          fi
+          cp "${APK_FOUND}" "${GITHUB_WORKSPACE}/app-release.apk"
+          ls -lh "${GITHUB_WORKSPACE}/app-release.apk"
+
+      - name: Dọn file Keystore tạm
+        if: always()
+        shell: bash
+        run: rm -f "${RUNNER_TEMP}/release-keystore.jks"
+
+      - name: Tạo GitHub Release & Đính kèm app-release.apk
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          name: "Mac Web Keyboard ${{ steps.version.outputs.tag_name }}"
+          generate_release_notes: true
+          files: |
+            app-release.apk
