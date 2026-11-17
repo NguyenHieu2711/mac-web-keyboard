@@ -16,10 +16,10 @@
 </head>
 <body data-layout="pad">
   <!-- =========================================================================
-       CHẾ ĐỘ XOAY NGANG: BÀN PHÍM DÂY WINDOWS (WIN) & BÀN PHÍM MAC (MAC)
+       CHẾ ĐỘ BÀN PHÍM NGANG CỐ ĐỊNH: BÀN PHÍM DÂY WINDOWS (WIN) & BÀN PHÍM MAC (MAC)
        ========================================================================= -->
   <main id="kb-shell" class="kb-shell">
-    <!-- HÀNG 1: F1-F12 (WIN) / Macro (MAC) + Nút mở Pop-up chọn chế độ & VN/EN -->
+    <!-- HÀNG 1: F1-F12 (WIN) / Macro (MAC) + Dropdown dọc nhỏ chọn chế độ & VN/EN -->
     <div class="kb-row kb-row-fn">
       <button type="button" class="key key-fn" data-action="press" data-key="esc" data-flex="1.0">
         <span class="key-main">Esc</span>
@@ -62,11 +62,23 @@
         <span class="key-sub">Xóa dòng</span><span class="key-main">⌘⌫</span>
       </button>
 
-      <!-- Nút mở Pop-up chọn chế độ bàn phím -->
-      <button type="button" class="key key-toggle key-layout-toggle" data-action="open-layout-popup" data-flex="1.55">
-        <span class="key-sub">Giao diện ▾</span>
-        <span class="key-main js-layout-label">🖥 Win</span>
-      </button>
+      <!-- Nút sổ Pop-up dọc nhỏ chọn chế độ -->
+      <div class="mode-dropdown-anchor" data-flex="1.55">
+        <button type="button" class="key key-toggle key-layout-toggle w-full h-full" data-action="toggle-mode-menu">
+          <span class="key-main"><span class="js-layout-label">🖥 Win</span> ▾</span>
+        </button>
+        <div class="mode-dropdown-menu js-mode-menu is-hidden">
+          <div class="mode-dropdown-item" data-select-layout="pad">
+            <span>📱 Mac dọc</span><span class="mode-check" data-check="pad">✓</span>
+          </div>
+          <div class="mode-dropdown-item" data-select-layout="win">
+            <span>🖥 Win ngang</span><span class="mode-check" data-check="win">✓</span>
+          </div>
+          <div class="mode-dropdown-item" data-select-layout="mac">
+            <span> Mac ngang</span><span class="mode-check" data-check="mac">✓</span>
+          </div>
+        </div>
+      </div>
 
       <!-- Nút bật/tắt gõ dấu Tiếng Việt Telex chuẩn PC -->
       <button type="button" class="key key-toggle key-vn-toggle js-vn-btn is-active" data-action="toggle-vn" data-flex="1.3">
@@ -298,21 +310,39 @@
   </main>
 
   <!-- =========================================================================
-       CHẾ ĐỘ MAC DỌC: TRACKPAD Ở TRÊN + BÀN PHÍM 5 HÀNG Y HỆT HÌNH MẪU Ở DƯỚI
+       CHẾ ĐỘ MAC DỌC (KIỂU 5 CẢI TIẾN):
+       - Không có Caps Lock
+       - Cột trái chuẩn: Esc -> Tab -> Shift -> Ctrl, ⊞ Win, Alt
+       - Space kéo dài rộng rãi
+       - 1 nút Mũi tên thông minh (✥) ấn & gạt 4 hướng Lên/Xuống/Trái/Phải
        ========================================================================= -->
   <section id="pad-shell" class="pad-shell">
-    <!-- NỬA TRÊN: TRACKPAD CHUỘT + THANH CHỌN GIAO DIỆN -->
+    <!-- NỬA TRÊN: TRACKPAD CHUỘT + THANH DROPDOWN NHỎ GỌN -->
     <div class="pad-top-section">
       <div class="pad-topbar">
-        <button type="button" class="key key-toggle key-layout-toggle" data-action="open-layout-popup" data-flex="1.8">
-          <span class="key-sub">Giao diện ▾</span>
-          <span class="key-main js-layout-label">📱 Mac dọc</span>
-        </button>
+        <!-- Nút sổ Pop-up dọc nhỏ ngay dưới nút -->
+        <div class="mode-dropdown-anchor" data-flex="1.75">
+          <button type="button" class="key key-toggle key-layout-toggle w-full h-full" data-action="toggle-mode-menu">
+            <span class="key-main"><span class="js-layout-label">📱 Mac dọc</span> ▾</span>
+          </button>
+          <div class="mode-dropdown-menu js-mode-menu is-hidden">
+            <div class="mode-dropdown-item" data-select-layout="pad">
+              <span>📱 Mac dọc</span><span class="mode-check" data-check="pad">✓</span>
+            </div>
+            <div class="mode-dropdown-item" data-select-layout="win">
+              <span>🖥 Win ngang</span><span class="mode-check" data-check="win">✓</span>
+            </div>
+            <div class="mode-dropdown-item" data-select-layout="mac">
+              <span> Mac ngang</span><span class="mode-check" data-check="mac">✓</span>
+            </div>
+          </div>
+        </div>
+
         <button type="button" class="key key-toggle key-vn-toggle js-vn-btn is-active" data-action="toggle-vn" data-flex="1.2">
           <span class="key-sub">Bộ gõ</span>
           <span class="key-main js-vn-label">🇻🇳 VN</span>
         </button>
-        <button type="button" class="key key-util" data-action="util" data-flex="0.9">
+        <button type="button" class="key key-util" data-action="util" data-flex="0.85">
           <span class="key-main js-util-icon">⛶</span>
           <span class="ws-dot js-ws-dot is-offline"></span>
         </button>
@@ -335,9 +365,9 @@
       </div>
     </div>
 
-    <!-- NỬA DƯỚI: BÀN PHÍM 5 HÀNG Y HỆT HÌNH MẪU (MÉP TRÁI: TAB/SHIFT/CTRL/ALT, MÉP PHẢI: MŨI TÊN) -->
+    <!-- NỬA DƯỚI: BÀN PHÍM KIỂU 5 CẢI TIẾN -->
     <div class="ss-kb-wrap">
-      <!-- POP-UP NỔI CHỌN NHANH KÝ TỰ ĐẶC BIỆT (KHÔNG CHUYỂN TRANG BÀN PHÍM) -->
+      <!-- POP-UP NỔI CHỌN NHANH KÝ TỰ ĐẶC BIỆT (?123) -->
       <div id="sym-floating-popup" class="sym-popup is-hidden">
         <div class="sym-popup-head">
           <span>Chọn nhanh ký tự đặc biệt</span>
@@ -380,8 +410,11 @@
       </div>
 
       <div class="ss-kb">
-        <!-- Hàng 1: Dãy số 1 2 3 4 5 6 7 8 9 0 -->
-        <div class="ss-row ss-row-num">
+        <!-- Hàng 1: [Esc] + 1 2 3 4 5 6 7 8 9 0 -->
+        <div class="ss-row ss-row-num ss-row-tight">
+          <button type="button" class="key ss-key ss-key-left-mod" data-action="press" data-key="esc">
+            <span class="key-main">Esc</span>
+          </button>
           <button type="button" class="key ss-key" data-action="press" data-key="1"><span class="key-main">1</span></button>
           <button type="button" class="key ss-key" data-action="press" data-key="2"><span class="key-main">2</span></button>
           <button type="button" class="key ss-key" data-action="press" data-key="3"><span class="key-main">3</span></button>
@@ -394,8 +427,11 @@
           <button type="button" class="key ss-key" data-action="press" data-key="0"><span class="key-main">0</span></button>
         </div>
 
-        <!-- Hàng 2: Q W E R T Y U I O P -->
-        <div class="ss-row">
+        <!-- Hàng 2: [Tab] + Q W E R T Y U I O P -->
+        <div class="ss-row ss-row-tight">
+          <button type="button" class="key ss-key ss-key-left-mod" data-action="press" data-key="tab">
+            <span class="key-main">Tab</span>
+          </button>
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="q"><span class="key-main">Q</span></button>
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="w"><span class="key-main">W</span></button>
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="e"><span class="key-main">E</span></button>
@@ -408,11 +444,8 @@
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="p"><span class="key-main">P</span></button>
         </div>
 
-        <!-- Hàng 3: Mép trái [Tab] + A S D F G H J K L (sát nhau) + Mép phải [↑] -->
-        <div class="ss-row ss-row-tight">
-          <button type="button" class="key ss-key ss-key-edge" data-action="press" data-key="tab">
-            <span class="key-main">Tab</span>
-          </button>
+        <!-- Hàng 3: Không có Caps Lock — 9 phím A S D F G H J K L căn giữa chuẩn Samsung -->
+        <div class="ss-row ss-row-asdf">
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="a"><span class="key-main">A</span></button>
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="s"><span class="key-main">S</span></button>
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="d"><span class="key-main">D</span></button>
@@ -422,16 +455,13 @@
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="j"><span class="key-main">J</span></button>
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="k"><span class="key-main">K</span></button>
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="l"><span class="key-main">L</span></button>
-          <button type="button" class="key ss-key ss-key-edge" data-action="press" data-key="up" data-repeat="true">
-            <span class="key-main">↑</span>
-          </button>
         </div>
 
-        <!-- Hàng 4: Mép trái [⇧ Shift] + Z X C V B N M + Mép phải [↓] [⌫] -->
-        <div class="ss-row ss-row-tight">
-          <button type="button" class="key ss-key ss-key-fn ss-key-shift key-mod" data-action="modifier" data-mod="shift">
+        <!-- Hàng 4: [⇧ Shift] + Z X C V B N M + [⌫ Backspace] -->
+        <div class="ss-row">
+          <button type="button" class="key ss-key ss-key-shift key-mod" data-action="modifier" data-mod="shift">
             <span class="mod-dot"></span>
-            <span class="key-main">⇧</span>
+            <span class="key-main">⇧ Shift</span>
           </button>
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="z"><span class="key-main">Z</span></button>
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="x"><span class="key-main">X</span></button>
@@ -440,36 +470,38 @@
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="b"><span class="key-main">B</span></button>
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="n"><span class="key-main">N</span></button>
           <button type="button" class="key ss-key key-alpha" data-action="press" data-key="m"><span class="key-main">M</span></button>
-          <button type="button" class="key ss-key ss-key-edge" data-action="press" data-key="down" data-repeat="true">
-            <span class="key-main">↓</span>
-          </button>
-          <button type="button" class="key ss-key ss-key-fn ss-key-back" data-action="press" data-key="backspace" data-repeat="true">
+          <button type="button" class="key ss-key ss-key-back" data-action="press" data-key="backspace" data-repeat="true">
             <span class="key-main">⌫</span>
           </button>
         </div>
 
-        <!-- Hàng 5 (Hàng đáy): Mép trái [Ctrl] [Alt] [?123 Pop-up] + [Space] + Mép phải [←] [→] [⏎] -->
+        <!-- Hàng 5 (Đáy): [Ctrl] [⊞ Win] [Alt] [?123] + [Space kéo dài] + [✥ 1 Nút Mũi tên gạt 4 hướng] + [⏎] -->
         <div class="ss-row ss-row-bottom">
-          <button type="button" class="key ss-key ss-key-fn ss-key-mod-bot key-mod" data-action="modifier" data-mod="ctrl">
+          <button type="button" class="key ss-key ss-key-mod-bot key-mod" data-action="modifier" data-mod="ctrl">
             <span class="mod-dot"></span>
             <span class="key-main">Ctrl</span>
           </button>
-          <button type="button" class="key ss-key ss-key-fn ss-key-mod-bot key-mod" data-action="modifier" data-mod="alt">
+          <button type="button" class="key ss-key ss-key-mod-bot key-mod" data-action="modifier" data-mod="cmd">
+            <span class="mod-dot"></span>
+            <span class="key-main">⊞ Win</span>
+          </button>
+          <button type="button" class="key ss-key ss-key-mod-bot key-mod" data-action="modifier" data-mod="alt">
             <span class="mod-dot"></span>
             <span class="key-main">Alt</span>
           </button>
-          <button type="button" id="btn-ss-sym" class="key ss-key ss-key-fn ss-key-sym" data-action="toggle-sym-popup">
+          <button type="button" id="btn-ss-sym" class="key ss-key ss-key-sym" data-action="toggle-sym-popup">
             <span class="key-main">?123</span>
           </button>
+
           <button type="button" class="key ss-key ss-key-space" data-action="press" data-key="space" data-repeat="true">
-            <span class="key-main">Tiếng Việt</span>
+            <span class="key-main">Space</span>
           </button>
-          <button type="button" class="key ss-key ss-key-edge" data-action="press" data-key="left" data-repeat="true">
-            <span class="key-main">←</span>
+
+          <!-- 1 NÚT MŨI TÊN THÔNG MINH DUY NHẤT (Ấn & gạt Lên/Xuống/Trái/Phải) -->
+          <button type="button" id="btn-joy-arrow" class="key ss-key ss-key-joy" title="Ấn và gạt Lên/Xuống/Trái/Phải">
+            <span id="joy-arrow-label" class="key-main">✥</span>
           </button>
-          <button type="button" class="key ss-key ss-key-edge" data-action="press" data-key="right" data-repeat="true">
-            <span class="key-main">→</span>
-          </button>
+
           <button type="button" class="key ss-key ss-key-enter" data-action="press" data-key="enter">
             <span class="key-main">⏎</span>
           </button>
@@ -477,39 +509,6 @@
       </div>
     </div>
   </section>
-
-  <!-- =========================================================================
-       POP-UP MENU SỔ RA CHỌN GIỮA MAC DỌC / WIN / MAC NGANG
-       ========================================================================= -->
-  <div id="layout-popup-backdrop" class="popup-backdrop is-hidden">
-    <div class="popup-sheet">
-      <div class="popup-header">Chọn chế độ bàn phím</div>
-      <button type="button" class="popup-option" data-select-layout="pad">
-        <span class="popup-opt-icon">📱</span>
-        <span class="popup-opt-text">
-          <strong>Mac Dọc (Trackpad + Bàn phím Samsung)</strong>
-          <small>Cầm dọc: Trackpad ở trên, bàn phím 5 hàng + Tab/Shift/Ctrl/Alt &amp; mũi tên 2 mép</small>
-        </span>
-        <span class="popup-opt-check" data-check-for="pad">✓</span>
-      </button>
-      <button type="button" class="popup-option" data-select-layout="win">
-        <span class="popup-opt-icon">🖥</span>
-        <span class="popup-opt-text">
-          <strong>Bàn phím dây Windows (Xoay ngang)</strong>
-          <small>Chuẩn ANSI 15u, dãy F1–F12, phím Ctrl góc trái chuẩn PC</small>
-        </span>
-        <span class="popup-opt-check" data-check-for="win">✓</span>
-      </button>
-      <button type="button" class="popup-option" data-select-layout="mac">
-        <span class="popup-opt-icon"></span>
-        <span class="popup-opt-text">
-          <strong>Bàn phím Mac (Xoay ngang)</strong>
-          <small>Chuẩn Magic Keyboard với fn, Control, Option, Command</small>
-        </span>
-        <span class="popup-opt-check" data-check-for="mac">✓</span>
-      </button>
-    </div>
-  </div>
 
   <!-- HỘP THOẠI BẮT BUỘC CẬP NHẬT KHI MỞ APP -->
   <div id="mandatory-update-modal" class="update-modal is-hidden">

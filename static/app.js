@@ -6,12 +6,11 @@
   const layoutLabels = Array.from(document.querySelectorAll(".js-layout-label"));
   const vnBtns = Array.from(document.querySelectorAll(".js-vn-btn"));
   const vnLabels = Array.from(document.querySelectorAll(".js-vn-label"));
-  const padShell = document.getElementById("pad-shell");
   const symPopup = document.getElementById("sym-floating-popup");
   const btnCloseSymPopup = document.getElementById("btn-close-sym-popup");
-  const popupBackdrop = document.getElementById("layout-popup-backdrop");
-  const popupOptions = Array.from(document.querySelectorAll(".popup-option[data-select-layout]"));
-  const allKeys = Array.from(document.querySelectorAll(".key"));
+  const modeMenus = Array.from(document.querySelectorAll(".js-mode-menu"));
+  const modeItems = Array.from(document.querySelectorAll(".mode-dropdown-item[data-select-layout]"));
+  const allKeys = Array.from(document.querySelectorAll(".key, .mode-dropdown-anchor"));
   const hasAndroidBridge =
     typeof window.AndroidBridge !== "undefined" && window.AndroidBridge !== null;
 
@@ -29,7 +28,7 @@
   }
 
   // ============================================================================
-  // 1. QUẢN LÝ 3 CHẾ ĐỘ QUA POP-UP SỔ RA (MAC DỌC / WIN / MAC NGANG) & VN/EN
+  // 1. QUẢN LÝ 3 CHẾ ĐỘ QUA DROPDOWN DỌC NHỎ GỌN & CỐ ĐỊNH CHIỀU MÀN HÌNH
   // ============================================================================
   const STORAGE_HOST_KEY = "mac_kb_server_host";
   const STORAGE_LAYOUT_KEY = "mac_kb_layout_mode";
@@ -41,9 +40,10 @@
     mac: " Mac",
   };
 
-  let kbLayout = "pad"; // Mặc định: Mac dọc (hoặc lấy từ localStorage)
+  let kbLayout = "pad";
   let vnEnabled = true;
   let symLayer = false;
+  let modeMenuOpen = false;
 
   try {
     const savedLayout = localStorage.getItem(STORAGE_LAYOUT_KEY);
@@ -74,7 +74,7 @@
 
   function syncModeUI() {
     document.body.dataset.layout = kbLayout;
-    const lbl = LAYOUT_LABELS[kbLayout] || "🖥 Win";
+    const lbl = LAYOUT_LABELS[kbLayout] || "📱 Mac dọc";
     layoutLabels.forEach((el) => {
       el.textContent = lbl;
     });
@@ -84,8 +84,11 @@
     vnLabels.forEach((el) => {
       el.textContent = vnEnabled ? "🇻🇳 VN" : "🇬🇧 EN";
     });
-    popupOptions.forEach((opt) => {
-      opt.classList.toggle("is-selected", opt.dataset.selectLayout === kbLayout);
+    modeItems.forEach((item) => {
+      item.classList.toggle("is-selected", item.dataset.selectLayout === kbLayout);
+    });
+    modeMenus.forEach((menu) => {
+      menu.classList.toggle("is-hidden", !modeMenuOpen);
     });
     if (symPopup) {
       symPopup.classList.toggle("is-hidden", !symLayer);
@@ -101,65 +104,45 @@
     });
   }
 
-  function openLayoutPopup() {
-    releaseAllActiveTouches();
-    syncModeUI();
-    if (popupBackdrop) {
-      popupBackdrop.classList.remove("is-hidden");
+  function toggleModeMenu() {
+    modeMenuOpen = !modeMenuOpen;
+    if (modeMenuOpen) {
+      symLayer = false;
     }
+    syncModeUI();
   }
 
-  function closeLayoutPopup() {
-    if (popupBackdrop) {
-      popupBackdrop.classList.add("is-hidden");
-    }
+  function closeModeMenu() {
+    if (!modeMenuOpen) return;
+    modeMenuOpen = false;
+    syncModeUI();
   }
 
   function selectKeyboardLayout(newLayout) {
     if (!LAYOUT_LABELS[newLayout]) return;
     releaseAllActiveTouches();
     kbLayout = newLayout;
+    modeMenuOpen = false;
     symLayer = false;
     try {
       localStorage.setItem(STORAGE_LAYOUT_KEY, kbLayout);
     } catch {
       // ignore
     }
-    closeLayoutPopup();
     syncModeUI();
     pushConfigToServer();
   }
 
-  if (popupBackdrop) {
-    popupBackdrop.addEventListener("click", (e) => {
-      const opt = e.target.closest(".popup-option[data-select-layout]");
-      if (opt) {
-        triggerHaptic(10);
-        selectKeyboardLayout(opt.dataset.selectLayout);
-        return;
-      }
-      if (e.target === popupBackdrop) {
-        closeLayoutPopup();
-      }
-    });
-    popupBackdrop.addEventListener(
-      "touchstart",
-      (e) => {
-        const opt = e.target.closest(".popup-option[data-select-layout]");
-        if (opt) {
-          e.preventDefault();
-          triggerHaptic(10);
-          selectKeyboardLayout(opt.dataset.selectLayout);
-          return;
-        }
-        if (e.target === popupBackdrop) {
-          e.preventDefault();
-          closeLayoutPopup();
-        }
-      },
-      { passive: false }
-    );
-  }
+  modeItems.forEach((item) => {
+    const handlePick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      triggerHaptic(10);
+      selectKeyboardLayout(item.dataset.selectLayout);
+    };
+    item.addEventListener("touchstart", handlePick, { passive: false });
+    item.addEventListener("mousedown", handlePick);
+  });
 
   function toggleVietnameseMode() {
     vnEnabled = !vnEnabled;
@@ -174,6 +157,9 @@
 
   function toggleSymbolLayer() {
     symLayer = !symLayer;
+    if (symLayer) {
+      modeMenuOpen = false;
+    }
     syncModeUI();
   }
 
@@ -559,21 +545,24 @@
   function fireKeyButtonAction(btn) {
     const action = btn.dataset.action;
 
-    if (action === "open-layout-popup" || action === "toggle-layout") {
-      openLayoutPopup();
+    if (action === "toggle-mode-menu") {
+      toggleModeMenu();
       return;
     }
 
     if (action === "toggle-vn") {
+      closeModeMenu();
       toggleVietnameseMode();
       return;
     }
 
     if (action === "toggle-sym" || action === "toggle-sym-popup") {
+      closeModeMenu();
       toggleSymbolLayer();
       return;
     }
 
+    closeModeMenu();
     if (symLayer) {
       closeSymbolPopup();
     }
@@ -652,11 +641,13 @@
     activePointers.set(pointerId, entry);
 
     if (action === "modifier" && mod) {
+      closeModeMenu();
       handleModifierDown(mod);
       return;
     }
 
     if (action === "mouse-left") {
+      closeModeMenu();
       sendPayload({ type: "mouse_down", button: "left" });
       return;
     }
@@ -712,7 +703,158 @@
   }
 
   // ============================================================================
-  // 5. BỘ XỬ LÝ MAGIC TRACKPAD ĐA ĐIỂM
+  // 5. NÚT MŨI TÊN THÔNG MINH 1 NÚT DUY NHẤT (ẤN & GẠT LÊN/XUỐNG/TRÁI/PHẢI)
+  // ============================================================================
+  const joyBtn = document.getElementById("btn-joy-arrow");
+  const joyLabel = document.getElementById("joy-arrow-label");
+  let joyState = null; // { id, startX, startY, activeDir, repeatTimer }
+
+  const DIR_ICONS = {
+    up: "▲",
+    down: "▼",
+    left: "◀",
+    right: "▶",
+  };
+
+  function stopJoyRepeat() {
+    if (joyState && joyState.repeatTimer) {
+      clearInterval(joyState.repeatTimer);
+      joyState.repeatTimer = null;
+    }
+  }
+
+  function fireArrowDirection(dir) {
+    markModifiersUsedInChord();
+    sendPayload({ type: "press", key: dir });
+    consumeStickyModifiersAfterKey();
+  }
+
+  function updateJoyDirection(curX, curY) {
+    if (!joyState) return;
+    const dx = curX - joyState.startX;
+    const dy = curY - joyState.startY;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 8) return;
+
+    let newDir = "";
+    if (Math.abs(dx) > Math.abs(dy)) {
+      newDir = dx > 0 ? "right" : "left";
+    } else {
+      newDir = dy > 0 ? "down" : "up";
+    }
+
+    if (newDir && newDir !== joyState.activeDir) {
+      joyState.activeDir = newDir;
+      stopJoyRepeat();
+      triggerHaptic(10);
+      if (joyLabel) {
+        joyLabel.textContent = DIR_ICONS[newDir] || "✥";
+      }
+      fireArrowDirection(newDir);
+      joyState.repeatTimer = setInterval(() => {
+        fireArrowDirection(newDir);
+      }, 65);
+    }
+  }
+
+  function endJoyGesture() {
+    if (!joyState) return;
+    stopJoyRepeat();
+    joyState = null;
+    if (joyBtn) {
+      joyBtn.classList.remove("is-active-joy");
+    }
+    if (joyLabel) {
+      joyLabel.textContent = "✥";
+    }
+  }
+
+  if (joyBtn) {
+    joyBtn.addEventListener(
+      "touchstart",
+      (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeModeMenu();
+        closeSymbolPopup();
+        const t = e.changedTouches[0];
+        if (!t) return;
+        stopJoyRepeat();
+        joyState = {
+          id: t.identifier,
+          startX: t.clientX,
+          startY: t.clientY,
+          activeDir: "",
+          repeatTimer: null,
+        };
+        joyBtn.classList.add("is-active-joy");
+        triggerHaptic(8);
+      },
+      { passive: false }
+    );
+
+    joyBtn.addEventListener(
+      "touchmove",
+      (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!joyState) return;
+        for (let i = 0; i < e.changedTouches.length; i += 1) {
+          const t = e.changedTouches[i];
+          if (t.identifier === joyState.id) {
+            updateJoyDirection(t.clientX, t.clientY);
+            break;
+          }
+        }
+      },
+      { passive: false }
+    );
+
+    const onJoyTouchEnd = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!joyState) return;
+      for (let i = 0; i < e.changedTouches.length; i += 1) {
+        if (e.changedTouches[i].identifier === joyState.id) {
+          endJoyGesture();
+          break;
+        }
+      }
+    };
+
+    joyBtn.addEventListener("touchend", onJoyTouchEnd, { passive: false });
+    joyBtn.addEventListener("touchcancel", onJoyTouchEnd, { passive: false });
+
+    joyBtn.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      stopJoyRepeat();
+      joyState = {
+        id: "mouse",
+        startX: e.clientX,
+        startY: e.clientY,
+        activeDir: "",
+        repeatTimer: null,
+      };
+      joyBtn.classList.add("is-active-joy");
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (joyState && joyState.id === "mouse") {
+        updateJoyDirection(e.clientX, e.clientY);
+      }
+    });
+
+    window.addEventListener("mouseup", () => {
+      if (joyState && joyState.id === "mouse") {
+        endJoyGesture();
+      }
+    });
+  }
+
+  // ============================================================================
+  // 6. BỘ XỬ LÝ MAGIC TRACKPAD ĐA ĐIỂM
   // ============================================================================
   const trackpad = document.getElementById("trackpad-surface");
   const tpTouches = new Map();
@@ -737,6 +879,8 @@
       (e) => {
         e.preventDefault();
         e.stopPropagation();
+        closeModeMenu();
+        closeSymbolPopup();
         ensureAutoFullscreenOnce();
 
         const now = performance.now();
@@ -852,7 +996,7 @@
   }
 
   // ============================================================================
-  // 6. LẮNG NGHE PHÍM TRÊN KHUNG NGANG (#kb-shell) & KHUNG DỌC (#pad-shell)
+  // 7. LẮNG NGHE PHÍM TRÊN KHUNG NGANG (#kb-shell) & KHUNG DỌC (#pad-shell)
   // ============================================================================
   function bindShellEvents(container) {
     if (!container) return;
@@ -860,7 +1004,14 @@
     container.addEventListener(
       "touchstart",
       (e) => {
-        if (e.target.closest("#trackpad-surface") || e.target.closest("#sym-floating-popup")) return;
+        if (
+          e.target.closest("#trackpad-surface") ||
+          e.target.closest("#sym-floating-popup") ||
+          e.target.closest(".js-mode-menu") ||
+          e.target.closest("#btn-joy-arrow")
+        ) {
+          return;
+        }
         e.preventDefault();
         for (let i = 0; i < e.changedTouches.length; i += 1) {
           const t = e.changedTouches[i];
@@ -868,6 +1019,9 @@
           const btn = el ? el.closest(".key") : null;
           if (btn) {
             startPointerOnButton(`t_${t.identifier}`, btn);
+          } else {
+            closeModeMenu();
+            closeSymbolPopup();
           }
         }
       },
@@ -877,7 +1031,14 @@
     container.addEventListener(
       "touchend",
       (e) => {
-        if (e.target.closest("#trackpad-surface")) return;
+        if (
+          e.target.closest("#trackpad-surface") ||
+          e.target.closest("#sym-floating-popup") ||
+          e.target.closest(".js-mode-menu") ||
+          e.target.closest("#btn-joy-arrow")
+        ) {
+          return;
+        }
         e.preventDefault();
         for (let i = 0; i < e.changedTouches.length; i += 1) {
           endPointer(`t_${e.changedTouches[i].identifier}`);
@@ -889,7 +1050,14 @@
     container.addEventListener(
       "touchcancel",
       (e) => {
-        if (e.target.closest("#trackpad-surface")) return;
+        if (
+          e.target.closest("#trackpad-surface") ||
+          e.target.closest("#sym-floating-popup") ||
+          e.target.closest(".js-mode-menu") ||
+          e.target.closest("#btn-joy-arrow")
+        ) {
+          return;
+        }
         e.preventDefault();
         for (let i = 0; i < e.changedTouches.length; i += 1) {
           endPointer(`t_${e.changedTouches[i].identifier}`);
@@ -900,9 +1068,20 @@
 
     container.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
-      if (e.target.closest("#trackpad-surface")) return;
+      if (
+        e.target.closest("#trackpad-surface") ||
+        e.target.closest("#sym-floating-popup") ||
+        e.target.closest(".js-mode-menu") ||
+        e.target.closest("#btn-joy-arrow")
+      ) {
+        return;
+      }
       const btn = e.target.closest(".key");
-      if (!btn) return;
+      if (!btn) {
+        closeModeMenu();
+        closeSymbolPopup();
+        return;
+      }
       e.preventDefault();
       startPointerOnButton("mouse", btn);
     });
@@ -920,9 +1099,9 @@
   });
 
   // ============================================================================
-  // 7. KIỂM TRA BẮT BUỘC CẬP NHẬT NGAY KHI BẤM MỞ APP (MANDATORY UPDATE GATE)
+  // 8. KIỂM TRA BẮT BUỘC CẬP NHẬT NGAY KHI BẤM MỞ APP (MANDATORY UPDATE GATE)
   // ============================================================================
-  const CURRENT_APP_VERSION = "1.3.0";
+  const CURRENT_APP_VERSION = "1.4.0";
   const updateModal = document.getElementById("mandatory-update-modal");
   const updateTitle = document.getElementById("update-title");
   const updateDesc = document.getElementById("update-desc");

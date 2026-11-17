@@ -71,8 +71,95 @@ body[data-layout="pad"] .kb-shell {
   padding-right: max(6px, env(safe-area-inset-right));
 }
 
+/* Khi APK khóa cố định chiều dọc (portrait) để không tự xoay khi nghiêng máy,
+   nếu người dùng chủ động chọn Win ngang / Mac ngang thì hiển thị cố định theo chiều ngang */
+@media (orientation: portrait) {
+  body[data-layout="win"] .kb-shell,
+  body[data-layout="mac"] .kb-shell {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    width: 100dvh;
+    height: 100dvw;
+    transform: translate(-50%, -50%) rotate(90deg);
+    transform-origin: center center;
+  }
+}
+
 /* ============================================================================
-   CHẾ ĐỘ MAC DỌC (TRACKPAD Ở TRÊN + BÀN PHÍM 5 HÀNG TỶ LỆ CHUẨN HÌNH MẪU)
+   POP-UP DỌC NHỎ GỌN SỔ NGAY DƯỚI NÚT CHỌN CHẾ ĐỘ
+   ============================================================================ */
+.mode-dropdown-anchor {
+  --u: 1.55;
+  position: relative;
+  flex: var(--u) 0 calc((var(--u) - 1) * var(--gap));
+  min-width: 0;
+  min-height: 0;
+}
+
+.mode-dropdown-anchor > .key {
+  width: 100%;
+  height: 100%;
+}
+
+.mode-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  z-index: 9600;
+  min-width: 138px;
+  background: #172030;
+  border: 1.5px solid #3b82f6;
+  border-radius: 9px;
+  padding: 4px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.75);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.kb-row-fn .mode-dropdown-menu {
+  left: auto;
+  right: 0;
+}
+
+.mode-dropdown-menu.is-hidden {
+  display: none !important;
+}
+
+.mode-dropdown-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #e2e8f0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mode-dropdown-item.is-selected {
+  background: #1e3252;
+  color: #38bdf8;
+  font-weight: 700;
+}
+
+.mode-check {
+  font-size: 12px;
+  font-weight: 700;
+  color: #38bdf8;
+  opacity: 0;
+}
+
+.mode-dropdown-item.is-selected .mode-check {
+  opacity: 1;
+}
+
+/* ============================================================================
+   CHẾ ĐỘ MAC DỌC (TRACKPAD Ở TRÊN + BÀN PHÍM KIỂU 5 CẢI TIẾN Ở DƯỚI)
    ============================================================================ */
 .pad-shell {
   width: 100%;
@@ -158,7 +245,7 @@ body[data-layout="pad"] .kb-shell {
   color: #cbd5e1;
 }
 
-/* KHUNG BÀN PHÍM 5 HÀNG DƯỚI CÙNG (GIỮ ĐÚNG CHIỀU CAO ~242PX NHƯ ẢNH CHỤP, KHÔNG KÉO DÀI PHÍM) */
+/* KHUNG BÀN PHÍM 5 HÀNG DƯỚI CÙNG */
 .ss-kb-wrap {
   position: relative;
   width: 100%;
@@ -170,7 +257,7 @@ body[data-layout="pad"] .kb-shell {
   background: #1c1c21;
   padding: 7px 4px 8px 4px;
   display: grid;
-  grid-template-rows: 38px 43px 43px 43px 44px;
+  grid-template-rows: 38px 43px 43px 43px 45px;
   gap: 6px;
   border-top: 1px solid #2a2a32;
 }
@@ -178,13 +265,18 @@ body[data-layout="pad"] .kb-shell {
 .ss-row {
   display: flex;
   align-items: stretch;
-  gap: 4.5px;
+  gap: 4px;
   min-height: 0;
 }
 
-/* Hàng 3 & 4 kéo sát nhẹ khoảng cách để giữ nguyên độ rộng phím chữ mà vẫn đủ chỗ cho mép trái/phải */
 .ss-row-tight {
   gap: 3px;
+}
+
+/* Hàng 3 (A S D F G H J K L) không có Caps Lock, căn giữa tự nhiên như Samsung */
+.ss-row-asdf {
+  padding: 0 4.5%;
+  gap: 4.5px;
 }
 
 .ss-key {
@@ -208,57 +300,103 @@ body[data-layout="pad"] .kb-shell {
   color: #e4e4e9;
 }
 
-/* Các phím ở 2 mép cạnh (Tab, ↑, ↓, ←, →) */
-.ss-key-edge {
-  flex: 0.92 1 0;
+/* Cột trái chuẩn bàn phím ngoài: Esc, Tab, Shift, Ctrl, Win, Alt */
+.ss-key-left-mod {
+  flex: 1.05 1 0;
+  background: #202431;
+  border: 1px solid #2e374d;
+}
+
+.ss-key-left-mod .key-main {
+  font-size: 12.5px !important;
+  font-weight: 600;
+  color: #93c5fd !important;
+}
+
+.ss-key-shift {
+  flex: 1.45 1 0;
+  background: #202431;
+  border: 1px solid #2e374d;
+}
+
+.ss-key-shift .key-main {
+  font-size: 13px;
+  font-weight: 600;
+  color: #93c5fd;
+}
+
+.ss-key-back {
+  flex: 1.45 1 0;
   background: #22232a;
 }
 
-.ss-key-edge .key-main {
-  font-size: 13px;
+.ss-key-back .key-main {
+  font-size: 18px;
+  color: #e2e8f0;
+}
+
+.ss-key-mod-bot {
+  flex: 0.92 1 0;
+  background: #202431;
+  border: 1px solid #2e374d;
+}
+
+.ss-key-mod-bot .key-main {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #93c5fd;
+}
+
+.ss-key-sym {
+  flex: 0.95 1 0;
+  background: #22232a;
+}
+
+.ss-key-sym .key-main {
+  font-size: 12.5px;
   font-weight: 600;
   color: #cbd5e1;
 }
 
-.ss-key-fn {
-  background: #22232a;
-}
-
-.ss-key-fn .key-main {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: #d4d4dc;
-}
-
-.ss-key-shift {
-  flex: 1.25 1 0;
-}
-
-.ss-key-back {
-  flex: 1.25 1 0;
-}
-
-.ss-key-mod-bot {
-  flex: 1.05 1 0;
-}
-
-.ss-key-sym {
-  flex: 1.15 1 0;
-}
-
+/* Thanh Space kéo dài rộng rãi ở giữa */
 .ss-key-space {
-  flex: 3.4 1 0;
+  flex: 3.9 1 0;
   background: #2f2f37;
 }
 
 .ss-key-space .key-main {
   font-size: 13px;
-  color: #9ca3af;
-  font-weight: 400;
+  color: #cbd5e1;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+
+/* 1 NÚT MŨI TÊN THÔNG MINH DUY NHẤT (ẤN & GẠT 4 HƯỚNG) */
+.ss-key-joy {
+  flex: 1.05 1 0;
+  background: #1b2638;
+  border: 1.5px solid #38bdf8;
+  touch-action: none;
+}
+
+.ss-key-joy .key-main {
+  font-size: 18px;
+  font-weight: 700;
+  color: #38bdf8;
+}
+
+.ss-key-joy.is-active-joy {
+  background: #0284c7 !important;
+  border-color: #bae6fd !important;
+}
+
+.ss-key-joy.is-active-joy .key-main {
+  color: #ffffff !important;
+  transform: scale(1.15);
 }
 
 .ss-key-enter {
-  flex: 1.25 1 0;
+  flex: 1.15 1 0;
   background: #387aff;
 }
 
@@ -335,103 +473,6 @@ body[data-layout="pad"] .kb-shell {
 .sym-item:active {
   background: #38bdf8;
   color: #090c12;
-}
-
-/* ============================================================================
-   POP-UP MENU SỔ RA CHỌN CHẾ ĐỘ BÀN PHÍM (MAC DỌC / WIN / MAC NGANG)
-   ============================================================================ */
-.popup-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 9500;
-  background: rgba(5, 8, 14, 0.72);
-  backdrop-filter: blur(5px);
-  -webkit-backdrop-filter: blur(5px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-}
-
-.popup-backdrop.is-hidden {
-  display: none !important;
-}
-
-.popup-sheet {
-  width: min(400px, 92vw);
-  background: #161d2a;
-  border: 1px solid #2e3d56;
-  border-radius: 16px;
-  padding: 14px;
-  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.75);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.popup-header {
-  font-size: 13px;
-  font-weight: 700;
-  color: #94a3b8;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  padding: 4px 6px 6px 6px;
-  border-bottom: 1px solid #232f44;
-}
-
-.popup-option {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 12px 12px;
-  background: #1d2638;
-  border: 1.5px solid #2a3750;
-  border-radius: 11px;
-  color: #f1f5f9;
-  text-align: left;
-  cursor: pointer;
-  font-family: inherit;
-}
-
-.popup-option.is-selected {
-  background: #172b46;
-  border-color: #38bdf8;
-}
-
-.popup-opt-icon {
-  font-size: 22px;
-  line-height: 1;
-}
-
-.popup-opt-text {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.popup-opt-text strong {
-  font-size: 14px;
-  font-weight: 600;
-  color: #f8fafc;
-}
-
-.popup-opt-text small {
-  font-size: 11.5px;
-  color: #94a3b8;
-  line-height: 1.3;
-}
-
-.popup-opt-check {
-  font-size: 16px;
-  font-weight: 700;
-  color: #38bdf8;
-  opacity: 0;
-}
-
-.popup-option.is-selected .popup-opt-check {
-  opacity: 1;
 }
 
 /* ============================================================================
