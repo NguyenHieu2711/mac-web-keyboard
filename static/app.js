@@ -7,7 +7,8 @@
   const vnBtns = Array.from(document.querySelectorAll(".js-vn-btn"));
   const vnLabels = Array.from(document.querySelectorAll(".js-vn-label"));
   const padShell = document.getElementById("pad-shell");
-  const ssSymLabel = document.getElementById("ss-sym-label");
+  const symPopup = document.getElementById("sym-floating-popup");
+  const btnCloseSymPopup = document.getElementById("btn-close-sym-popup");
   const popupBackdrop = document.getElementById("layout-popup-backdrop");
   const popupOptions = Array.from(document.querySelectorAll(".popup-option[data-select-layout]"));
   const allKeys = Array.from(document.querySelectorAll(".key"));
@@ -86,11 +87,8 @@
     popupOptions.forEach((opt) => {
       opt.classList.toggle("is-selected", opt.dataset.selectLayout === kbLayout);
     });
-    if (padShell) {
-      padShell.dataset.sym = symLayer ? "1" : "0";
-    }
-    if (ssSymLabel) {
-      ssSymLabel.textContent = symLayer ? "ABC" : "!#1";
+    if (symPopup) {
+      symPopup.classList.toggle("is-hidden", !symLayer);
     }
     applyOrientationForLayout();
   }
@@ -177,6 +175,46 @@
   function toggleSymbolLayer() {
     symLayer = !symLayer;
     syncModeUI();
+  }
+
+  function closeSymbolPopup() {
+    if (!symLayer) return;
+    symLayer = false;
+    syncModeUI();
+  }
+
+  if (btnCloseSymPopup) {
+    btnCloseSymPopup.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeSymbolPopup();
+    });
+  }
+
+  if (symPopup) {
+    const handleSymSelect = (e) => {
+      const closeBtn = e.target.closest("#btn-close-sym-popup");
+      if (closeBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        closeSymbolPopup();
+        return;
+      }
+      const item = e.target.closest(".sym-item[data-sym-key]");
+      if (item) {
+        e.preventDefault();
+        e.stopPropagation();
+        triggerHaptic(10);
+        const symKey = item.dataset.symKey || "";
+        if (symKey) {
+          markModifiersUsedInChord();
+          sendPayload({ type: "press", key: symKey });
+          consumeStickyModifiersAfterKey();
+        }
+        closeSymbolPopup();
+      }
+    };
+    symPopup.addEventListener("touchstart", handleSymSelect, { passive: false });
+    symPopup.addEventListener("mousedown", handleSymSelect);
   }
 
   syncModeUI();
@@ -531,9 +569,13 @@
       return;
     }
 
-    if (action === "toggle-sym") {
+    if (action === "toggle-sym" || action === "toggle-sym-popup") {
       toggleSymbolLayer();
       return;
+    }
+
+    if (symLayer) {
+      closeSymbolPopup();
     }
 
     if (action === "util" || action === "fullscreen") {
@@ -818,7 +860,7 @@
     container.addEventListener(
       "touchstart",
       (e) => {
-        if (e.target.closest("#trackpad-surface")) return;
+        if (e.target.closest("#trackpad-surface") || e.target.closest("#sym-floating-popup")) return;
         e.preventDefault();
         for (let i = 0; i < e.changedTouches.length; i += 1) {
           const t = e.changedTouches[i];
@@ -880,7 +922,7 @@
   // ============================================================================
   // 7. KIỂM TRA BẮT BUỘC CẬP NHẬT NGAY KHI BẤM MỞ APP (MANDATORY UPDATE GATE)
   // ============================================================================
-  const CURRENT_APP_VERSION = "1.2.0";
+  const CURRENT_APP_VERSION = "1.3.0";
   const updateModal = document.getElementById("mandatory-update-modal");
   const updateTitle = document.getElementById("update-title");
   const updateDesc = document.getElementById("update-desc");
