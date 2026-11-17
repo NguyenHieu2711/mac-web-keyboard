@@ -43,6 +43,7 @@
   let kbLayout = "pad";
   let vnEnabled = true;
   let symLayer = false;
+  let symShifted = false;
   let modeMenuOpen = false;
 
   try {
@@ -92,6 +93,7 @@
     });
     if (symPopup) {
       symPopup.classList.toggle("is-hidden", !symLayer);
+      symPopup.classList.toggle("is-sym-shifted", symShifted);
     }
     applyOrientationForLayout();
   }
@@ -108,6 +110,7 @@
     modeMenuOpen = !modeMenuOpen;
     if (modeMenuOpen) {
       symLayer = false;
+      symShifted = false;
     }
     syncModeUI();
   }
@@ -124,6 +127,7 @@
     kbLayout = newLayout;
     modeMenuOpen = false;
     symLayer = false;
+    symShifted = false;
     try {
       localStorage.setItem(STORAGE_LAYOUT_KEY, kbLayout);
     } catch {
@@ -159,6 +163,7 @@
     symLayer = !symLayer;
     if (symLayer) {
       modeMenuOpen = false;
+      symShifted = false;
     }
     syncModeUI();
   }
@@ -166,6 +171,7 @@
   function closeSymbolPopup() {
     if (!symLayer) return;
     symLayer = false;
+    symShifted = false;
     syncModeUI();
   }
 
@@ -178,12 +184,43 @@
 
   if (symPopup) {
     const handleSymSelect = (e) => {
+      const shiftBtn = e.target.closest(".js-sym-shift");
+      if (shiftBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        triggerHaptic(10);
+        symShifted = !symShifted;
+        syncModeUI();
+        return;
+      }
+
       const item = e.target.closest(".sym-item[data-sym-key]");
       if (item) {
         e.preventDefault();
         e.stopPropagation();
         triggerHaptic(10);
-        const symKey = item.dataset.symKey || "";
+        let symKey = item.dataset.symKey || "";
+        const symShiftKey = item.dataset.symShift || "";
+
+        if (symShiftKey) {
+          if (symShifted || isModActive("shift")) {
+            symKey = symShiftKey;
+          } else {
+            const touchObj =
+              e.changedTouches && e.changedTouches.length > 0
+                ? e.changedTouches[0]
+                : e;
+            const clientY =
+              typeof touchObj.clientY === "number" ? touchObj.clientY : null;
+            if (clientY !== null) {
+              const rect = item.getBoundingClientRect();
+              if (rect.height > 0 && clientY < rect.top + rect.height * 0.48) {
+                symKey = symShiftKey;
+              }
+            }
+          }
+        }
+
         if (symKey) {
           markModifiersUsedInChord();
           sendPayload({ type: "press", key: symKey });
@@ -1084,7 +1121,7 @@
   // ============================================================================
   // 8. KIỂM TRA BẮT BUỘC CẬP NHẬT NGAY KHI BẤM MỞ APP (MANDATORY UPDATE GATE)
   // ============================================================================
-  const CURRENT_APP_VERSION = "1.7.1";
+  const CURRENT_APP_VERSION = "1.8.0";
   const updateModal = document.getElementById("mandatory-update-modal");
   const updateTitle = document.getElementById("update-title");
   const updateDesc = document.getElementById("update-desc");

@@ -367,74 +367,92 @@
 
     <!-- NỬA DƯỚI: BÀN PHÍM KIỂU 5 CẢI TIẾN -->
     <div class="ss-kb-wrap">
-      <!-- POP-UP NỔI KÝ TỰ ĐẶC BIỆT: DÀN ĐÚNG KHUNG BÀN PHÍM PC (CÁC PHÍM CHỮ Ở GIỮA ĐỂ TRỐNG MỜ) -->
+      <!-- POP-UP NỔI KÝ TỰ ĐẶC BIỆT: DÀN ĐÚNG Y HỆT BỐ CỤC BÀN PHÍM PC THẬT (CÓ BACKSPACE, ENTER, SHIFT HAI BÊN ĐỂ CÁC PHÍM CHẤM, HỎI, CHÉO, THẲNG NẰM ĐÚNG VỊ TRÍ THẬT) -->
       <div id="sym-floating-popup" class="sym-popup is-hidden">
-        <!-- Hàng 1 (Hàng số trên PC): ~ ! @ # $ % ^ & * ( ) _ + -->
+        <!-- Hàng 1 (Hàng số PC): `~ + 1!..0) + -_ + =+ + [⌫ mờ bên phải] -->
         <div class="sym-popup-row">
-          <button type="button" class="sym-item" data-sym-key="~"><span class="sym-main">~</span><span class="sym-sub">`</span></button>
-          <button type="button" class="sym-item" data-sym-key="!"><span class="sym-main">!</span><span class="sym-sub">1</span></button>
-          <button type="button" class="sym-item" data-sym-key="@"><span class="sym-main">@</span><span class="sym-sub">2</span></button>
-          <button type="button" class="sym-item" data-sym-key="#"><span class="sym-main">#</span><span class="sym-sub">3</span></button>
-          <button type="button" class="sym-item" data-sym-key="$"><span class="sym-main">$</span><span class="sym-sub">4</span></button>
-          <button type="button" class="sym-item" data-sym-key="%"><span class="sym-main">%</span><span class="sym-sub">5</span></button>
-          <button type="button" class="sym-item" data-sym-key="^"><span class="sym-main">^</span><span class="sym-sub">6</span></button>
-          <button type="button" class="sym-item" data-sym-key="&amp;"><span class="sym-main">&amp;</span><span class="sym-sub">7</span></button>
-          <button type="button" class="sym-item" data-sym-key="*"><span class="sym-main">*</span><span class="sym-sub">8</span></button>
-          <button type="button" class="sym-item" data-sym-key="("><span class="sym-main">(</span><span class="sym-sub">9</span></button>
-          <button type="button" class="sym-item" data-sym-key=")"><span class="sym-main">)</span><span class="sym-sub">0</span></button>
-          <button type="button" class="sym-item" data-sym-key="_"><span class="sym-main">_</span><span class="sym-sub">-</span></button>
-          <button type="button" class="sym-item" data-sym-key="+"><span class="sym-main">+</span><span class="sym-sub">=</span></button>
+          <button type="button" class="sym-item sym-dual" data-sym-key="`" data-sym-shift="~" style="--su: 0.95">
+            <span class="sym-top">~</span><span class="sym-main">`</span>
+          </button>
+          <button type="button" class="sym-item" data-sym-key="!" style="--su: 1"><span class="sym-main">!</span><span class="sym-sub">1</span></button>
+          <button type="button" class="sym-item" data-sym-key="@" style="--su: 1"><span class="sym-main">@</span><span class="sym-sub">2</span></button>
+          <button type="button" class="sym-item" data-sym-key="#" style="--su: 1"><span class="sym-main">#</span><span class="sym-sub">3</span></button>
+          <button type="button" class="sym-item" data-sym-key="$" style="--su: 1"><span class="sym-main">$</span><span class="sym-sub">4</span></button>
+          <button type="button" class="sym-item" data-sym-key="%" style="--su: 1"><span class="sym-main">%</span><span class="sym-sub">5</span></button>
+          <button type="button" class="sym-item" data-sym-key="^" style="--su: 1"><span class="sym-main">^</span><span class="sym-sub">6</span></button>
+          <button type="button" class="sym-item" data-sym-key="&amp;" style="--su: 1"><span class="sym-main">&amp;</span><span class="sym-sub">7</span></button>
+          <button type="button" class="sym-item" data-sym-key="*" style="--su: 1"><span class="sym-main">*</span><span class="sym-sub">8</span></button>
+          <button type="button" class="sym-item" data-sym-key="(" style="--su: 1"><span class="sym-main">(</span><span class="sym-sub">9</span></button>
+          <button type="button" class="sym-item" data-sym-key=")" style="--su: 1"><span class="sym-main">)</span><span class="sym-sub">0</span></button>
+          <button type="button" class="sym-item sym-dual" data-sym-key="-" data-sym-shift="_" style="--su: 0.95">
+            <span class="sym-top">_</span><span class="sym-main">-</span>
+          </button>
+          <button type="button" class="sym-item sym-dual" data-sym-key="=" data-sym-shift="+" style="--su: 0.95">
+            <span class="sym-top">+</span><span class="sym-main">=</span>
+          </button>
+          <div class="sym-blank sym-blank-mod" style="--su: 1.25"></div>
         </div>
 
-        <!-- Hàng 2 (Khung dòng Q–P trên PC): Các ô chữ bên trái để trống mờ, bên phải là - = [ { ] } \ | -->
+        <!-- Hàng 2 (Hàng Q–P PC): [Tab mờ] + các phím chữ Q..P mờ ở giữa + [ { | ] } | \ | ở sát phải đúng chuẩn hàng QWERTY -->
         <div class="sym-popup-row">
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <button type="button" class="sym-item" data-sym-key="`"><span class="sym-main">`</span><span class="sym-sub">~</span></button>
-          <button type="button" class="sym-item" data-sym-key="-"><span class="sym-main">-</span><span class="sym-sub">_</span></button>
-          <button type="button" class="sym-item" data-sym-key="="><span class="sym-main">=</span><span class="sym-sub">+</span></button>
-          <button type="button" class="sym-item" data-sym-key="["><span class="sym-main">[</span><span class="sym-sub">{</span></button>
-          <button type="button" class="sym-item" data-sym-key="{"><span class="sym-main">{</span><span class="sym-sub">[</span></button>
-          <button type="button" class="sym-item" data-sym-key="]"><span class="sym-main">]</span><span class="sym-sub">}</span></button>
-          <button type="button" class="sym-item" data-sym-key="}"><span class="sym-main">}</span><span class="sym-sub">]</span></button>
-          <button type="button" class="sym-item" data-sym-key="\"><span class="sym-main">\</span><span class="sym-sub">|</span></button>
+          <div class="sym-blank sym-blank-mod" style="--su: 1.3"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <button type="button" class="sym-item sym-dual" data-sym-key="[" data-sym-shift="{" style="--su: 1.15">
+            <span class="sym-top">{</span><span class="sym-main">[</span>
+          </button>
+          <button type="button" class="sym-item sym-dual" data-sym-key="]" data-sym-shift="}" style="--su: 1.15">
+            <span class="sym-top">}</span><span class="sym-main">]</span>
+          </button>
+          <button type="button" class="sym-item sym-dual" data-sym-key="\" data-sym-shift="|" style="--su: 1.4">
+            <span class="sym-top">|</span><span class="sym-main">\</span>
+          </button>
         </div>
 
-        <!-- Hàng 3 (Khung dòng A–L trên PC): Các ô chữ bên trái để trống mờ, bên phải là ; : ' " | -->
+        <!-- Hàng 3 (Hàng A–L PC): [Caps mờ] + các phím chữ A..L mờ + ; : | ' " + [Enter mờ bên phải để ; ' thụt vào đúng vị trí thật] -->
         <div class="sym-popup-row">
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <button type="button" class="sym-item" data-sym-key=";"><span class="sym-main">;</span><span class="sym-sub">:</span></button>
-          <button type="button" class="sym-item" data-sym-key=":"><span class="sym-main">:</span><span class="sym-sub">;</span></button>
-          <button type="button" class="sym-item" data-sym-key="'"><span class="sym-main">'</span><span class="sym-sub">"</span></button>
-          <button type="button" class="sym-item" data-sym-key="&quot;"><span class="sym-main">"</span><span class="sym-sub">'</span></button>
-          <button type="button" class="sym-item" data-sym-key="|"><span class="sym-main">|</span><span class="sym-sub">\</span></button>
+          <div class="sym-blank sym-blank-mod" style="--su: 1.5"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <div class="sym-blank" style="--su: 1"></div>
+          <button type="button" class="sym-item sym-dual" data-sym-key=";" data-sym-shift=":" style="--su: 1.15">
+            <span class="sym-top">:</span><span class="sym-main">;</span>
+          </button>
+          <button type="button" class="sym-item sym-dual" data-sym-key="'" data-sym-shift="&quot;" style="--su: 1.15">
+            <span class="sym-top">&quot;</span><span class="sym-main">'</span>
+          </button>
+          <div class="sym-blank sym-blank-mod" style="--su: 2.2"></div>
         </div>
 
-        <!-- Hàng 4 (Khung dòng Z–M trên PC): Các ô chữ bên trái để trống mờ, bên phải là , < . > / ? -->
+        <!-- Hàng 4 (Hàng Z–M PC): [⇧ Shift trái] + các phím chữ Z..M mờ + , < | . > | / ? nằm ngay sau chữ M + [⇧ Shift phải rộng ở mép phải] -->
         <div class="sym-popup-row">
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <div class="sym-blank"></div>
-          <button type="button" class="sym-item" data-sym-key=","><span class="sym-main">,</span><span class="sym-sub">&lt;</span></button>
-          <button type="button" class="sym-item" data-sym-key="&lt;"><span class="sym-main">&lt;</span><span class="sym-sub">,</span></button>
-          <button type="button" class="sym-item" data-sym-key="."><span class="sym-main">.</span><span class="sym-sub">&gt;</span></button>
-          <button type="button" class="sym-item" data-sym-key="&gt;"><span class="sym-main">&gt;</span><span class="sym-sub">.</span></button>
-          <button type="button" class="sym-item" data-sym-key="/"><span class="sym-main">/</span><span class="sym-sub">?</span></button>
-          <button type="button" class="sym-item" data-sym-key="?"><span class="sym-main">?</span><span class="sym-sub">/</span></button>
+          <button type="button" class="sym-shift-btn js-sym-shift" style="--su: 1.8">
+            <span>⇧ Shift</span>
+          </button>
+          <div class="sym-blank" style="--su: 1.075"></div>
+          <div class="sym-blank" style="--su: 1.075"></div>
+          <div class="sym-blank" style="--su: 1.075"></div>
+          <div class="sym-blank" style="--su: 1.075"></div>
+          <button type="button" class="sym-item sym-dual" data-sym-key="," data-sym-shift="&lt;" style="--su: 1.15">
+            <span class="sym-top">&lt;</span><span class="sym-main">,</span>
+          </button>
+          <button type="button" class="sym-item sym-dual" data-sym-key="." data-sym-shift="&gt;" style="--su: 1.15">
+            <span class="sym-top">&gt;</span><span class="sym-main">.</span>
+          </button>
+          <button type="button" class="sym-item sym-dual" data-sym-key="/" data-sym-shift="?" style="--su: 1.15">
+            <span class="sym-top">?</span><span class="sym-main">/</span>
+          </button>
+          <button type="button" class="sym-shift-btn js-sym-shift" style="--su: 2.45">
+            <span>⇧ Shift</span>
+          </button>
         </div>
       </div>
 

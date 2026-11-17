@@ -449,7 +449,7 @@ body[data-layout="pad"] .kb-shell {
   transform: scale(0.96);
 }
 
-/* POP-UP NỔI CHỌN KÝ TỰ ĐẶC BIỆT (KHÔNG TIÊU ĐỀ, KHÔNG NÚT X, HIỂN THỊ KÈM SỐ/PHÍM GỐC MỜ) */
+/* POP-UP NỔI CHỌN KÝ TỰ ĐẶC BIỆT (ĐÚNG Y HỆT BỐ CỤC BÀN PHÍM PC THẬT) */
 .sym-popup {
   position: absolute;
   left: 4px;
@@ -473,25 +473,58 @@ body[data-layout="pad"] .kb-shell {
 .sym-popup-row {
   display: flex;
   align-items: stretch;
-  gap: 3px;
+  gap: 2.5px;
 }
 
 .sym-blank {
-  flex: 1 1 0;
-  height: 38px;
+  --su: 1;
+  flex: var(--su) 1 0;
+  min-width: 0;
+  height: 44px;
   border-radius: 5px;
   background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.sym-blank-mod {
+  background: rgba(148, 163, 184, 0.055);
+  border-color: rgba(148, 163, 184, 0.085);
+}
+
+.sym-shift-btn {
+  --su: 1.8;
+  flex: var(--su) 1 0;
+  min-width: 0;
+  height: 44px;
+  border-radius: 5px;
+  background: #202838;
+  border: 1px solid #334155;
+  color: #93c5fd;
+  font-size: 11.5px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+}
+
+.sym-popup.is-sym-shifted .sym-shift-btn {
+  background: #0284c7;
+  border-color: #bae6fd;
+  color: #ffffff;
 }
 
 .sym-item {
+  --su: 1;
   position: relative;
-  flex: 1 1 0;
-  height: 38px;
-  border: 1px solid #354660;
+  flex: var(--su) 1 0;
+  min-width: 0;
+  height: 44px;
+  border: 1px solid #384b68;
   border-bottom-width: 1.5px;
   border-radius: 5px;
-  background: #263145;
+  background: #263247;
   color: #f8fafc;
   display: flex;
   flex-direction: column;
@@ -499,25 +532,74 @@ body[data-layout="pad"] .kb-shell {
   justify-content: center;
   cursor: pointer;
   padding: 0;
+  overflow: hidden;
 }
 
 .sym-main {
-  font-size: 17px;
+  font-size: 16.5px;
   font-weight: 600;
   color: #f8fafc;
   line-height: 1.05;
-  margin-bottom: 5px;
+  margin-bottom: 6px;
   pointer-events: none;
 }
 
 .sym-sub {
   position: absolute;
-  bottom: 2px;
+  bottom: 2.5px;
   font-size: 10px;
   font-weight: 500;
   color: rgba(148, 163, 184, 0.55);
   line-height: 1;
   pointer-events: none;
+}
+
+/* Phím đôi chuẩn PC (`~, -_, =+, [{, ]}, \|, ;:, '", ,<, .>, /?):
+   Hiển thị rõ cả ký tự trên (Shift) và ký tự dưới như phím thật,
+   chạm nửa trên gõ ký tự trên, chạm nửa dưới gõ ký tự dưới (hoặc bật ⇧ Shift) */
+.sym-item.sym-dual {
+  justify-content: space-between;
+  padding: 2px 0;
+}
+
+.sym-item.sym-dual::after {
+  content: "";
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  top: 50%;
+  height: 1px;
+  background: rgba(148, 163, 184, 0.16);
+  pointer-events: none;
+}
+
+.sym-item.sym-dual .sym-top {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #7dd3fc;
+  line-height: 1.1;
+  pointer-events: none;
+}
+
+.sym-item.sym-dual .sym-main {
+  font-size: 15.5px;
+  font-weight: 700;
+  color: #f8fafc;
+  line-height: 1.1;
+  margin-bottom: 0;
+  pointer-events: none;
+}
+
+.sym-popup.is-sym-shifted .sym-item.sym-dual .sym-top {
+  font-size: 15.5px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.sym-popup.is-sym-shifted .sym-item.sym-dual .sym-main {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(148, 163, 184, 0.55);
 }
 
 .sym-item:active {
@@ -526,8 +608,9 @@ body[data-layout="pad"] .kb-shell {
 }
 
 .sym-item:active .sym-main,
+.sym-item:active .sym-top,
 .sym-item:active .sym-sub {
-  color: #090c12;
+  color: #090c12 !important;
 }
 
 /* ============================================================================
