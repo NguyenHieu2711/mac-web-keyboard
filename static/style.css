@@ -411,67 +411,76 @@ body[data-layout="pad"] .kb-shell {
   transform: scale(0.96);
 }
 
-/* POP-UP NỔI CHỌN KÝ TỰ ĐẶC BIỆT (NỔI LÊN TRÊN BÀN PHÍM KHI BẤM ?123) */
+/* POP-UP NỔI CHỌN KÝ TỰ ĐẶC BIỆT (KHÔNG TIÊU ĐỀ, KHÔNG NÚT X, HIỂN THỊ KÈM SỐ/PHÍM GỐC MỜ) */
 .sym-popup {
   position: absolute;
-  left: 6px;
-  right: 6px;
-  bottom: calc(100% + 6px);
+  left: 4px;
+  right: 4px;
+  bottom: calc(100% + 5px);
   z-index: 9000;
-  background: #1b2230;
+  background: #181e2b;
   border: 1.5px solid #38bdf8;
-  border-radius: 13px;
-  padding: 10px 8px 10px 8px;
-  box-shadow: 0 -10px 32px rgba(0, 0, 0, 0.72);
+  border-radius: 11px;
+  padding: 6px 5px;
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.78);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
 }
 
 .sym-popup.is-hidden {
   display: none !important;
 }
 
-.sym-popup-head {
+.sym-popup-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 4px 8px 4px;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: #94a3b8;
-}
-
-.sym-popup-close {
-  border: none;
-  background: #283347;
-  color: #e2e8f0;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.sym-popup-grid {
-  display: grid;
-  grid-template-columns: repeat(10, 1fr);
-  gap: 5px;
+  align-items: stretch;
+  gap: 4px;
 }
 
 .sym-item {
-  height: 38px;
-  border: 1px solid #324158;
-  border-radius: 7px;
-  background: #263144;
+  position: relative;
+  flex: 1 1 0;
+  height: 42px;
+  border: 1px solid #2e3b52;
+  border-bottom-width: 1.5px;
+  border-radius: 6px;
+  background: #252e40;
   color: #f8fafc;
-  font-size: 17px;
-  font-weight: 500;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  padding: 0;
+}
+
+.sym-main {
+  font-size: 17px;
+  font-weight: 600;
+  color: #f8fafc;
+  line-height: 1.05;
+  margin-bottom: 5px;
+  pointer-events: none;
+}
+
+.sym-sub {
+  position: absolute;
+  bottom: 2px;
+  font-size: 10px;
+  font-weight: 500;
+  color: rgba(148, 163, 184, 0.55);
+  line-height: 1;
+  pointer-events: none;
 }
 
 .sym-item:active {
   background: #38bdf8;
+  color: #090c12;
+}
+
+.sym-item:active .sym-main,
+.sym-item:active .sym-sub {
   color: #090c12;
 }
 
