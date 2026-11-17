@@ -7,4 +7,5 @@
 *.yml text eol=lf
 *.jks binary
 *.keystore binary
+*.apk binary
 

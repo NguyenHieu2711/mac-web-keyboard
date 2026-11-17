@@ -340,13 +340,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun fetchLatestGitHubRelease(): Pair<String, String>? {
+        return fetchFromGitHubReleasesApi() ?: fetchFromRawRepoManifest()
+    }
+
+    private fun fetchFromGitHubReleasesApi(): Pair<String, String>? {
         val apiUrl = "https://api.github.com/repos/${BuildConfig.GITHUB_REPO}/releases/latest"
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 7000
-                readTimeout = 7000
+                connectTimeout = 6000
+                readTimeout = 6000
                 setRequestProperty("Accept", "application/vnd.github+json")
                 setRequestProperty("User-Agent", "MacWebKeyboard-Android/${BuildConfig.VERSION_NAME}")
             }
@@ -372,6 +376,33 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             if (chosenUrl.isEmpty()) null else Pair(tagName, chosenUrl)
+        } catch (_: Exception) {
+            null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    private fun fetchFromRawRepoManifest(): Pair<String, String>? {
+        val rawUrl =
+            "https://raw.githubusercontent.com/${BuildConfig.GITHUB_REPO}/main/releases/latest.json?t=${System.currentTimeMillis()}"
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(rawUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 6000
+                readTimeout = 6000
+                setRequestProperty("Cache-Control", "no-cache")
+                setRequestProperty("User-Agent", "MacWebKeyboard-Android/${BuildConfig.VERSION_NAME}")
+            }
+            if (conn.responseCode != HttpURLConnection.HTTP_OK) {
+                return null
+            }
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            val json = JSONObject(body)
+            val tagName = json.optString("tag_name", "").trim()
+            val apkUrl = json.optString("apk_url", "").trim()
+            if (tagName.isEmpty() || apkUrl.isEmpty()) null else Pair(tagName, apkUrl)
         } catch (_: Exception) {
             null
         } finally {
