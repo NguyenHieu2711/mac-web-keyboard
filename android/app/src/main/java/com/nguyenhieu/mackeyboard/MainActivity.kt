@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
@@ -57,6 +58,7 @@ class MainActivity : AppCompatActivity() {
     private var activeDownloadId: Long = -1L
     private var activeUpdateApkFile: File? = null
     private var pendingInstallApkFile: File? = null
+    private var mandatoryUpdateDialog: AlertDialog? = null
     private var lastBackPressedAt: Long = 0L
 
     private val downloadCompleteReceiver = object : BroadcastReceiver() {
@@ -71,17 +73,24 @@ class MainActivity : AppCompatActivity() {
                 if (cursor.moveToFirst()) {
                     val statusIdx = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
                     if (statusIdx >= 0 && cursor.getInt(statusIdx) == DownloadManager.STATUS_SUCCESSFUL) {
+                        mandatoryUpdateDialog?.dismiss()
+                        mandatoryUpdateDialog = null
                         activeUpdateApkFile?.let { apkFile ->
                             if (apkFile.exists()) {
                                 promptInstallApk(apkFile)
                             }
                         }
                     } else {
+                        mandatoryUpdateDialog?.dismiss()
+                        mandatoryUpdateDialog = null
                         Toast.makeText(
                             this@MainActivity,
-                            "Tải bản cập nhật thất bại, vui lòng thử lại sau.",
+                            "Tải bản cập nhật thất bại, đang thử lại...",
                             Toast.LENGTH_SHORT
                         ).show()
+                        lifecycleScope.launch {
+                            checkForUpdatesFromGitHub(manualCheck = false)
+                        }
                     }
                 }
             }
@@ -145,7 +154,14 @@ class MainActivity : AppCompatActivity() {
                     view: WebView,
                     request: WebResourceRequest
                 ): WebResourceResponse? {
-                    return assetLoader.shouldInterceptRequest(request.url)
+                    val reqUrl = request.url
+                    if (reqUrl.host == "appassets.androidplatform.net") {
+                        val relPath = reqUrl.path?.removePrefix("/assets/") ?: ""
+                        if (relPath in listOf("index.html", "style.css", "app.js", "manifest.json")) {
+                            fetchLiveAssetFromServer(relPath)?.let { return it }
+                        }
+                    }
+                    return assetLoader.shouldInterceptRequest(reqUrl)
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -191,6 +207,12 @@ class MainActivity : AppCompatActivity() {
         if (pending != null && pending.exists() && packageManager.canRequestPackageInstalls()) {
             pendingInstallApkFile = null
             promptInstallApk(pending)
+            return
+        }
+
+        // Luôn kiểm tra bản cập nhật bắt buộc mỗi khi mở/quay lại ứng dụng
+        lifecycleScope.launch {
+            checkForUpdatesFromGitHub(manualCheck = false)
         }
     }
 
@@ -223,6 +245,50 @@ class MainActivity : AppCompatActivity() {
         return prefs.getString(KEY_SERVER_HOST, "")?.trim().orEmpty()
     }
 
+    private fun fetchLiveAssetFromServer(relPath: String): WebResourceResponse? {
+        val rawHosts = getSavedServerHost()
+        if (rawHosts.isBlank()) return null
+        val candidates = rawHosts.split(",")
+            .map { it.trim().replace(Regex("^https?://|^wss?://"), "").substringBefore("/") }
+            .filter { it.isNotEmpty() }
+            .map { if (":" in it) it else "$it:5050" }
+
+        val targetPath = if (relPath == "index.html") "" else relPath
+        val mimeType = when {
+            relPath.endsWith(".html") -> "text/html"
+            relPath.endsWith(".css") -> "text/css"
+            relPath.endsWith(".js") -> "application/javascript"
+            relPath.endsWith(".json") -> "application/json"
+            else -> "text/plain"
+        }
+
+        for (host in candidates) {
+            var conn: HttpURLConnection? = null
+            try {
+                val url = URL("http://$host/$targetPath")
+                conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 700
+                    readTimeout = 1000
+                    setRequestProperty("Cache-Control", "no-cache")
+                }
+                if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                    val bytes = conn.inputStream.use { it.readBytes() }
+                    return WebResourceResponse(
+                        mimeType,
+                        "UTF-8",
+                        bytes.inputStream()
+                    )
+                }
+            } catch (_: Exception) {
+                // Thử host tiếp theo hoặc fallback về asset nội bộ
+            } finally {
+                conn?.disconnect()
+            }
+        }
+        return null
+    }
+
     private fun saveServerHost(rawHost: String) {
         val cleaned = rawHost.trim()
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -232,6 +298,7 @@ class MainActivity : AppCompatActivity() {
 
         val escaped = JSONObject.quote(cleaned)
         webView.evaluateJavascript("window.__applyServerHost && window.__applyServerHost($escaped);", null)
+        webView.reload()
     }
 
     private fun showServerConfigDialog(isFirstLaunch: Boolean = false) {
@@ -330,13 +397,55 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        Toast.makeText(
-            this,
-            "Phát hiện bản mới $tagName — đang tự động tải cập nhật...",
-            Toast.LENGTH_SHORT
-        ).show()
+        showMandatoryUpdateDialog(tagName, apkDownloadUrl)
+    }
 
-        startApkDownload(tagName, apkDownloadUrl)
+    private fun showMandatoryUpdateDialog(tagName: String, apkDownloadUrl: String) {
+        if (isFinishing || isDestroyed) return
+        mandatoryUpdateDialog?.let {
+            if (it.isShowing) return
+        }
+
+        val existingApk = activeUpdateApkFile
+        if (existingApk != null && existingApk.exists()) {
+            val readyDialog = AlertDialog.Builder(this)
+                .setTitle("Cập nhật bắt buộc ($tagName)")
+                .setMessage("Bản cập nhật $tagName đã tải xong. Bạn bắt buộc phải cài đặt bản mới để tiếp tục sử dụng ứng dụng.")
+                .setCancelable(false)
+                .setPositiveButton("Cài đặt ngay") { _, _ ->
+                    mandatoryUpdateDialog = null
+                    promptInstallApk(existingApk)
+                }
+                .create()
+            mandatoryUpdateDialog = readyDialog
+            readyDialog.show()
+            return
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Có bản cập nhật mới ($tagName)")
+            .setMessage("Phiên bản mới $tagName đã sẵn sàng (bản hiện tại: v${BuildConfig.VERSION_NAME}).\n\nBạn cần cập nhật ngay để tiếp tục vào ứng dụng.")
+            .setCancelable(false)
+            .setPositiveButton("Cập nhật ngay") { _, _ ->
+                showDownloadingLockDialog(tagName)
+                startApkDownload(tagName, apkDownloadUrl)
+            }
+            .create()
+
+        mandatoryUpdateDialog = dialog
+        dialog.show()
+    }
+
+    private fun showDownloadingLockDialog(tagName: String) {
+        if (isFinishing || isDestroyed) return
+        mandatoryUpdateDialog?.dismiss()
+        val progressDialog = AlertDialog.Builder(this)
+            .setTitle("Đang tải bản cập nhật $tagName...")
+            .setMessage("Vui lòng chờ giây lát, gói cài đặt sẽ tự động bật lên ngay khi tải xong.")
+            .setCancelable(false)
+            .create()
+        mandatoryUpdateDialog = progressDialog
+        progressDialog.show()
     }
 
     private fun fetchLatestGitHubRelease(): Pair<String, String>? {
@@ -518,6 +627,18 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun vibrate(ms: Long) {
             triggerNativeVibration(ms)
+        }
+
+        @JavascriptInterface
+        fun setOrientation(mode: String) {
+            runOnUiThread {
+                requestedOrientation = if (mode.equals("portrait", ignoreCase = true)) {
+                    ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                } else {
+                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                }
+                applyImmersiveStickyFullscreen()
+            }
         }
     }
 }

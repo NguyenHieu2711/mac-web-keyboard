@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Mac Web Virtual Keyboard Server (LAN / Tailscale -> macOS Hardware Key Events)
-Lắng nghe tại 0.0.0.0:5050, phục vụ giao diện PWA và bắn tín hiệu phím vật lý
-xuống macOS tương thích 100% với EVKey / OpenKey / Telex mặc định của macOS.
+Lắng nghe tại 0.0.0.0:5050, phục vụ giao diện PWA / Android WebView với:
+- 2 bộ bàn phím vật lý chuẩn: Bàn phím dây Windows (ANSI PC) & Bàn phím Mac.
+- Bộ gõ Tiếng Việt Telex chuẩn PC (Unikey / EVKey) tích hợp trực tiếp trên Server.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -35,8 +36,6 @@ IS_MACOS = sys.platform == "darwin"
 
 # ============================================================================
 # BẢNG MÃ PHÍM VẬT LÝ CHUẨN APPLE VIRTUAL KEYCODE (macOS HIToolbox Events.h)
-# Gửi đúng mã phím phần cứng tiếng Anh để EVKey / OpenKey / Bộ gõ Telex macOS
-# tự động ghép dấu tiếng Việt và xử lý Backspace xuyên khoảng trắng mượt 100%.
 # ============================================================================
 MAC_VK_MAP: Dict[str, int] = {
     "a": 0x00,
@@ -107,8 +106,25 @@ MAC_VK_MAP: Dict[str, int] = {
     "ctrl": 0x3B,
     "control": 0x3B,
     "shift_r": 0x3C,
+    "fn": 0x3F,
+    "f1": 0x7A,
+    "f2": 0x78,
+    "f3": 0x63,
+    "f4": 0x76,
+    "f5": 0x60,
+    "f6": 0x61,
+    "f7": 0x62,
+    "f8": 0x64,
+    "f9": 0x65,
+    "f10": 0x6D,
+    "f11": 0x67,
+    "f12": 0x6F,
+    "home": 0x73,
+    "pageup": 0x74,
     "del": 0x75,
     "delete": 0x75,
+    "end": 0x77,
+    "pagedown": 0x79,
     "left": 0x7B,
     "arrowleft": 0x7B,
     "right": 0x7C,
@@ -119,7 +135,6 @@ MAC_VK_MAP: Dict[str, int] = {
     "arrowup": 0x7E,
 }
 
-# Các ký tự viết hoa / ký hiệu cần tự động kẹp Shift nếu gửi trực tiếp
 SHIFTED_SYMBOL_TO_BASE: Dict[str, str] = {
     "~": "`",
     "!": "1",
@@ -159,29 +174,373 @@ CANONICAL_MODIFIER: Dict[str, str] = {
     "control": "ctrl",
 }
 
+# Các phím tắt trên bàn phím dây Windows khi giữ Ctrl sẽ ánh xạ sang Cmd trên macOS
+WIN_CTRL_TO_CMD_KEYS: Set[str] = {
+    "a", "b", "c", "f", "g", "h", "i", "k", "l", "n", "o", "p", "q",
+    "r", "s", "t", "u", "v", "w", "x", "y", "z",
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=",
+    "[", "]", "/", ",", ".", ";", "'",
+}
+
+
+# ============================================================================
+# BỘ GÕ TIẾNG VIỆT TELEX CHUẨN PC (UNIKEY / EVKEY ENGINE)
+# ============================================================================
+VOWEL_TONE_TABLE: Dict[str, Tuple[str, str, str, str, str, str]] = {
+    "a": ("a", "á", "à", "ả", "ã", "ạ"),
+    "ă": ("ă", "ắ", "ằ", "ẳ", "ẵ", "ặ"),
+    "â": ("â", "ấ", "ầ", "ẩ", "ẫ", "ậ"),
+    "e": ("e", "é", "è", "ẻ", "ẽ", "ẹ"),
+    "ê": ("ê", "ế", "ề", "ể", "ễ", "ệ"),
+    "i": ("i", "í", "ì", "ỉ", "ĩ", "ị"),
+    "o": ("o", "ó", "ò", "ỏ", "õ", "ọ"),
+    "ô": ("ô", "ố", "ồ", "ổ", "ỗ", "ộ"),
+    "ơ": ("ơ", "ớ", "ờ", "ở", "ỡ", "ợ"),
+    "u": ("u", "ú", "ù", "ủ", "ũ", "ụ"),
+    "ư": ("ư", "ứ", "ừ", "ử", "ữ", "ự"),
+    "y": ("y", "ý", "ỳ", "ỷ", "ỹ", "ỵ"),
+    "A": ("A", "Á", "À", "Ả", "Ã", "Ạ"),
+    "Ă": ("Ă", "Ắ", "Ằ", "Ẳ", "Ẵ", "Ặ"),
+    "Â": ("Â", "Ấ", "Ầ", "Ẩ", "Ẫ", "Ậ"),
+    "E": ("E", "É", "È", "Ẻ", "Ẽ", "Ẹ"),
+    "Ê": ("Ê", "Ế", "Ề", "Ể", "Ễ", "Ệ"),
+    "I": ("I", "Í", "Ì", "Ỉ", "Ĩ", "Ị"),
+    "O": ("O", "Ó", "Ò", "Ỏ", "Õ", "Ọ"),
+    "Ô": ("Ô", "Ố", "Ồ", "Ổ", "Ỗ", "Ộ"),
+    "Ơ": ("Ơ", "Ớ", "Ờ", "Ở", "Ỡ", "Ợ"),
+    "U": ("U", "Ú", "Ù", "Ủ", "Ũ", "Ụ"),
+    "Ư": ("Ư", "Ứ", "Ừ", "Ử", "Ữ", "Ự"),
+    "Y": ("Y", "Ý", "Ỳ", "Ỷ", "Ỹ", "Ỵ"),
+}
+
+CHAR_TO_BASE_TONE: Dict[str, Tuple[str, int]] = {}
+for _base, _forms in VOWEL_TONE_TABLE.items():
+    for _t_idx, _ch in enumerate(_forms):
+        CHAR_TO_BASE_TONE[_ch] = (_base, _t_idx)
+
+TONE_KEY_MAP: Dict[str, int] = {
+    "s": 1,  # Sắc
+    "f": 2,  # Huyền
+    "r": 3,  # Hỏi
+    "x": 4,  # Ngã
+    "j": 5,  # Nặng
+    "z": 0,  # Xóa dấu thanh
+}
+
+DIACRITIC_VOWELS_LOWER = {"ă", "â", "ê", "ô", "ơ", "ư"}
+
+
+def _match_case(template: str, target_lower: str) -> str:
+    return target_lower.upper() if template.isupper() else target_lower
+
+
+def _compose_vowel(base: str, tone: int) -> str:
+    forms = VOWEL_TONE_TABLE.get(base)
+    if not forms:
+        return base
+    return forms[max(0, min(5, tone))]
+
+
+class VietnameseTelexEngine:
+    """Bộ xử lý âm tiết Telex kiểu Unikey/EVKey: bỏ dấu tự do, gõ lặp trả phím gốc."""
+
+    def __init__(self) -> None:
+        self.word: str = ""
+        self.raw_locked: bool = False
+        self.last_transform_key: str = ""
+
+    def reset(self) -> None:
+        self.word = ""
+        self.raw_locked = False
+        self.last_transform_key = ""
+
+    def backspace(self) -> None:
+        if self.word:
+            self.word = self.word[:-1]
+        if not self.word:
+            self.raw_locked = False
+            self.last_transform_key = ""
+
+    def _extract_word_tone(self, chars: List[str]) -> Tuple[List[str], int]:
+        tone = 0
+        base_chars: List[str] = []
+        for ch in chars:
+            if ch in CHAR_TO_BASE_TONE:
+                b, t = CHAR_TO_BASE_TONE[ch]
+                if t != 0:
+                    tone = t
+                base_chars.append(b)
+            else:
+                base_chars.append(ch)
+        return base_chars, tone
+
+    def _find_vowel_span(self, base_chars: List[str]) -> List[int]:
+        indices = [i for i, c in enumerate(base_chars) if c in VOWEL_TONE_TABLE]
+        if not indices:
+            return []
+        # Xử lý phụ âm đầu 'qu' và 'gi' (không tính u/i là nguyên âm chính nếu phía sau còn nguyên âm)
+        if len(indices) >= 2:
+            first_v = indices[0]
+            if first_v == 1 and base_chars[0].lower() == "q" and base_chars[1].lower() == "u":
+                indices = indices[1:]
+            elif first_v == 1 and base_chars[0].lower() == "g" and base_chars[1].lower() == "i":
+                indices = indices[1:]
+        return indices
+
+    def _place_tone(self, base_chars: List[str], tone: int) -> List[str]:
+        if tone == 0:
+            return list(base_chars)
+        v_indices = self._find_vowel_span(base_chars)
+        if not v_indices:
+            return list(base_chars)
+
+        target_idx = v_indices[0]
+        if len(v_indices) == 1:
+            target_idx = v_indices[0]
+        else:
+            # Ưu tiên nguyên âm có mũ/móc (ă, â, ê, ô, ơ, ư); nếu là cụm 'ươ' thì đặt vào 'ơ'
+            special = [
+                idx
+                for idx in v_indices
+                if base_chars[idx].lower() in DIACRITIC_VOWELS_LOWER
+            ]
+            if len(special) >= 2:
+                # Ví dụ ươ -> đặt dấu vào ơ
+                target_idx = special[-1]
+            elif len(special) == 1:
+                target_idx = special[0]
+            elif len(v_indices) == 3:
+                target_idx = v_indices[1]
+            else:
+                # 2 nguyên âm không dấu phụ: nếu có phụ âm cuối hoặc oa/oe/uy -> nguyên âm thứ 2, ngược lại nguyên âm 1
+                has_final_consonant = v_indices[-1] < len(base_chars) - 1
+                pair_lower = (
+                    base_chars[v_indices[0]].lower() + base_chars[v_indices[1]].lower()
+                )
+                if has_final_consonant or pair_lower in ("oa", "oe", "uy"):
+                    target_idx = v_indices[1]
+                else:
+                    target_idx = v_indices[0]
+
+        result = list(base_chars)
+        result[target_idx] = _compose_vowel(result[target_idx], tone)
+        return result
+
+    def process_char(self, ch: str) -> Tuple[str, str]:
+        """
+        Nhận 1 ký tự chữ cái (a-z, A-Z).
+        Trả về (old_word, new_word) để bộ phát phím tính số Backspace + chuỗi thay thế.
+        """
+        old_word = self.word
+        low = ch.lower()
+
+        if self.raw_locked:
+            self.word += ch
+            return old_word, self.word
+
+        chars = list(self.word)
+        base_chars, current_tone = self._extract_word_tone(chars)
+
+        # 1. Xử lý gõ lặp phím vừa biến đổi (aa->a, ee->e, oo->o, ww->w, dd->d, ss->s...) -> Hoàn tác!
+        if self.last_transform_key == low and len(chars) >= 1:
+            if low == "d":
+                for i in range(len(base_chars)):
+                    if base_chars[i].lower() == "đ":
+                        base_chars[i] = _match_case(base_chars[i], "d")
+                        rebuilt = self._place_tone(base_chars, current_tone)
+                        rebuilt.append(ch)
+                        self.word = "".join(rebuilt)
+                        self.raw_locked = True
+                        self.last_transform_key = ""
+                        return old_word, self.word
+            elif low in ("a", "e", "o"):
+                hat_map = {"a": "â", "e": "ê", "o": "ô"}
+                target_hat = hat_map[low]
+                for i in range(len(base_chars) - 1, -1, -1):
+                    if base_chars[i].lower() == target_hat:
+                        base_chars[i] = _match_case(base_chars[i], low)
+                        rebuilt = self._place_tone(base_chars, current_tone)
+                        rebuilt.append(ch)
+                        self.word = "".join(rebuilt)
+                        self.raw_locked = True
+                        self.last_transform_key = ""
+                        return old_word, self.word
+            elif low == "w":
+                undone = False
+                for i in range(len(base_chars) - 1, -1, -1):
+                    bl = base_chars[i].lower()
+                    if bl in ("ă", "ơ", "ư"):
+                        # Nếu là ư đứng độc lập do gõ 'w' trước đó -> thay bằng 'w'
+                        if (
+                            i == len(base_chars) - 1
+                            and bl == "ư"
+                            and self.last_transform_key == "w_standalone"
+                        ):
+                            base_chars[i] = _match_case(base_chars[i], "w")
+                            rebuilt = self._place_tone(base_chars, current_tone)
+                            self.word = "".join(rebuilt)
+                            self.raw_locked = True
+                            self.last_transform_key = ""
+                            return old_word, self.word
+                        orig_map = {"ă": "a", "ơ": "o", "ư": "u"}
+                        base_chars[i] = _match_case(base_chars[i], orig_map[bl])
+                        undone = True
+                if undone:
+                    rebuilt = self._place_tone(base_chars, current_tone)
+                    rebuilt.append(ch)
+                    self.word = "".join(rebuilt)
+                    self.raw_locked = True
+                    self.last_transform_key = ""
+                    return old_word, self.word
+            elif low in TONE_KEY_MAP:
+                rebuilt = self._place_tone(base_chars, 0)
+                rebuilt.append(ch)
+                self.word = "".join(rebuilt)
+                self.raw_locked = True
+                self.last_transform_key = ""
+                return old_word, self.word
+
+        # 2. Xử lý 'dd' -> 'đ'
+        if low == "d" and len(base_chars) >= 1 and base_chars[0].lower() == "d":
+            # Chỉ biến thành 'đ' nếu chữ cái đầu là 'd' và từ hợp lệ
+            base_chars[0] = _match_case(base_chars[0], "đ")
+            rebuilt = self._place_tone(base_chars, current_tone)
+            self.word = "".join(rebuilt)
+            self.last_transform_key = "d"
+            return old_word, self.word
+
+        # 3. Xử lý mũ 'aa' -> 'â', 'ee' -> 'ê', 'oo' -> 'ô'
+        if low in ("a", "e", "o"):
+            hat_map = {"a": "â", "e": "ê", "o": "ô"}
+            for i in range(len(base_chars) - 1, -1, -1):
+                if base_chars[i].lower() == low:
+                    base_chars[i] = _match_case(base_chars[i], hat_map[low])
+                    rebuilt = self._place_tone(base_chars, current_tone)
+                    self.word = "".join(rebuilt)
+                    self.last_transform_key = low
+                    return old_word, self.word
+
+        # 4. Xử lý móc / trăng 'w' -> ươ / ư / ơ / ă
+        if low == "w":
+            v_span = self._find_vowel_span(base_chars)
+            if v_span:
+                # Kiểm tra cụm 'uo' / 'ưo' / 'uơ' / 'uô' -> 'ươ'
+                for idx in range(len(v_span) - 1):
+                    i1, i2 = v_span[idx], v_span[idx + 1]
+                    b1, b2 = base_chars[i1].lower(), base_chars[i2].lower()
+                    if b1 in ("u", "ư") and b2 in ("o", "ô", "ơ"):
+                        base_chars[i1] = _match_case(base_chars[i1], "ư")
+                        base_chars[i2] = _match_case(base_chars[i2], "ơ")
+                        rebuilt = self._place_tone(base_chars, current_tone)
+                        self.word = "".join(rebuilt)
+                        self.last_transform_key = "w"
+                        return old_word, self.word
+                # Biến đổi nguyên âm đơn u->ư, o->ơ, a->ă (ưu tiên từ cuối lên)
+                w_map = {"u": "ư", "o": "ơ", "a": "ă"}
+                for i in reversed(v_span):
+                    bl = base_chars[i].lower()
+                    if bl in w_map:
+                        base_chars[i] = _match_case(base_chars[i], w_map[bl])
+                        rebuilt = self._place_tone(base_chars, current_tone)
+                        self.word = "".join(rebuilt)
+                        self.last_transform_key = "w"
+                        return old_word, self.word
+
+        # 5. Xử lý 5 dấu thanh (s, f, r, x, j) và xóa dấu (z)
+        if low in TONE_KEY_MAP:
+            v_span = self._find_vowel_span(base_chars)
+            if v_span:
+                new_tone = TONE_KEY_MAP[low]
+                if new_tone == 0 and current_tone == 0:
+                    # Từ chưa có dấu thanh mà bấm 'z' -> gõ chữ 'z' bình thường
+                    pass
+                elif new_tone == current_tone and new_tone != 0:
+                    # Đã có đúng dấu thanh đó rồi mà bấm lại -> trả về không dấu + ký tự vừa bấm
+                    rebuilt = self._place_tone(base_chars, 0)
+                    rebuilt.append(ch)
+                    self.word = "".join(rebuilt)
+                    self.raw_locked = True
+                    self.last_transform_key = ""
+                    return old_word, self.word
+                else:
+                    rebuilt = self._place_tone(base_chars, new_tone)
+                    self.word = "".join(rebuilt)
+                    self.last_transform_key = low
+                    return old_word, self.word
+
+        # 6. Ký tự thường nối vào từ (và tự căn lại vị trí dấu thanh nếu thêm nguyên âm/phụ âm cuối, VD: hoàn, tiếng)
+        base_chars.append(ch)
+        if current_tone != 0:
+            rebuilt = self._place_tone(base_chars, current_tone)
+        else:
+            rebuilt = base_chars
+        self.word = "".join(rebuilt)
+        self.last_transform_key = ""
+        return old_word, self.word
+
+
+def ensure_macos_abc_input_source() -> None:
+    """Chuyển bộ gõ macOS về ABC để tránh xung đột gạch chân với bộ gõ Telex nội bộ của Server."""
+    if not IS_MACOS:
+        return
+    try:
+        import ctypes
+        import Foundation  # noqa: F401 - đăng ký bridge NSArray/NSString cho PyObjC
+        import objc
+
+        carbon = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/Carbon.framework/Carbon"
+        )
+        carbon.TISCreateInputSourceList.restype = ctypes.c_void_p
+        carbon.TISCreateInputSourceList.argtypes = [ctypes.c_void_p, ctypes.c_bool]
+        carbon.TISGetInputSourceProperty.restype = ctypes.c_void_p
+        carbon.TISGetInputSourceProperty.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        carbon.TISSelectInputSource.restype = ctypes.c_int
+        carbon.TISSelectInputSource.argtypes = [ctypes.c_void_p]
+
+        k_id = ctypes.c_void_p.in_dll(carbon, "kTISPropertyInputSourceID")
+        arr = objc.objc_object(c_void_p=carbon.TISCreateInputSourceList(None, True))
+        for src in arr:
+            ptr = src.__c_void_p__()
+            prop = carbon.TISGetInputSourceProperty(ptr, k_id)
+            if prop and str(objc.objc_object(c_void_p=prop)) == "com.apple.keylayout.ABC":
+                carbon.TISSelectInputSource(ptr)
+                break
+    except Exception as exc:
+        logger.warning("Không thể tự chuyển về ABC: %s", exc)
+
 
 class KeyboardInjector:
-    """Bộ điều khiển bắn sự kiện phím vật lý tối ưu cho macOS (Quartz CGEvent + pynput fallback)."""
+    """Bộ điều khiển bắn sự kiện phím vật lý + Unicode Telex cho macOS."""
 
     def __init__(self) -> None:
         self.held_modifiers: Set[str] = set()
         self.caps_locked: bool = False
+        self.vn_enabled: bool = True
+        self.kb_layout: str = "win"  # "win", "mac", hoặc "pad" (Chế độ dọc Trackpad + Phím)
+        self.telex = VietnameseTelexEngine()
         self._use_quartz = False
         self._quartz = None
         self._event_source = None
+        self._mouse_x: float = 500.0
+        self._mouse_y: float = 500.0
+        self._last_mouse_sync: float = 0.0
+        self._mouse_buttons_down: Set[str] = set()
+        self._last_left_click_at: float = 0.0
+        self._left_click_count: int = 0
 
         if IS_MACOS:
             try:
                 import Quartz  # type: ignore
 
                 self._quartz = Quartz
-                # kCGEventSourceStatePrivate (-1): chuẩn của Hammerspoon/Espanso khi chạy ngầm qua launchd
                 self._event_source = Quartz.CGEventSourceCreate(
                     Quartz.kCGEventSourceStatePrivate
                 )
                 self._use_quartz = True
+                ensure_macos_abc_input_source()
                 logger.info(
-                    "Đã kích hoạt bộ phát phím phần cứng Quartz CGEvent (kCGHIDEventTap) cho macOS."
+                    "Đã kích hoạt Quartz CGEvent + Bộ gõ Tiếng Việt Telex chuẩn PC."
                 )
             except Exception as exc:
                 logger.warning(
@@ -239,11 +598,21 @@ class KeyboardInjector:
         return flags
 
     def _quartz_post_vk(
-        self, vk: int, is_down: bool, extra_mods: Set[str] | None = None
+        self,
+        vk: int,
+        is_down: bool,
+        extra_mods: Set[str] | None = None,
+        override_mods: Set[str] | None = None,
     ) -> None:
         q = self._quartz
         ev = q.CGEventCreateKeyboardEvent(self._event_source, vk, is_down)
-        flags = self._compute_quartz_flags(extra_mods)
+        if override_mods is not None:
+            saved = self.held_modifiers
+            self.held_modifiers = set(override_mods)
+            flags = self._compute_quartz_flags()
+            self.held_modifiers = saved
+        else:
+            flags = self._compute_quartz_flags(extra_mods)
         existing = q.CGEventGetFlags(ev)
         mod_mask = (
             q.kCGEventFlagMaskCommand
@@ -254,6 +623,21 @@ class KeyboardInjector:
         )
         q.CGEventSetFlags(ev, (existing & ~mod_mask) | flags)
         q.CGEventPost(q.kCGHIDEventTap, ev)
+
+    def _quartz_post_unicode(self, text: str) -> None:
+        if not text:
+            return
+        q = self._quartz
+        for ch in text:
+            ev_down = q.CGEventCreateKeyboardEvent(self._event_source, 0, True)
+            q.CGEventSetFlags(ev_down, 0)
+            q.CGEventKeyboardSetUnicodeString(ev_down, len(ch), ch)
+            q.CGEventPost(q.kCGHIDEventTap, ev_down)
+
+            ev_up = q.CGEventCreateKeyboardEvent(self._event_source, 0, False)
+            q.CGEventSetFlags(ev_up, 0)
+            q.CGEventKeyboardSetUnicodeString(ev_up, len(ch), ch)
+            q.CGEventPost(q.kCGHIDEventTap, ev_up)
 
     # -------------------- Pynput Cross-Platform Fallback --------------------
     def _resolve_pynput_key(self, norm_key: str):
@@ -289,6 +673,8 @@ class KeyboardInjector:
             return
         if norm in ("cmd", "shift", "alt", "ctrl"):
             self.held_modifiers.add(norm)
+            if norm in ("cmd", "alt", "ctrl"):
+                self.telex.reset()
 
         if self._use_quartz and norm in MAC_VK_MAP:
             self._quartz_post_vk(MAC_VK_MAP[norm], True)
@@ -313,6 +699,64 @@ class KeyboardInjector:
         if pk is not None:
             self._kb.release(pk)
 
+    def _handle_win_layout_shortcut(self, norm: str) -> bool:
+        """
+        Khi đang ở bộ bàn phím dây Windows ('win') hoặc chế độ dọc Trackpad ('pad') và người dùng giữ Ctrl:
+        Tự động dịch các phím tắt chuẩn PC (Ctrl+C/V/X/Z/Y/A/S/F/Backspace/Arrows) sang thao tác tương ứng trên macOS.
+        """
+        if self.kb_layout not in ("win", "pad") or "ctrl" not in self.held_modifiers:
+            return False
+        if "cmd" in self.held_modifiers or "alt" in self.held_modifiers:
+            return False
+
+        self.telex.reset()
+        has_shift = "shift" in self.held_modifiers
+
+        # Ctrl + Y trên Windows -> Cmd + Shift + Z (Redo trên Mac)
+        if norm == "y" and not has_shift:
+            self._exec_translated_chord(
+                MAC_VK_MAP["z"], {"cmd", "shift"}
+            )
+            return True
+
+        # Ctrl + Backspace / Del / Left / Right trên Windows -> Option (Alt) trên Mac (xóa/nhảy từng từ)
+        if norm in ("backspace", "del", "delete", "left", "right") and norm in MAC_VK_MAP:
+            target_mods = {"alt"}
+            if has_shift:
+                target_mods.add("shift")
+            self._exec_translated_chord(MAC_VK_MAP[norm], target_mods)
+            return True
+
+        # Ctrl + C/V/X/Z/A/S/F/T/W/R/L/N... -> Cmd + phím trên Mac
+        if norm in WIN_CTRL_TO_CMD_KEYS and norm in MAC_VK_MAP:
+            target_mods = {"cmd"}
+            if has_shift:
+                target_mods.add("shift")
+            self._exec_translated_chord(MAC_VK_MAP[norm], target_mods)
+            return True
+
+        return False
+
+    def _exec_translated_chord(self, vk: int, target_mods: Set[str]) -> None:
+        if not self._use_quartz:
+            return
+        # Tạm nhả Ctrl vật lý, bắn tổ hợp đích (Cmd/Alt), rồi khôi phục Ctrl nếu vẫn đang giữ
+        self._quartz_post_vk(MAC_VK_MAP["ctrl"], False, override_mods=set())
+        for m in target_mods:
+            if m in MAC_VK_MAP:
+                self._quartz_post_vk(MAC_VK_MAP[m], True, override_mods=target_mods)
+        time.sleep(0.002)
+        self._quartz_post_vk(vk, True, override_mods=target_mods)
+        self._quartz_post_vk(vk, False, override_mods=target_mods)
+        time.sleep(0.002)
+        for m in target_mods:
+            if m in MAC_VK_MAP and m not in self.held_modifiers:
+                self._quartz_post_vk(MAC_VK_MAP[m], False, override_mods=set())
+        if "ctrl" in self.held_modifiers:
+            self._quartz_post_vk(
+                MAC_VK_MAP["ctrl"], True, override_mods=self.held_modifiers
+            )
+
     def press_key(self, raw_key: str) -> None:
         norm, auto_shift = self.normalize_key(raw_key)
         if not norm:
@@ -320,7 +764,69 @@ class KeyboardInjector:
 
         if norm == "capslock":
             self.caps_locked = not self.caps_locked
+            self.telex.reset()
 
+        # Kiểm tra ánh xạ phím tắt Ctrl chuẩn PC nếu đang ở giao diện Bàn phím dây Windows
+        if self._handle_win_layout_shortcut(norm):
+            return
+
+        has_non_shift_mod = any(
+            m in self.held_modifiers for m in ("cmd", "alt", "ctrl")
+        )
+
+        # Xử lý Backspace với bộ đệm Telex
+        if norm == "backspace" and not has_non_shift_mod:
+            self.telex.backspace()
+            self._send_raw_vk("backspace", False)
+            return
+
+        # Xử lý chữ cái qua bộ gõ Tiếng Việt Telex chuẩn PC
+        if (
+            self.vn_enabled
+            and not has_non_shift_mod
+            and len(norm) == 1
+            and "a" <= norm <= "z"
+        ):
+            is_upper = (auto_shift or ("shift" in self.held_modifiers)) != self.caps_locked
+            char_in = norm.upper() if is_upper else norm
+            old_w, new_w = self.telex.process_char(char_in)
+
+            # Tìm tiền tố chung dài nhất giữa từ cũ trên màn hình và từ mới sau khi ghép dấu
+            common_len = 0
+            max_common = min(len(old_w), len(new_w))
+            while common_len < max_common and old_w[common_len] == new_w[common_len]:
+                common_len += 1
+
+            del_count = len(old_w) - common_len
+            suffix = new_w[common_len:]
+
+            # Nếu chỉ nối thêm đúng 1 ký tự ASCII không dấu ở cuối -> bắn mã phím vật lý cực nhanh
+            if del_count == 0 and len(suffix) == 1 and suffix.isascii():
+                self._send_raw_vk(norm, auto_shift)
+                return
+
+            if self._use_quartz:
+                # Nếu đang đè Shift tay thì tạm nhả để Backspace và Unicode không bị kẹp Shift
+                shift_was_held = "shift" in self.held_modifiers
+                if shift_was_held:
+                    self._quartz_post_vk(MAC_VK_MAP["shift"], False, override_mods=set())
+                for _ in range(del_count):
+                    self._quartz_post_vk(MAC_VK_MAP["backspace"], True, override_mods=set())
+                    self._quartz_post_vk(MAC_VK_MAP["backspace"], False, override_mods=set())
+                if del_count > 0:
+                    time.sleep(0.003)
+                self._quartz_post_unicode(suffix)
+                if shift_was_held:
+                    self._quartz_post_vk(
+                        MAC_VK_MAP["shift"], True, override_mods=self.held_modifiers
+                    )
+                return
+
+        # Mọi phím khác (Space, Enter, dấu câu, mũi tên, số...) -> reset bộ đệm từ Telex
+        self.telex.reset()
+        self._send_raw_vk(norm, auto_shift)
+
+    def _send_raw_vk(self, norm: str, auto_shift: bool) -> None:
         extra_mods: Set[str] = {"shift"} if auto_shift else set()
 
         if self._use_quartz and norm in MAC_VK_MAP:
@@ -350,6 +856,7 @@ class KeyboardInjector:
     def press_combo(self, keys: List[str]) -> None:
         if not keys:
             return
+        self.telex.reset()
         mods: List[str] = []
         normals: List[str] = []
         for k in keys:
@@ -379,10 +886,8 @@ class KeyboardInjector:
                     self._quartz_post_vk(MAC_VK_MAP[m], False)
             return
 
-        # Fallback pynput (dùng trên Windows/Linux hoặc macOS thiếu Quartz)
         mapped_mods = []
         for m in mods:
-            # Trên Windows/Linux khi test cục bộ: ánh xạ cmd -> ctrl để test nhanh Ctrl+Z/C/V/A
             effective_mod = "ctrl" if (m == "cmd" and not IS_MACOS) else m
             pk = self._resolve_pynput_key(effective_mod)
             if pk is not None:
@@ -402,6 +907,14 @@ class KeyboardInjector:
                     self._kb.release(pk)
 
     def release_all_modifiers(self) -> None:
+        self.telex.reset()
+        if self._mouse_buttons_down:
+            for btn in list(self._mouse_buttons_down):
+                try:
+                    self.mouse_up(btn)
+                except Exception:
+                    pass
+            self._mouse_buttons_down.clear()
         if not self.held_modifiers:
             return
         stuck = list(self.held_modifiers)
@@ -412,6 +925,152 @@ class KeyboardInjector:
             except Exception:
                 pass
 
+    # -------------------- Mouse & Trackpad Control --------------------
+    def _sync_mouse_pos_if_needed(self) -> None:
+        if not self._use_quartz:
+            return
+        now = time.monotonic()
+        if now - self._last_mouse_sync > 0.12:
+            try:
+                q = self._quartz
+                loc = q.CGEventGetLocation(q.CGEventCreate(None))
+                self._mouse_x = float(loc.x)
+                self._mouse_y = float(loc.y)
+            except Exception:
+                pass
+        self._last_mouse_sync = now
+
+    def mouse_move(self, dx: float, dy: float) -> None:
+        if not self._use_quartz:
+            return
+        q = self._quartz
+        self._sync_mouse_pos_if_needed()
+        main_id = q.CGMainDisplayID()
+        max_w = float(q.CGDisplayPixelsWide(main_id))
+        max_h = float(q.CGDisplayPixelsHigh(main_id))
+
+        self._mouse_x = max(0.0, min(max_w - 1.0, self._mouse_x + dx))
+        self._mouse_y = max(0.0, min(max_h - 1.0, self._mouse_y + dy))
+
+        if "left" in self._mouse_buttons_down:
+            ev_type = q.kCGEventLeftMouseDragged
+            btn = q.kCGMouseButtonLeft
+        elif "right" in self._mouse_buttons_down:
+            ev_type = q.kCGEventRightMouseDragged
+            btn = q.kCGMouseButtonRight
+        else:
+            ev_type = q.kCGEventMouseMoved
+            btn = q.kCGMouseButtonLeft
+
+        ev = q.CGEventCreateMouseEvent(
+            None, ev_type, (self._mouse_x, self._mouse_y), btn
+        )
+        q.CGEventSetIntegerValueField(ev, q.kCGMouseEventDeltaX, int(round(dx)))
+        q.CGEventSetIntegerValueField(ev, q.kCGMouseEventDeltaY, int(round(dy)))
+        q.CGEventPost(q.kCGHIDEventTap, ev)
+
+    def mouse_down(self, button: str = "left") -> None:
+        self.telex.reset()
+        if not self._use_quartz:
+            return
+        q = self._quartz
+        self._sync_mouse_pos_if_needed()
+        self._mouse_buttons_down.add(button)
+
+        if button == "right":
+            ev_type = q.kCGEventRightMouseDown
+            btn = q.kCGMouseButtonRight
+            click_state = 1
+        else:
+            ev_type = q.kCGEventLeftMouseDown
+            btn = q.kCGMouseButtonLeft
+            now = time.monotonic()
+            if now - self._last_left_click_at < 0.32:
+                self._left_click_count += 1
+            else:
+                self._left_click_count = 1
+            self._last_left_click_at = now
+            click_state = self._left_click_count
+
+        ev = q.CGEventCreateMouseEvent(
+            None, ev_type, (self._mouse_x, self._mouse_y), btn
+        )
+        q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, click_state)
+        q.CGEventPost(q.kCGHIDEventTap, ev)
+
+    def mouse_up(self, button: str = "left") -> None:
+        if not self._use_quartz:
+            return
+        q = self._quartz
+        self._sync_mouse_pos_if_needed()
+        self._mouse_buttons_down.discard(button)
+
+        if button == "right":
+            ev_type = q.kCGEventRightMouseUp
+            btn = q.kCGMouseButtonRight
+            click_state = 1
+        else:
+            ev_type = q.kCGEventLeftMouseUp
+            btn = q.kCGMouseButtonLeft
+            click_state = max(1, self._left_click_count)
+
+        ev = q.CGEventCreateMouseEvent(
+            None, ev_type, (self._mouse_x, self._mouse_y), btn
+        )
+        q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, click_state)
+        q.CGEventPost(q.kCGHIDEventTap, ev)
+
+    def mouse_click(self, button: str = "left", count: int = 1) -> None:
+        self.telex.reset()
+        if not self._use_quartz:
+            return
+        q = self._quartz
+        self._sync_mouse_pos_if_needed()
+        if button == "right":
+            down_type = q.kCGEventRightMouseDown
+            up_type = q.kCGEventRightMouseUp
+            btn = q.kCGMouseButtonRight
+        else:
+            down_type = q.kCGEventLeftMouseDown
+            up_type = q.kCGEventLeftMouseUp
+            btn = q.kCGMouseButtonLeft
+
+        now = time.monotonic()
+        if button == "left" and count == 1:
+            if now - self._last_left_click_at < 0.32:
+                self._left_click_count += 1
+            else:
+                self._left_click_count = 1
+            self._last_left_click_at = now
+            click_state = self._left_click_count
+        else:
+            click_state = max(1, count)
+
+        ev_d = q.CGEventCreateMouseEvent(
+            None, down_type, (self._mouse_x, self._mouse_y), btn
+        )
+        q.CGEventSetIntegerValueField(ev_d, q.kCGMouseEventClickState, click_state)
+        q.CGEventPost(q.kCGHIDEventTap, ev_d)
+
+        ev_u = q.CGEventCreateMouseEvent(
+            None, up_type, (self._mouse_x, self._mouse_y), btn
+        )
+        q.CGEventSetIntegerValueField(ev_u, q.kCGMouseEventClickState, click_state)
+        q.CGEventPost(q.kCGHIDEventTap, ev_u)
+
+    def mouse_scroll(self, dx: float, dy: float) -> None:
+        if not self._use_quartz:
+            return
+        q = self._quartz
+        ev = q.CGEventCreateScrollWheelEvent(
+            None,
+            q.kCGScrollEventUnitPixel,
+            2,
+            int(round(dy)),
+            int(round(dx)),
+        )
+        q.CGEventPost(q.kCGHIDEventTap, ev)
+
 
 injector = KeyboardInjector()
 app = FastAPI(title="Mac Web Virtual Keyboard", docs_url=None, redoc_url=None)
@@ -421,7 +1080,7 @@ app = FastAPI(title="Mac Web Virtual Keyboard", docs_url=None, redoc_url=None)
 async def index() -> FileResponse:
     return FileResponse(
         STATIC_DIR / "index.html",
-        headers={"Cache-Control": "no-cache"},
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
 
 
@@ -430,7 +1089,7 @@ async def style_css() -> FileResponse:
     return FileResponse(
         STATIC_DIR / "style.css",
         media_type="text/css",
-        headers={"Cache-Control": "no-cache"},
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
 
 
@@ -439,7 +1098,7 @@ async def app_js() -> FileResponse:
     return FileResponse(
         STATIC_DIR / "app.js",
         media_type="application/javascript",
-        headers={"Cache-Control": "no-cache"},
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
 
 
@@ -448,13 +1107,29 @@ async def manifest_json() -> FileResponse:
     return FileResponse(
         STATIC_DIR / "manifest.json",
         media_type="application/manifest+json",
-        headers={"Cache-Control": "no-cache"},
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
+@app.get("/apk")
+async def download_apk() -> FileResponse:
+    apk_path = BASE_DIR / "releases" / "app-release.apk"
+    return FileResponse(
+        apk_path,
+        media_type="application/vnd.android.package-archive",
+        filename="MacKeyboard-v1.1.0.apk",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
 
 
 @app.get("/health")
 async def health() -> dict:
-    return {"ok": True, "platform": sys.platform}
+    return {
+        "ok": True,
+        "platform": sys.platform,
+        "vn_enabled": injector.vn_enabled,
+        "kb_layout": injector.kb_layout,
+    }
 
 
 @app.websocket("/ws")
@@ -462,10 +1137,26 @@ async def keyboard_ws(ws: WebSocket) -> None:
     await ws.accept()
     client_host = ws.client.host if ws.client else "unknown"
     trusted = check_macos_accessibility(prompt=True)
+    if injector.vn_enabled:
+        ensure_macos_abc_input_source()
     logger.info(
-        "Đã kết nối điện thoại từ: %s (Accessibility=%s)", client_host, trusted
+        "Đã kết nối điện thoại từ: %s (Accessibility=%s, Layout=%s, VN=%s)",
+        client_host,
+        trusted,
+        injector.kb_layout,
+        injector.vn_enabled,
     )
     warned_untrusted = not trusted
+    await ws.send_text(
+        json.dumps(
+            {
+                "type": "state",
+                "vn": injector.vn_enabled,
+                "layout": injector.kb_layout,
+                "trusted": trusted,
+            }
+        )
+    )
     if IS_MACOS and not trusted:
         await ws.send_text('{"type":"error","reason":"accessibility_denied"}')
     try:
@@ -498,6 +1189,42 @@ async def keyboard_ws(ws: WebSocket) -> None:
                 keys = data.get("keys")
                 if isinstance(keys, list):
                     injector.press_combo([str(k) for k in keys])
+            elif msg_type == "mouse_move":
+                dx = float(data.get("dx", 0.0))
+                dy = float(data.get("dy", 0.0))
+                injector.mouse_move(dx, dy)
+            elif msg_type == "mouse_click":
+                btn = str(data.get("button", "left"))
+                cnt = int(data.get("count", 1))
+                injector.mouse_click(btn, cnt)
+            elif msg_type == "mouse_down":
+                btn = str(data.get("button", "left"))
+                injector.mouse_down(btn)
+            elif msg_type == "mouse_up":
+                btn = str(data.get("button", "left"))
+                injector.mouse_up(btn)
+            elif msg_type == "mouse_scroll":
+                dx = float(data.get("dx", 0.0))
+                dy = float(data.get("dy", 0.0))
+                injector.mouse_scroll(dx, dy)
+            elif msg_type == "config":
+                if "vn" in data:
+                    injector.vn_enabled = bool(data["vn"])
+                    injector.telex.reset()
+                    if injector.vn_enabled:
+                        ensure_macos_abc_input_source()
+                if "layout" in data and data["layout"] in ("win", "mac", "pad"):
+                    injector.kb_layout = str(data["layout"])
+                    injector.telex.reset()
+                await ws.send_text(
+                    json.dumps(
+                        {
+                            "type": "state",
+                            "vn": injector.vn_enabled,
+                            "layout": injector.kb_layout,
+                        }
+                    )
+                )
             elif msg_type == "ping":
                 await ws.send_text('{"type":"pong"}')
     except WebSocketDisconnect:
@@ -505,7 +1232,6 @@ async def keyboard_ws(ws: WebSocket) -> None:
     except Exception as exc:
         logger.error("Lỗi WebSocket (%s): %s", client_host, exc)
     finally:
-        # Chống kẹt phím bổ trợ (Cmd/Shift/Alt/Ctrl) nếu rớt mạng đột ngột
         injector.release_all_modifiers()
 
 
