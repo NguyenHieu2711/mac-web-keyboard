@@ -1,0 +1,19 @@
+{
+  "name": "Mac Web Keyboard",
+  "short_name": "MacKeys",
+  "description": "Full PC/Mac Landscape Virtual Keyboard for macOS over LAN & Tailscale",
+  "start_url": "/",
+  "scope": "/",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#0b0e14",
+  "theme_color": "#0b0e14",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='38' fill='%230f172a'/%3E%3Crect x='22' y='48' width='148' height='96' rx='16' fill='%231e293b' stroke='%2338bdf8' stroke-width='5'/%3E%3Crect x='38' y='66' width='18' height='16' rx='4' fill='%23cbd5e1'/%3E%3Crect x='64' y='66' width='18' height='16' rx='4' fill='%23cbd5e1'/%3E%3Crect x='90' y='66' width='18' height='16' rx='4' fill='%23cbd5e1'/%3E%3Crect x='116' y='66' width='18' height='16' rx='4' fill='%23cbd5e1'/%3E%3Crect x='142' y='66' width='14' height='16' rx='4' fill='%2338bdf8'/%3E%3Crect x='38' y='90' width='22' height='16' rx='4' fill='%23cbd5e1'/%3E%3Crect x='68' y='90' width='18' height='16' rx='4' fill='%23cbd5e1'/%3E%3Crect x='94' y='90' width='18' height='16' rx='4' fill='%23cbd5e1'/%3E%3Crect x='120' y='90' width='36' height='16' rx='4' fill='%2338bdf8'/%3E%3Crect x='56' y='114' width='80' height='14' rx='4' fill='%2394a3b8'/%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
