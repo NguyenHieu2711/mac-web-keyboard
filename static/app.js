@@ -36,10 +36,13 @@
   const STORAGE_LENS_SCALE_KEY = "mac_kb_lens_scale";
   const STORAGE_LENS_ON_KEY = "mac_kb_lens_enabled";
   const STORAGE_PAD_VIEW_KEY = "mac_kb_pad_view_mode";
+  const STORAGE_PAD_SPLIT_KEY = "mac_kb_pad_split_mode";
 
   const padLensCanvas = document.getElementById("pad-lens-canvas");
   const kbLensCanvas = document.getElementById("kb-lens-canvas");
   const kbRibbonLens = document.getElementById("kb-ribbon-lens");
+  const padSplitBtns = Array.from(document.querySelectorAll(".js-pad-split-btn"));
+  const padSplitLabels = Array.from(document.querySelectorAll(".js-pad-split-label"));
   const fovLabels = Array.from(document.querySelectorAll(".js-fov-label"));
   const fovOutBtns = Array.from(document.querySelectorAll(".js-fov-out"));
   const fovInBtns = Array.from(document.querySelectorAll(".js-fov-in"));
@@ -122,6 +125,7 @@
   };
 
   let kbLayout = "pad";
+  let padSplitHorizontal = false;
   let vnEnabled = true;
   let symLayer = false;
   let symShifted = false;
@@ -131,6 +135,10 @@
     const savedLayout = localStorage.getItem(STORAGE_LAYOUT_KEY);
     if (savedLayout === "win" || savedLayout === "mac" || savedLayout === "pad") {
       kbLayout = savedLayout;
+    }
+    const savedSplit = localStorage.getItem(STORAGE_PAD_SPLIT_KEY);
+    if (savedSplit === "horizontal" || savedSplit === "1") {
+      padSplitHorizontal = true;
     }
     const savedVn = localStorage.getItem(STORAGE_VN_KEY);
     if (savedVn === "0" || savedVn === "false") {
@@ -142,11 +150,12 @@
 
   function applyOrientationForLayout() {
     try {
+      const wantPortrait = kbLayout === "pad" && !padSplitHorizontal;
+      const target = wantPortrait ? "portrait" : "landscape";
       if (hasAndroidBridge && typeof window.AndroidBridge.setOrientation === "function") {
-        window.AndroidBridge.setOrientation(kbLayout === "pad" ? "portrait" : "landscape");
+        window.AndroidBridge.setOrientation(target);
       }
       if (screen.orientation && typeof screen.orientation.lock === "function") {
-        const target = kbLayout === "pad" ? "portrait" : "landscape";
         screen.orientation.lock(target).catch(() => {});
       }
     } catch {
@@ -156,9 +165,19 @@
 
   function syncModeUI() {
     document.body.dataset.layout = kbLayout;
-    const lbl = LAYOUT_LABELS[kbLayout] || "📱 Windows dọc";
+    document.body.dataset.padSplit = padSplitHorizontal ? "horizontal" : "vertical";
+    const lbl =
+      kbLayout === "pad" && padSplitHorizontal
+        ? "📱 Win dọc"
+        : LAYOUT_LABELS[kbLayout] || "📱 Win dọc";
     layoutLabels.forEach((el) => {
       el.innerHTML = lbl;
+    });
+    padSplitBtns.forEach((el) => {
+      el.classList.toggle("is-active", padSplitHorizontal);
+    });
+    padSplitLabels.forEach((el) => {
+      el.textContent = padSplitHorizontal ? "◫ 60:40" : "⬒ Dọc";
     });
     vnBtns.forEach((el) => {
       el.classList.toggle("is-active", vnEnabled);
@@ -276,6 +295,24 @@
     }
     syncModeUI();
     pushConfigToServer();
+  }
+
+  function togglePadSplitMode() {
+    releaseAllActiveTouches();
+    padSplitHorizontal = !padSplitHorizontal;
+    modeMenuOpen = false;
+    symLayer = false;
+    symShifted = false;
+    try {
+      localStorage.setItem(
+        STORAGE_PAD_SPLIT_KEY,
+        padSplitHorizontal ? "horizontal" : "vertical"
+      );
+    } catch {
+      // ignore
+    }
+    syncModeUI();
+    setTimeout(pushLensConfigToServer, 160);
   }
 
   function toggleSymbolLayer() {
@@ -884,6 +921,12 @@
     if (action === "toggle-vn") {
       closeModeMenu();
       toggleVietnameseMode();
+      return;
+    }
+
+    if (action === "toggle-pad-split") {
+      closeModeMenu();
+      togglePadSplitMode();
       return;
     }
 

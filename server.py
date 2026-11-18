@@ -1483,7 +1483,7 @@ class LiveLensCapturer:
         fov_scale: float,
         mode: str,
     ) -> Tuple[int, int, int, int]:
-        safe_aspect = max(1.05, min(16.0, float(aspect or 1.85)))
+        safe_aspect = max(0.55, min(16.0, float(aspect or 1.85)))
         safe_scale = max(0.55, min(1.85, float(fov_scale or 1.15)))
 
         if mode == "landscape":
@@ -1695,7 +1695,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "1.9.9",
+        "version": "2.0.0",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,

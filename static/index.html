@@ -14,7 +14,7 @@
   <link rel="manifest" href="./manifest.json" />
   <link rel="stylesheet" href="./style.css" />
 </head>
-<body data-layout="pad" data-pad-view="lens">
+<body data-layout="pad" data-pad-view="lens" data-pad-split="vertical">
   <!-- =========================================================================
        CHẾ ĐỘ BÀN PHÍM NGANG CỐ ĐỊNH: BÀN PHÍM DÂY WINDOWS (WIN) & BÀN PHÍM MAC (MAC)
        ========================================================================= -->
@@ -342,9 +342,9 @@
     <div class="pad-top-section">
       <div class="pad-topbar">
         <!-- Nút sổ Pop-up dọc nhỏ ngay dưới nút -->
-        <div class="mode-dropdown-anchor" data-flex="1.75">
+        <div class="mode-dropdown-anchor" data-flex="1.55">
           <button type="button" class="key key-toggle key-layout-toggle w-full h-full" data-action="toggle-mode-menu">
-            <span class="key-main"><span class="js-layout-label">📱 Windows dọc</span> ▾</span>
+            <span class="key-main"><span class="js-layout-label">📱 Win dọc</span> ▾</span>
           </button>
           <div class="mode-dropdown-menu js-mode-menu is-hidden">
             <div class="mode-dropdown-item" data-select-layout="pad">
@@ -359,11 +359,16 @@
           </div>
         </div>
 
-        <button type="button" class="key key-toggle key-vn-toggle js-vn-btn is-active" data-action="toggle-vn" data-flex="1.2">
+        <button type="button" class="key key-toggle key-split-toggle js-pad-split-btn" data-action="toggle-pad-split" data-flex="1.08">
+          <span class="key-sub">Chia đôi</span>
+          <span class="key-main js-pad-split-label">⬒ Dọc</span>
+        </button>
+
+        <button type="button" class="key key-toggle key-vn-toggle js-vn-btn is-active" data-action="toggle-vn" data-flex="1.0">
           <span class="key-sub">Bộ gõ</span>
           <span class="key-main js-vn-label">🇻🇳 VN</span>
         </button>
-        <button type="button" class="key key-util" data-action="util" data-flex="0.85">
+        <button type="button" class="key key-util" data-action="util" data-flex="0.72">
           <span class="key-main js-util-icon">⛶</span>
           <span class="ws-dot js-ws-dot is-offline"></span>
         </button>
