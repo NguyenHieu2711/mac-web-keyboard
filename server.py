@@ -1084,7 +1084,11 @@ class KeyboardInjector:
         elif norm == "space":
             self.preview_committed = (self.preview_committed + " ")[-260:]
         elif norm in ("enter", "return"):
-            self.preview_committed = (self.preview_committed + "\n")[-260:]
+            if "shift" in self.held_modifiers:
+                self.preview_committed = (self.preview_committed + "\n")[-260:]
+            else:
+                # Ấn Enter gửi chữ đi -> xóa sạch khung chữ nháp trên Trackpad
+                self.preview_committed = ""
         elif norm == "tab":
             self.preview_committed = (self.preview_committed + "  ")[-260:]
         elif len(raw_key) == 1 and not has_non_shift_mod:
@@ -1695,7 +1699,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.0.0",
+        "version": "2.0.1",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,

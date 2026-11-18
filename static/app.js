@@ -886,8 +886,12 @@
       return;
     }
     if (lower === "enter" || lower === "return") {
-      const lines = (simpleTextBuffer + "\n").slice(-220).split("\n").slice(-4);
-      renderSimpleText(lines.join("\n"));
+      if (isModActive("shift")) {
+        const lines = (simpleTextBuffer + "\n").slice(-220).split("\n").slice(-4);
+        renderSimpleText(lines.join("\n"));
+      } else {
+        renderSimpleText("", "");
+      }
       return;
     }
     if (lower === "tab") {
@@ -1003,6 +1007,10 @@
     if (action === "press") {
       const rawKey = btn.dataset.key || "";
       if (!rawKey) return;
+      const lowerKey = rawKey.toLowerCase();
+      if ((lowerKey === "enter" || lowerKey === "return") && !isModActive("shift")) {
+        renderSimpleText("", "");
+      }
       markModifiersUsedInChord();
       const activeMods = MOD_NAMES.filter((m) => isModActive(m));
       sendPayload(
