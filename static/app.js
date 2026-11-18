@@ -35,6 +35,7 @@
   const STORAGE_VN_KEY = "mac_kb_vn_mode";
   const STORAGE_LENS_SCALE_KEY = "mac_kb_lens_scale";
   const STORAGE_LENS_ON_KEY = "mac_kb_lens_enabled";
+  const STORAGE_PAD_VIEW_KEY = "mac_kb_pad_view_mode";
 
   const padLensCanvas = document.getElementById("pad-lens-canvas");
   const kbLensCanvas = document.getElementById("kb-lens-canvas");
@@ -43,10 +44,21 @@
   const fovOutBtns = Array.from(document.querySelectorAll(".js-fov-out"));
   const fovInBtns = Array.from(document.querySelectorAll(".js-fov-in"));
   const lensToggleBtns = Array.from(document.querySelectorAll(".js-lens-toggle"));
+  const padViewBtns = Array.from(document.querySelectorAll(".js-pad-view-btn"));
+  const clearTextBtns = Array.from(document.querySelectorAll(".js-clear-text"));
+  const simpleWraps = Array.from(document.querySelectorAll(".js-simple-wrap"));
+  const simplePlaceholders = Array.from(document.querySelectorAll(".js-simple-placeholder"));
+  const simplePadTextEl = document.querySelector(".simple-text-pad .js-simple-text");
+  const simpleRibbonTextEl = document.querySelector(".simple-text-ribbon .js-simple-text");
+  const simpleBadges = Array.from(document.querySelectorAll(".js-simple-badge"));
 
   // Mặc định 1.22 (~0.8x): thu nhỏ nội dung vừa phải để nhìn rộng bao quát quanh trung tâm con chuột
   let lensFovScale = 1.22;
   let lensEnabled = true;
+  let padViewMode = "lens";
+  let simpleTextBuffer = "";
+  let badgeHideTimer = null;
+
   try {
     const savedScale = parseFloat(localStorage.getItem(STORAGE_LENS_SCALE_KEY) || "1.22");
     if (!Number.isNaN(savedScale) && savedScale >= 0.55 && savedScale <= 1.85) {
@@ -56,8 +68,44 @@
     if (savedOn === "0") {
       lensEnabled = false;
     }
+    const savedPadView = localStorage.getItem(STORAGE_PAD_VIEW_KEY);
+    if (savedPadView === "lens" || savedPadView === "text") {
+      padViewMode = savedPadView;
+    }
   } catch {
     // ignore
+  }
+
+  function renderSimpleText(text, badge = "") {
+    simpleTextBuffer = String(text || "");
+    const hasText = simpleTextBuffer.length > 0;
+    if (simplePadTextEl) {
+      simplePadTextEl.textContent = simpleTextBuffer;
+    }
+    if (simpleRibbonTextEl) {
+      simpleRibbonTextEl.textContent = simpleTextBuffer.replace(/\n/g, "  ↵  ").slice(-62);
+    }
+
+    if (badge) {
+      if (badgeHideTimer) clearTimeout(badgeHideTimer);
+      simpleBadges.forEach((el) => {
+        el.textContent = badge;
+        el.classList.remove("is-hidden");
+      });
+      badgeHideTimer = setTimeout(() => {
+        badgeHideTimer = null;
+        simpleBadges.forEach((el) => el.classList.add("is-hidden"));
+        const stillHasText = simpleTextBuffer.length > 0;
+        simpleWraps.forEach((el) => el.classList.toggle("is-hidden", !stillHasText));
+        simplePlaceholders.forEach((el) => el.classList.toggle("is-hidden", stillHasText));
+      }, 1100);
+    }
+
+    const activeBadgeVisible = Boolean(badge) || Boolean(badgeHideTimer);
+    const showWrap = hasText || activeBadgeVisible;
+    simpleWraps.forEach((el) => el.classList.toggle("is-hidden", !showWrap));
+    simplePlaceholders.forEach((el) => el.classList.toggle("is-hidden", showWrap));
+    clearTextBtns.forEach((el) => el.classList.toggle("is-hidden", !hasText));
   }
 
   const APPLE_SVG =
@@ -128,7 +176,11 @@
   }
 
   function syncLensControlsUI() {
+    document.body.dataset.padView = padViewMode;
     document.body.classList.toggle("is-lens-off", !lensEnabled);
+    padViewBtns.forEach((btn) => {
+      btn.classList.toggle("is-active", btn.dataset.padView === padViewMode);
+    });
     const zoomRatio = (1 / lensFovScale).toFixed(1) + "x";
     fovLabels.forEach((el) => {
       el.textContent = zoomRatio;
@@ -149,7 +201,7 @@
     }
     sendPayload({
       type: "lens_config",
-      enabled: lensEnabled,
+      enabled: lensEnabled && padViewMode === "lens",
       aspect,
       scale: +lensFovScale.toFixed(2),
       mode: kbLayout === "pad" ? "portrait" : "landscape",
@@ -283,6 +335,7 @@
         if (symKey) {
           markModifiersUsedInChord();
           sendPayload({ type: "press", key: symKey });
+          applyOfflinePreviewKey(symKey);
           consumeStickyModifiersAfterKey();
         }
         closeSymbolPopup();
@@ -434,7 +487,7 @@
   }
 
   async function processLensPacket(buffer) {
-    if (!lensEnabled || buffer.byteLength <= 12) return;
+    if (!lensEnabled || padViewMode !== "lens" || buffer.byteLength <= 12) return;
     const view = new DataView(buffer);
     if (view.getUint32(0, false) !== 0x4c454e53) return;
 
@@ -542,6 +595,17 @@
     ws.addEventListener("message", (ev) => {
       if (ev.data instanceof ArrayBuffer) {
         void processLensPacket(ev.data);
+        return;
+      }
+      if (typeof ev.data === "string") {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg && msg.type === "typed_preview") {
+            renderSimpleText(msg.text || "", msg.badge || "");
+          }
+        } catch {
+          // ignore
+        }
       }
     });
 
@@ -764,6 +828,48 @@
     }
   }
 
+  function applyOfflinePreviewKey(rawKey, btnShiftChar = "") {
+    if (ws && ws.readyState === WebSocket.OPEN) return;
+    const lower = String(rawKey || "").toLowerCase();
+    const hasNonShift = isModActive("cmd") || isModActive("ctrl") || isModActive("alt");
+    if (hasNonShift) {
+      const mods = MOD_NAMES.filter((m) => isModActive(m)).map((m) => m.toUpperCase());
+      renderSimpleText(simpleTextBuffer, `${mods.join("+")}+${lower.toUpperCase()}`);
+      return;
+    }
+    if (lower === "backspace") {
+      renderSimpleText(simpleTextBuffer.slice(0, -1));
+      return;
+    }
+    if (lower === "space") {
+      renderSimpleText((simpleTextBuffer + " ").slice(-220));
+      return;
+    }
+    if (lower === "enter" || lower === "return") {
+      const lines = (simpleTextBuffer + "\n").slice(-220).split("\n").slice(-4);
+      renderSimpleText(lines.join("\n"));
+      return;
+    }
+    if (lower === "tab") {
+      renderSimpleText((simpleTextBuffer + "  ").slice(-220));
+      return;
+    }
+    if (rawKey.length === 1) {
+      let ch = rawKey;
+      if (lower >= "a" && lower <= "z") {
+        const upper = isModActive("shift") !== capsLocked;
+        ch = upper ? lower.toUpperCase() : lower;
+      } else if (isModActive("shift") && btnShiftChar) {
+        ch = btnShiftChar;
+      }
+      renderSimpleText((simpleTextBuffer + ch).slice(-220));
+      return;
+    }
+    if (["up", "down", "left", "right", "esc", "del", "delete"].includes(lower)) {
+      renderSimpleText(simpleTextBuffer, lower.toUpperCase());
+    }
+  }
+
   function fireKeyButtonAction(btn) {
     const action = btn.dataset.action;
 
@@ -819,6 +925,9 @@
     if (action === "caps") {
       capsLocked = !capsLocked;
       sendPayload({ type: "press", key: "capslock" });
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        renderSimpleText(simpleTextBuffer, capsLocked ? "CAPS" : "caps");
+      }
       syncModifierVisuals();
       return;
     }
@@ -831,6 +940,15 @@
         .filter(Boolean);
       if (keys.length > 0) {
         sendPayload({ type: "combo", keys });
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          const lowerK = keys.map((k) => k.toLowerCase());
+          if (lowerK.includes("backspace") && (lowerK.includes("cmd") || lowerK.includes("ctrl"))) {
+            const nl = simpleTextBuffer.lastIndexOf("\n");
+            renderSimpleText(nl >= 0 ? simpleTextBuffer.slice(0, nl + 1) : "", "⌘⌫");
+          } else {
+            renderSimpleText(simpleTextBuffer, keys.map((k) => k.toUpperCase()).join("+"));
+          }
+        }
       }
       consumeStickyModifiersAfterKey();
       return;
@@ -841,6 +959,7 @@
       if (!rawKey) return;
       markModifiersUsedInChord();
       sendPayload({ type: "press", key: rawKey });
+      applyOfflinePreviewKey(rawKey, btn.dataset.shift || "");
       consumeStickyModifiersAfterKey();
     }
   }
@@ -941,6 +1060,7 @@
   function fireArrowDirection(dir) {
     markModifiersUsedInChord();
     sendPayload({ type: "press", key: dir });
+    applyOfflinePreviewKey(dir);
     consumeStickyModifiersAfterKey();
   }
 
@@ -1078,30 +1198,74 @@
     pushLensConfigToServer();
   }
 
-  fovOutBtns.forEach((btn) => {
+  function bindHudTap(btn, callback) {
+    if (!btn) return;
+    let lastTouchAt = 0;
+    btn.addEventListener(
+      "touchstart",
+      (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        lastTouchAt = performance.now();
+        callback();
+      },
+      { passive: false }
+    );
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
+      if (performance.now() - lastTouchAt < 450) return;
+      callback();
+    });
+  }
+
+  function setPadViewMode(nextMode) {
+    if (nextMode !== "lens" && nextMode !== "text") return;
+    if (padViewMode === nextMode) return;
+    triggerHaptic(10);
+    padViewMode = nextMode;
+    try {
+      localStorage.setItem(STORAGE_PAD_VIEW_KEY, padViewMode);
+    } catch {
+      // ignore
+    }
+    syncLensControlsUI();
+    pushLensConfigToServer();
+  }
+
+  padViewBtns.forEach((btn) => {
+    bindHudTap(btn, () => {
+      setPadViewMode(btn.dataset.padView || "lens");
+    });
+  });
+
+  clearTextBtns.forEach((btn) => {
+    bindHudTap(btn, () => {
+      triggerHaptic(8);
+      renderSimpleText("", "");
+      sendPayload({ type: "clear_preview" });
+    });
+  });
+
+  fovOutBtns.forEach((btn) => {
+    bindHudTap(btn, () => {
       updateLensFov(0.18, false);
     });
   });
 
   fovInBtns.forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
+    bindHudTap(btn, () => {
       updateLensFov(-0.18, false);
     });
   });
 
   fovLabels.forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
+    bindHudTap(btn, () => {
       updateLensFov(0, true);
     });
   });
 
   lensToggleBtns.forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
+    bindHudTap(btn, () => {
       triggerHaptic(10);
       lensEnabled = !lensEnabled;
       try {
@@ -1115,6 +1279,7 @@
   });
 
   syncLensControlsUI();
+  renderSimpleText("", "");
 
   function applyPointerAcceleration(dx, dy) {
     const dist = Math.hypot(dx, dy);
@@ -1137,7 +1302,7 @@
     surface.addEventListener(
       "touchstart",
       (e) => {
-        if (e.target.closest(".lens-hud-right")) {
+        if (e.target.closest(".lens-hud-right, .lens-hud-left")) {
           return;
         }
         e.preventDefault();

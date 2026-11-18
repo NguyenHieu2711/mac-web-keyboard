@@ -14,20 +14,29 @@
   <link rel="manifest" href="./manifest.json" />
   <link rel="stylesheet" href="./style.css" />
 </head>
-<body data-layout="pad">
+<body data-layout="pad" data-pad-view="lens">
   <!-- =========================================================================
        CHẾ ĐỘ BÀN PHÍM NGANG CỐ ĐỊNH: BÀN PHÍM DÂY WINDOWS (WIN) & BÀN PHÍM MAC (MAC)
        ========================================================================= -->
   <main id="kb-shell" class="kb-shell">
-    <!-- KHE KÍNH SOI TÂM CHUỘT (RIBBON LENS) TRÊN MÀN NGANG -->
+    <!-- KHE KÍNH SOI TÂM CHUỘT / HIỂN THỊ CHỮ ĐƠN GIẢN TRÊN MÀN NGANG -->
     <div id="kb-ribbon-lens" class="kb-ribbon-lens">
       <canvas id="kb-lens-canvas" class="lens-canvas"></canvas>
-      <div class="lens-ribbon-hint">Kính Soi Tâm Chuột • Rê 1 ngón để di chuột &amp; chạm Click</div>
+      <div class="lens-ribbon-hint">Rê 1 ngón di chuột • Chạm để Click</div>
+      <div class="simple-text-view simple-text-ribbon">
+        <div class="simple-text-ribbon-line is-hidden js-simple-wrap"><span class="js-simple-text"></span><span class="simple-caret"></span><span class="js-simple-badge simple-badge is-hidden"></span></div>
+        <div class="simple-text-placeholder js-simple-placeholder">Gõ phím để hiện chữ tại đây</div>
+      </div>
+      <div class="lens-hud-left">
+        <button type="button" class="lens-seg-btn js-pad-view-btn is-active" data-pad-view="lens">🖥 Soi</button>
+        <button type="button" class="lens-seg-btn js-pad-view-btn" data-pad-view="text">Aa Chữ</button>
+      </div>
       <div class="lens-hud-right">
-        <button type="button" class="lens-ctrl-btn js-fov-out">−</button>
-        <button type="button" class="lens-ctrl-label js-fov-label">0.8x</button>
-        <button type="button" class="lens-ctrl-btn js-fov-in">+</button>
-        <button type="button" class="lens-ctrl-btn js-lens-toggle">👁</button>
+        <button type="button" class="lens-ctrl-btn js-fov-out lens-only-ctrl">−</button>
+        <button type="button" class="lens-ctrl-label js-fov-label lens-only-ctrl">0.8x</button>
+        <button type="button" class="lens-ctrl-btn js-fov-in lens-only-ctrl">+</button>
+        <button type="button" class="lens-ctrl-btn js-lens-toggle lens-only-ctrl">👁</button>
+        <button type="button" class="lens-ctrl-btn js-clear-text text-only-ctrl is-hidden">✕</button>
       </div>
     </div>
 
@@ -363,14 +372,23 @@
       <div id="trackpad-surface" class="trackpad-surface">
         <canvas id="pad-lens-canvas" class="lens-canvas"></canvas>
         <div class="trackpad-hint">
-          <div class="trackpad-title">TRACKPAD • LIVE LENS</div>
-          <div class="trackpad-sub">1 ngón: Di chuột / Chạm Click • 2 ngón: Cuộn / Chuột phải</div>
+          <div class="trackpad-title">Trackpad</div>
+          <div class="trackpad-sub">1 ngón: Di chuột / Click • 2 ngón: Cuộn / Chuột phải</div>
+        </div>
+        <div class="simple-text-view simple-text-pad">
+          <div class="simple-text-pad-box is-hidden js-simple-wrap"><span class="js-simple-text"></span><span class="simple-caret"></span><span class="js-simple-badge simple-badge is-hidden"></span></div>
+          <div class="simple-text-placeholder js-simple-placeholder">Gõ phím để hiện chữ tại đây</div>
+        </div>
+        <div class="lens-hud-left">
+          <button type="button" class="lens-seg-btn js-pad-view-btn is-active" data-pad-view="lens">🖥 Soi</button>
+          <button type="button" class="lens-seg-btn js-pad-view-btn" data-pad-view="text">Aa Chữ</button>
         </div>
         <div class="lens-hud-right">
-          <button type="button" class="lens-ctrl-btn js-fov-out">−</button>
-          <button type="button" class="lens-ctrl-label js-fov-label">0.8x</button>
-          <button type="button" class="lens-ctrl-btn js-fov-in">+</button>
-          <button type="button" class="lens-ctrl-btn js-lens-toggle">👁</button>
+          <button type="button" class="lens-ctrl-btn js-fov-out lens-only-ctrl">−</button>
+          <button type="button" class="lens-ctrl-label js-fov-label lens-only-ctrl">0.8x</button>
+          <button type="button" class="lens-ctrl-btn js-fov-in lens-only-ctrl">+</button>
+          <button type="button" class="lens-ctrl-btn js-lens-toggle lens-only-ctrl">👁</button>
+          <button type="button" class="lens-ctrl-btn js-clear-text text-only-ctrl is-hidden">✕</button>
         </div>
       </div>
 

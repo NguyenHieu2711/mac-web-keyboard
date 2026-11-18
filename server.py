@@ -535,6 +535,8 @@ class KeyboardInjector:
         self.vn_enabled: bool = True
         self.kb_layout: str = "win"  # "win", "mac", hoặc "pad" (Chế độ dọc Trackpad + Phím)
         self.telex = VietnameseTelexEngine()
+        self.preview_committed: str = ""
+        self.last_badge: str = ""
         self._use_quartz = False
         self._quartz = None
         self._event_source = None
@@ -694,6 +696,7 @@ class KeyboardInjector:
         if norm in ("cmd", "shift", "alt", "ctrl"):
             self.held_modifiers.add(norm)
             if norm in ("cmd", "alt", "ctrl"):
+                self._commit_telex_word_to_preview()
                 self.telex.reset()
 
         if self._use_quartz and norm in MAC_VK_MAP:
@@ -729,6 +732,7 @@ class KeyboardInjector:
         if "cmd" in self.held_modifiers or "alt" in self.held_modifiers:
             return False
 
+        self._commit_telex_word_to_preview()
         self.telex.reset()
         has_shift = "shift" in self.held_modifiers
 
@@ -777,6 +781,25 @@ class KeyboardInjector:
                 MAC_VK_MAP["ctrl"], True, override_mods=self.held_modifiers
             )
 
+    def get_live_preview_snapshot(self) -> dict:
+        full_text = (self.preview_committed + self.telex.word)[-220:]
+        # Giữ tối đa 4 dòng gần nhất để hiển thị thoáng sạch trên Trackpad
+        lines = full_text.split("\n")
+        if len(lines) > 4:
+            full_text = "\n".join(lines[-4:])
+        badge = self.last_badge
+        self.last_badge = ""
+        return {"type": "typed_preview", "text": full_text, "badge": badge}
+
+    def clear_live_preview(self) -> None:
+        self.preview_committed = ""
+        self.telex.reset()
+        self.last_badge = ""
+
+    def _commit_telex_word_to_preview(self) -> None:
+        if self.telex.word:
+            self.preview_committed = (self.preview_committed + self.telex.word)[-260:]
+
     def press_key(self, raw_key: str) -> None:
         self.last_activity_at = time.monotonic()
         norm, auto_shift = self.normalize_key(raw_key)
@@ -785,19 +808,29 @@ class KeyboardInjector:
 
         if norm == "capslock":
             self.caps_locked = not self.caps_locked
+            self._commit_telex_word_to_preview()
             self.telex.reset()
+            self.last_badge = "CAPS" if self.caps_locked else "caps"
 
         # Kiểm tra ánh xạ phím tắt Ctrl chuẩn PC nếu đang ở giao diện Bàn phím dây Windows
         if self._handle_win_layout_shortcut(norm):
+            self.last_badge = f"Ctrl+{norm.upper()}"
+            if norm in ("backspace", "del", "delete"):
+                self.preview_committed = self.preview_committed.rstrip(" ")
+                idx = max(self.preview_committed.rfind(" "), self.preview_committed.rfind("\n"))
+                self.preview_committed = self.preview_committed[: idx + 1] if idx >= 0 else ""
             return
 
         has_non_shift_mod = any(
             m in self.held_modifiers for m in ("cmd", "alt", "ctrl")
         )
 
-        # Xử lý Backspace với bộ đệm Telex
+        # Xử lý Backspace với bộ đệm Telex & bộ đệm hiển thị chữ đơn giản
         if norm == "backspace" and not has_non_shift_mod:
-            self.telex.backspace()
+            if self.telex.word:
+                self.telex.backspace()
+            elif self.preview_committed:
+                self.preview_committed = self.preview_committed[:-1]
             self._send_raw_vk("backspace", False)
             return
 
@@ -843,8 +876,29 @@ class KeyboardInjector:
                     )
                 return
 
-        # Mọi phím khác (Space, Enter, dấu câu, mũi tên, số...) -> reset bộ đệm từ Telex
+        # Mọi phím khác (Space, Enter, dấu câu, mũi tên, số...) -> chốt từ hiện tại vào bộ đệm hiển thị rồi reset Telex
+        self._commit_telex_word_to_preview()
         self.telex.reset()
+
+        if has_non_shift_mod:
+            mod_prefix = "+".join(sorted(m.capitalize() for m in self.held_modifiers))
+            self.last_badge = f"{mod_prefix}+{norm.upper()}"
+        elif norm == "space":
+            self.preview_committed = (self.preview_committed + " ")[-260:]
+        elif norm in ("enter", "return"):
+            self.preview_committed = (self.preview_committed + "\n")[-260:]
+        elif norm == "tab":
+            self.preview_committed = (self.preview_committed + "  ")[-260:]
+        elif len(raw_key) == 1 and not has_non_shift_mod:
+            is_shifted = auto_shift or ("shift" in self.held_modifiers)
+            ch_out = raw_key
+            if "a" <= norm <= "z":
+                upper_en = is_shifted != self.caps_locked
+                ch_out = norm.upper() if upper_en else norm
+            self.preview_committed = (self.preview_committed + ch_out)[-260:]
+        elif norm in ("up", "down", "left", "right", "esc", "del", "delete"):
+            self.last_badge = norm.upper()
+
         self._send_raw_vk(norm, auto_shift)
 
     def _send_raw_vk(self, norm: str, auto_shift: bool) -> None:
@@ -878,7 +932,15 @@ class KeyboardInjector:
         if not keys:
             return
         self.last_activity_at = time.monotonic()
+        self._commit_telex_word_to_preview()
         self.telex.reset()
+        lower_keys = [k.strip().lower() for k in keys]
+        if "backspace" in lower_keys and ("cmd" in lower_keys or "ctrl" in lower_keys):
+            last_nl = self.preview_committed.rfind("\n")
+            self.preview_committed = self.preview_committed[: last_nl + 1] if last_nl >= 0 else ""
+            self.last_badge = "⌘⌫"
+        else:
+            self.last_badge = "+".join(k.upper() for k in keys)
         mods: List[str] = []
         normals: List[str] = []
         for k in keys:
@@ -1029,6 +1091,7 @@ class KeyboardInjector:
 
     def mouse_down(self, button: str = "left") -> None:
         self.last_activity_at = time.monotonic()
+        self._commit_telex_word_to_preview()
         self.telex.reset()
         if not self._use_quartz:
             try:
@@ -1094,6 +1157,7 @@ class KeyboardInjector:
 
     def mouse_click(self, button: str = "left", count: int = 1) -> None:
         self.last_activity_at = time.monotonic()
+        self._commit_telex_word_to_preview()
         self.telex.reset()
         if not self._use_quartz:
             try:
@@ -1267,8 +1331,13 @@ class LiveLensCapturer:
             with self._objc.autorelease_pool():
                 mon_left, mon_top = 0.0, 0.0
                 main_id = q.CGMainDisplayID()
-                mon_w = float(q.CGDisplayPixelsWide(main_id))
-                mon_h = float(q.CGDisplayPixelsHigh(main_id))
+                try:
+                    mb = q.CGDisplayBounds(main_id)
+                    mon_left, mon_top = float(mb.origin.x), float(mb.origin.y)
+                    mon_w, mon_h = float(mb.size.width), float(mb.size.height)
+                except Exception:
+                    mon_w = float(q.CGDisplayPixelsWide(main_id))
+                    mon_h = float(q.CGDisplayPixelsHigh(main_id))
                 try:
                     err, active_ids, count = q.CGGetActiveDisplayList(8, None, None)
                     if err == 0 and count > 0:
@@ -1414,11 +1483,14 @@ async def download_apk() -> FileResponse:
 
 @app.get("/health")
 async def health() -> dict:
+    import os
+
     real_py = str(Path(sys.executable).resolve())
     py_app = real_py.split("/Python.app/")[0] + "/Python.app" if "/Python.app/" in real_py else real_py
     return {
         "ok": True,
-        "version": "1.9.3",
+        "version": "1.9.4",
+        "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
         "kb_layout": injector.kb_layout,
@@ -1426,6 +1498,30 @@ async def health() -> dict:
         "screen_recording_ok": check_macos_screen_recording(prompt=False),
         "python_app": py_app,
     }
+
+
+def _trigger_clean_respawn() -> None:
+    import os
+
+    if IS_MACOS and hasattr(os, "getuid"):
+        try:
+            subprocess.Popen(
+                ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.nguyenhieu.macwebkeyboard"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+    time.sleep(0.35)
+    os._exit(0)
+
+
+@app.post("/respawn")
+@app.get("/respawn")
+async def respawn_worker() -> dict:
+    """Khởi chạy lại tiến trình mới sạch hoàn toàn qua launchd để nhận quyền Screen Recording vừa bật."""
+    threading.Timer(0.2, _trigger_clean_respawn).start()
+    return {"ok": True, "restarting": True}
 
 
 @app.post("/open-screen-perm")
@@ -1477,6 +1573,9 @@ async def keyboard_ws(ws: WebSocket) -> None:
                 "lens": lens_capturer.available,
             }
         )
+    )
+    await ws.send_text(
+        json.dumps(injector.get_live_preview_snapshot(), ensure_ascii=False)
     )
     if IS_MACOS and not trusted:
         await ws.send_text('{"type":"error","reason":"accessibility_denied"}')
@@ -1551,6 +1650,7 @@ async def keyboard_ws(ws: WebSocket) -> None:
             if msg_type == "press":
                 key = str(data.get("key", ""))
                 injector.press_key(key)
+                await ws.send_text(json.dumps(injector.get_live_preview_snapshot(), ensure_ascii=False))
             elif msg_type == "down":
                 key = str(data.get("key", ""))
                 injector.key_down(key)
@@ -1561,6 +1661,10 @@ async def keyboard_ws(ws: WebSocket) -> None:
                 keys = data.get("keys")
                 if isinstance(keys, list):
                     injector.press_combo([str(k) for k in keys])
+                    await ws.send_text(json.dumps(injector.get_live_preview_snapshot(), ensure_ascii=False))
+            elif msg_type == "clear_preview":
+                injector.clear_live_preview()
+                await ws.send_text(json.dumps(injector.get_live_preview_snapshot(), ensure_ascii=False))
             elif msg_type == "mouse_move":
                 dx = float(data.get("dx", 0.0))
                 dy = float(data.get("dy", 0.0))
@@ -1581,11 +1685,13 @@ async def keyboard_ws(ws: WebSocket) -> None:
                 injector.mouse_scroll(dx, dy)
             elif msg_type == "config":
                 if "vn" in data:
+                    injector._commit_telex_word_to_preview()
                     injector.vn_enabled = bool(data["vn"])
                     injector.telex.reset()
                     if injector.vn_enabled:
                         ensure_macos_abc_input_source()
                 if "layout" in data and data["layout"] in ("win", "mac", "pad"):
+                    injector._commit_telex_word_to_preview()
                     injector.kb_layout = str(data["layout"])
                     injector.telex.reset()
                 await ws.send_text(
@@ -1865,7 +1971,7 @@ def start_git_auto_updater(check_every_sec: float = 45.0) -> None:
                         check=False,
                     )
                     if pull_res.returncode == 0:
-                        os.execv(sys.executable, [sys.executable, str(BASE_DIR / "server.py")])
+                        _trigger_clean_respawn()
             except Exception:
                 pass
 
