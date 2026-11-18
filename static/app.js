@@ -1612,21 +1612,23 @@
           }
         }
 
-        // Chạm đúng 2 ngón và không ở chế độ Kéo -> Cuộn trang 2 ngón
+        // Chạm đúng 2 ngón và không ở chế độ Kéo -> Cuộn trang 2 ngón (đằm, dừng đâu đứng đó)
         if (tpTouches.size === 2 && !tpDragActive) {
           cancelLongPressTimer();
-          tpScrollRemX += -dx * 0.85;
-          tpScrollRemY += -dy * 0.85;
-          const sendSx = Math.trunc(tpScrollRemX);
-          const sendSy = Math.trunc(tpScrollRemY);
-          if (sendSx !== 0 || sendSy !== 0) {
-            tpScrollRemX -= sendSx;
-            tpScrollRemY -= sendSy;
-            sendPayload({
-              type: "mouse_scroll",
-              dx: sendSx,
-              dy: sendSy,
-            });
+          tpScrollRemX += -dx * 0.42;
+          tpScrollRemY += -dy * 0.42;
+          if (Math.abs(tpScrollRemX) >= 1.8 || Math.abs(tpScrollRemY) >= 1.8) {
+            const sendSx = Math.trunc(tpScrollRemX);
+            const sendSy = Math.trunc(tpScrollRemY);
+            if (sendSx !== 0 || sendSy !== 0) {
+              tpScrollRemX -= sendSx;
+              tpScrollRemY -= sendSy;
+              sendPayload({
+                type: "mouse_scroll",
+                dx: sendSx,
+                dy: sendSy,
+              });
+            }
           }
           return;
         }
@@ -1749,8 +1751,9 @@
 
     function emitScrollStep(deltaY) {
       if (Math.abs(deltaY) < 0.1) return;
-      const gain = Math.min(1.25, 0.68 + Math.abs(deltaY) * 0.02);
+      const gain = Math.min(0.58, 0.34 + Math.abs(deltaY) * 0.008);
       scrollRemY += -deltaY * gain;
+      if (Math.abs(scrollRemY) < 1.8) return;
       const sendY = Math.trunc(scrollRemY);
       if (sendY !== 0) {
         scrollRemY -= sendY;
@@ -1829,32 +1832,34 @@
             const relY = rect.height > 0 ? (t.clientY - rect.top) / rect.height : 0.5;
             if (relY < 0.3) {
               triggerHaptic(6);
-              sendPayload({ type: "mouse_scroll", dx: 0, dy: 24 });
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: 14 });
             } else if (relY > 0.7) {
               triggerHaptic(6);
-              sendPayload({ type: "mouse_scroll", dx: 0, dy: -24 });
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: -14 });
             }
             return;
           }
 
-          if (Math.abs(velocityPxMs) > 0.65) {
-            let vFrame = velocityPxMs * 6.0;
+          if (Math.abs(velocityPxMs) > 1.1) {
+            let vFrame = velocityPxMs * 2.6;
             let inertiaRem = 0;
             const stepInertia = () => {
-              vFrame *= 0.85;
-              if (Math.abs(vFrame) < 0.6) {
+              vFrame *= 0.78;
+              if (Math.abs(vFrame) < 0.5) {
                 inertiaRaf = null;
                 return;
               }
-              inertiaRem += -vFrame * 0.85;
-              const sendY = Math.trunc(inertiaRem);
-              if (sendY !== 0) {
-                inertiaRem -= sendY;
-                sendPayload({
-                  type: "mouse_scroll",
-                  dx: 0,
-                  dy: sendY,
-                });
+              inertiaRem += -vFrame * 0.45;
+              if (Math.abs(inertiaRem) >= 1.8) {
+                const sendY = Math.trunc(inertiaRem);
+                if (sendY !== 0) {
+                  inertiaRem -= sendY;
+                  sendPayload({
+                    type: "mouse_scroll",
+                    dx: 0,
+                    dy: sendY,
+                  });
+                }
               }
               inertiaRaf = requestAnimationFrame(stepInertia);
             };
@@ -1999,7 +2004,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.0.7";
+  const BUNDLED_WEB_VERSION = "2.0.8";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();
