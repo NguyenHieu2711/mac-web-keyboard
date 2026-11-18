@@ -1166,20 +1166,23 @@ class LiveLensCapturer:
     def __init__(self, kb_injector: KeyboardInjector) -> None:
         self.inj = kb_injector
         self._quartz = None
-        self._appkit = None
+        self._foundation = None
+        self._objc = None
         self._mss_mod = None
         self._pil_image = None
         self._prev_mouse: Tuple[float, float] = (0.0, 0.0)
 
         if IS_MACOS:
             try:
-                import AppKit  # type: ignore
+                import Foundation  # type: ignore
+                import objc  # type: ignore
                 import Quartz  # type: ignore
 
                 self._quartz = Quartz
-                self._appkit = AppKit
+                self._foundation = Foundation
+                self._objc = objc
             except Exception as exc:
-                logger.warning("Không nạp được Quartz/AppKit cho Live Lens: %s", exc)
+                logger.warning("Không nạp được Quartz/Foundation cho Live Lens: %s", exc)
 
         if self._quartz is None:
             try:
@@ -1193,9 +1196,11 @@ class LiveLensCapturer:
 
     @property
     def available(self) -> bool:
-        return (self._quartz is not None and self._appkit is not None) or (
-            self._mss_mod is not None and self._pil_image is not None
-        )
+        return (
+            self._quartz is not None
+            and self._foundation is not None
+            and self._objc is not None
+        ) or (self._mss_mod is not None and self._pil_image is not None)
 
     def _compute_crop_geometry(
         self,
@@ -1251,54 +1256,61 @@ class LiveLensCapturer:
         jpeg_bytes: Optional[bytes] = None
         left, top, crop_w, crop_h = 0, 0, 800, 400
 
-        # 1. Đường dẫn phần cứng gốc trên macOS (Quartz + NSBitmapImageRep)
-        if self._quartz is not None and self._appkit is not None:
+        # 1. Đường dẫn phần cứng gốc trên macOS (Quartz + ImageIO CGImageDestination + autorelease_pool)
+        if (
+            self._quartz is not None
+            and self._foundation is not None
+            and self._objc is not None
+        ):
             q = self._quartz
-            ak = self._appkit
-            mon_left, mon_top = 0.0, 0.0
-            main_id = q.CGMainDisplayID()
-            mon_w = float(q.CGDisplayPixelsWide(main_id))
-            mon_h = float(q.CGDisplayPixelsHigh(main_id))
-            try:
-                err, active_ids, count = q.CGGetActiveDisplayList(8, None, None)
-                if err == 0 and count > 0:
-                    for did in active_ids[:count]:
-                        b = q.CGDisplayBounds(did)
-                        bx, by = float(b.origin.x), float(b.origin.y)
-                        bw, bh = float(b.size.width), float(b.size.height)
-                        if bx <= mx < bx + bw and by <= my < by + bh:
-                            mon_left, mon_top, mon_w, mon_h = bx, by, bw, bh
-                            break
-            except Exception:
-                pass
+            fd = self._foundation
+            with self._objc.autorelease_pool():
+                mon_left, mon_top = 0.0, 0.0
+                main_id = q.CGMainDisplayID()
+                mon_w = float(q.CGDisplayPixelsWide(main_id))
+                mon_h = float(q.CGDisplayPixelsHigh(main_id))
+                try:
+                    err, active_ids, count = q.CGGetActiveDisplayList(8, None, None)
+                    if err == 0 and count > 0:
+                        for did in active_ids[:count]:
+                            b = q.CGDisplayBounds(did)
+                            bx, by = float(b.origin.x), float(b.origin.y)
+                            bw, bh = float(b.size.width), float(b.size.height)
+                            if bx <= mx < bx + bw and by <= my < by + bh:
+                                mon_left, mon_top, mon_w, mon_h = bx, by, bw, bh
+                                break
+                except Exception:
+                    pass
 
-            left, top, crop_w, crop_h = self._compute_crop_geometry(
-                mx, my, mon_left, mon_top, mon_w, mon_h, aspect, fov_scale, mode
-            )
-            rect = q.CGRectMake(float(left), float(top), float(crop_w), float(crop_h))
-            nominal_flag = getattr(q, "kCGWindowImageNominalResolution", 16)
-            cg_img = q.CGWindowListCreateImage(
-                rect,
-                q.kCGWindowListOptionOnScreenOnly,
-                q.kCGNullWindowID,
-                nominal_flag,
-            )
-            if cg_img is None:
-                return None
+                left, top, crop_w, crop_h = self._compute_crop_geometry(
+                    mx, my, mon_left, mon_top, mon_w, mon_h, aspect, fov_scale, mode
+                )
+                rect = q.CGRectMake(float(left), float(top), float(crop_w), float(crop_h))
+                nominal_flag = getattr(q, "kCGWindowImageNominalResolution", 16)
+                cg_img = q.CGWindowListCreateImage(
+                    rect,
+                    q.kCGWindowListOptionOnScreenOnly,
+                    q.kCGNullWindowID,
+                    nominal_flag,
+                )
+                if cg_img is None:
+                    return None
 
-            rep = ak.NSBitmapImageRep.alloc().initWithCGImage_(cg_img)
-            if rep is None:
-                return None
-            jpeg_type = getattr(ak, "NSBitmapImageFileTypeJPEG", 4)
-            comp_key = getattr(
-                ak, "NSImageCompressionFactor", "NSImageCompressionFactor"
-            )
-            ns_data = rep.representationUsingType_properties_(
-                jpeg_type, {comp_key: 0.66}
-            )
-            if ns_data is None:
-                return None
-            jpeg_bytes = bytes(ns_data)
+                mutable_data = fd.NSMutableData.data()
+                dest = q.CGImageDestinationCreateWithData(
+                    mutable_data, "public.jpeg", 1, None
+                )
+                if dest is None:
+                    return None
+                qual_key = getattr(
+                    q,
+                    "kCGImageDestinationLossyCompressionQuality",
+                    "kCGImageDestinationLossyCompressionQuality",
+                )
+                q.CGImageDestinationAddImage(dest, cg_img, {qual_key: 0.68})
+                if not q.CGImageDestinationFinalize(dest):
+                    return None
+                jpeg_bytes = bytes(mutable_data)
 
         # 2. Đường dẫn đa nền tảng trên Windows / Linux (mss + Pillow)
         elif sct is not None and self._pil_image is not None:
@@ -1404,9 +1416,12 @@ async def download_apk() -> FileResponse:
 async def health() -> dict:
     return {
         "ok": True,
+        "version": "1.9.2",
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
         "kb_layout": injector.kb_layout,
+        "lens_available": lens_capturer.available,
+        "screen_recording_ok": check_macos_screen_recording(prompt=False),
     }
 
 
@@ -1794,9 +1809,50 @@ def start_notification_auto_dismisser(max_seconds: float = 4.0) -> None:
     t.start()
 
 
+def start_git_auto_updater(check_every_sec: float = 45.0) -> None:
+    """Tự động kiểm tra GitHub định kỳ; nếu có bản server.py mới trên origin/main thì tự git pull và khởi động lại ngầm."""
+    import os
+
+    def _updater() -> None:
+        while True:
+            time.sleep(check_every_sec)
+            try:
+                if not (BASE_DIR / ".git").exists():
+                    continue
+                subprocess.run(
+                    ["git", "fetch", "origin", "main", "--quiet"],
+                    cwd=str(BASE_DIR),
+                    timeout=10,
+                    check=False,
+                )
+                local_sha = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], cwd=str(BASE_DIR), text=True, timeout=5
+                ).strip()
+                remote_sha = subprocess.check_output(
+                    ["git", "rev-parse", "origin/main"], cwd=str(BASE_DIR), text=True, timeout=5
+                ).strip()
+                if local_sha and remote_sha and local_sha != remote_sha:
+                    logger.info("Phát hiện bản mới trên GitHub (%s -> %s), tự động cập nhật server...", local_sha[:7], remote_sha[:7])
+                    pull_res = subprocess.run(
+                        ["git", "pull", "--ff-only", "origin", "main"],
+                        cwd=str(BASE_DIR),
+                        timeout=20,
+                        check=False,
+                    )
+                    if pull_res.returncode == 0:
+                        os.execv(sys.executable, [sys.executable, str(BASE_DIR / "server.py")])
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_updater, daemon=True)
+    t.start()
+
+
 if __name__ == "__main__":
     check_macos_accessibility()
+    check_macos_screen_recording(prompt=True)
     start_notification_auto_dismisser(max_seconds=4.0)
+    start_git_auto_updater(check_every_sec=45.0)
     banner_ips = detect_network_ips()
     print("\n" + "=" * 62)
     print("  ⌨️  MAC WEB VIRTUAL KEYBOARD SERVER ĐANG CHẠY (PORT 5050)")
