@@ -410,7 +410,63 @@ body[data-pad-view="text"] .simple-text-pad {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 38px 18px 14px 18px;
+  padding: 38px 36px 14px 18px;
+}
+
+/* THANH CUỘN DỌC 1 NGÓN BÊN PHẢI TRACKPAD */
+.pad-scroll-strip {
+  position: absolute;
+  top: 36px;
+  bottom: 8px;
+  right: 5px;
+  width: 26px;
+  z-index: 4;
+  border-radius: 8px;
+  background: rgba(11, 16, 25, 0.56);
+  border: 1px solid rgba(51, 65, 85, 0.58);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 0;
+  touch-action: none;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.pad-scroll-strip.is-scrolling {
+  border-color: rgba(56, 189, 248, 0.68);
+  background: rgba(13, 21, 34, 0.78);
+}
+
+.pad-scroll-arrow {
+  font-size: 9px;
+  line-height: 1;
+  color: #64748b;
+  pointer-events: none;
+}
+
+.pad-scroll-track {
+  position: relative;
+  flex: 1 1 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.pad-scroll-thumb {
+  width: 4px;
+  height: 32px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.55);
+  transform: translateY(var(--thumb-offset, 0px));
+  transition: background 120ms ease;
+}
+
+.pad-scroll-strip.is-scrolling .pad-scroll-thumb {
+  background: #38bdf8;
 }
 
 body[data-pad-view="text"] .simple-text-ribbon {

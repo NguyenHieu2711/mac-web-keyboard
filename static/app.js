@@ -1329,7 +1329,7 @@
     surface.addEventListener(
       "touchstart",
       (e) => {
-        if (e.target.closest(".lens-hud-right, .lens-hud-left, .lens-perm-bar")) {
+        if (e.target.closest(".lens-hud-right, .lens-hud-left, .lens-perm-bar, .pad-scroll-strip")) {
           return;
         }
         e.preventDefault();
@@ -1451,8 +1451,146 @@
     });
   }
 
+  function bindScrollStrip(stripEl) {
+    if (!stripEl) return;
+    const thumbEl = stripEl.querySelector(".js-scroll-thumb");
+    let activeId = null;
+    let startAt = 0;
+    let prevY = 0;
+    let prevAt = 0;
+    let totalMoved = 0;
+    let thumbOffset = 0;
+    let velocityPxMs = 0;
+    let inertiaRaf = null;
+
+    function stopInertia() {
+      if (inertiaRaf !== null) {
+        cancelAnimationFrame(inertiaRaf);
+        inertiaRaf = null;
+      }
+    }
+
+    function setThumbOffset(px) {
+      if (!thumbEl) return;
+      const trackEl = thumbEl.parentElement;
+      const maxOff = trackEl ? Math.max(12, (trackEl.clientHeight - 34) / 2) : 36;
+      thumbOffset = Math.max(-maxOff, Math.min(maxOff, px));
+      thumbEl.style.setProperty("--thumb-offset", `${thumbOffset.toFixed(1)}px`);
+    }
+
+    function emitScrollStep(deltaY) {
+      if (Math.abs(deltaY) < 0.2) return;
+      const gain = Math.min(4.2, 2.35 + Math.abs(deltaY) * 0.06);
+      sendPayload({
+        type: "mouse_scroll",
+        dx: 0,
+        dy: -deltaY * gain,
+      });
+    }
+
+    stripEl.addEventListener(
+      "touchstart",
+      (e) => {
+        const t = e.changedTouches[0];
+        if (!t) return;
+        e.preventDefault();
+        e.stopPropagation();
+        stopInertia();
+        closeModeMenu();
+        closeSymbolPopup();
+        ensureAutoFullscreenOnce();
+        triggerHaptic(6);
+
+        activeId = t.identifier;
+        startAt = performance.now();
+        prevAt = startAt;
+        prevY = t.clientY;
+        totalMoved = 0;
+        velocityPxMs = 0;
+        stripEl.classList.add("is-scrolling");
+      },
+      { passive: false }
+    );
+
+    stripEl.addEventListener(
+      "touchmove",
+      (e) => {
+        if (activeId === null) return;
+        for (let i = 0; i < e.changedTouches.length; i += 1) {
+          const t = e.changedTouches[i];
+          if (t.identifier === activeId) {
+            e.preventDefault();
+            e.stopPropagation();
+            const now = performance.now();
+            const dt = Math.max(4, now - prevAt);
+            const dy = t.clientY - prevY;
+            prevY = t.clientY;
+            prevAt = now;
+            totalMoved += Math.abs(dy);
+            velocityPxMs = velocityPxMs * 0.45 + (dy / dt) * 0.55;
+            setThumbOffset(thumbOffset + dy * 0.55);
+            emitScrollStep(dy);
+            break;
+          }
+        }
+      },
+      { passive: false }
+    );
+
+    const onScrollTouchEnd = (e) => {
+      if (activeId === null) return;
+      for (let i = 0; i < e.changedTouches.length; i += 1) {
+        const t = e.changedTouches[i];
+        if (t.identifier === activeId) {
+          e.preventDefault();
+          e.stopPropagation();
+          activeId = null;
+          stripEl.classList.remove("is-scrolling");
+          setThumbOffset(0);
+
+          const duration = performance.now() - startAt;
+          if (totalMoved < 6 && duration < 240) {
+            const rect = stripEl.getBoundingClientRect();
+            const relY = rect.height > 0 ? (t.clientY - rect.top) / rect.height : 0.5;
+            if (relY < 0.3) {
+              triggerHaptic(6);
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: 68 });
+            } else if (relY > 0.7) {
+              triggerHaptic(6);
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: -68 });
+            }
+            return;
+          }
+
+          if (Math.abs(velocityPxMs) > 0.42) {
+            let vFrame = velocityPxMs * 15;
+            const stepInertia = () => {
+              vFrame *= 0.89;
+              if (Math.abs(vFrame) < 0.9) {
+                inertiaRaf = null;
+                return;
+              }
+              sendPayload({
+                type: "mouse_scroll",
+                dx: 0,
+                dy: -vFrame * 2.3,
+              });
+              inertiaRaf = requestAnimationFrame(stepInertia);
+            };
+            inertiaRaf = requestAnimationFrame(stepInertia);
+          }
+          break;
+        }
+      }
+    };
+
+    stripEl.addEventListener("touchend", onScrollTouchEnd, { passive: false });
+    stripEl.addEventListener("touchcancel", onScrollTouchEnd, { passive: false });
+  }
+
   bindTrackpadSurface(document.getElementById("trackpad-surface"));
   bindTrackpadSurface(kbRibbonLens);
+  bindScrollStrip(document.getElementById("pad-scroll-strip"));
 
   if (typeof ResizeObserver !== "undefined") {
     let roTimer = null;

@@ -1695,7 +1695,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "1.9.8",
+        "version": "1.9.9",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
