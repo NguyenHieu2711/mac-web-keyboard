@@ -2213,6 +2213,226 @@ def start_clipboard_retina_normalizer(poll_sec: float = 0.25) -> None:
     t.start()
 
 
+def start_desktop_and_folder_grid_manager() -> None:
+    """
+    Quản lý lưới icon kiểu Windows cho macOS:
+    1. Desktop: Giữ cột đầu tiên sát mép trái (X=42, bước ngang 66px, bước dọc 84px từ Y=71).
+       Ngay khi người dùng kéo-thả icon trên Desktop và nhả chuột trái, tự động hút (snap) icon
+       vào đúng ô lưới gần nhất; nếu thả đè lên ô đã có icon khác thì tự động hoán đổi/dịch ô
+       để 2 icon KHÔNG BAO GIỜ chồng chéo lên nhau (giống hệt "Align icons to grid" trên Windows).
+    2. Finder Folders: Tự động bật "Snap to Grid" cho mọi cửa sổ thư mục đang mở ở chế độ Icon View.
+    """
+    if not IS_MACOS:
+        return
+
+    def _worker() -> None:
+        try:
+            import AppKit  # type: ignore
+            import Foundation  # type: ignore
+            import Quartz  # type: ignore
+            import objc  # type: ignore
+
+            ORIGIN_X, STEP_X, MAX_COL = 42, 66, 21
+            ORIGIN_Y, STEP_Y, MAX_ROW = 71, 84, 10
+            desktop_path = Path.home() / "Desktop"
+
+            def to_cell(x: int, y: int) -> Tuple[int, int]:
+                c = max(0, min(MAX_COL, int(round((x - ORIGIN_X) / float(STEP_X)))))
+                r = max(0, min(MAX_ROW, int(round((y - ORIGIN_Y) / float(STEP_Y)))))
+                return (c, r)
+
+            def to_px(c: int, r: int) -> Tuple[int, int]:
+                return (ORIGIN_X + c * STEP_X, ORIGIN_Y + r * STEP_Y)
+
+            def nearest_free_cell(
+                target_c: int, target_r: int, occupied: set, px: int, py: int
+            ) -> Tuple[int, int]:
+                if (target_c, target_r) not in occupied:
+                    return (target_c, target_r)
+                best_cell = (target_c, target_r)
+                best_dist = 1e18
+                for c in range(MAX_COL + 1):
+                    for r in range(MAX_ROW + 1):
+                        if (c, r) in occupied:
+                            continue
+                        gx, gy = to_px(c, r)
+                        d = (gx - px) ** 2 + (gy - py) ** 2 + (
+                            abs(c - target_c) + abs(r - target_r)
+                        ) * 400
+                        if d < best_dist:
+                            best_dist = d
+                            best_cell = (c, r)
+                return best_cell
+
+            read_script = Foundation.NSAppleScript.alloc().initWithSource_(
+                'tell application "Finder"\n'
+                "  try\n"
+                "    repeat with w in Finder windows\n"
+                "      if current view of w is icon view and arrangement of icon view options of w is not arranged then\n"
+                "        set arrangement of icon view options of w to snap to grid\n"
+                "      end if\n"
+                "    end repeat\n"
+                "  end try\n"
+                "  return {name, desktop position} of items of desktop\n"
+                "end tell"
+            )
+
+            last_cells: Dict[str, Tuple[int, int]] = {}
+            last_px: Dict[str, Tuple[int, int]] = {}
+            last_mtime: float = 0.0
+            last_finder_check: float = 0.0
+            was_dragging = False
+            pending_snap_at: Optional[float] = time.monotonic() + 0.25
+
+            while True:
+                time.sleep(0.06)
+                with objc.autorelease_pool():
+                    is_down = bool(
+                        Quartz.CGEventSourceButtonState(
+                            Quartz.kCGEventSourceStateCombinedSessionState, 0
+                        )
+                    )
+                    secs_drag = float(
+                        Quartz.CGEventSourceSecondsSinceLastEventType(
+                            Quartz.kCGEventSourceStateCombinedSessionState,
+                            Quartz.kCGEventLeftMouseDragged,
+                        )
+                    )
+                    now = time.monotonic()
+
+                    if is_down or secs_drag < 0.18:
+                        was_dragging = True
+                    elif was_dragging and not is_down and secs_drag >= 0.18:
+                        was_dragging = False
+                        pending_snap_at = now + 0.08
+
+                    if not is_down and pending_snap_at is None:
+                        front_app = (
+                            AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+                        )
+                        if (
+                            front_app
+                            and front_app.bundleIdentifier() == "com.apple.finder"
+                            and now - last_finder_check >= 0.85
+                        ):
+                            last_finder_check = now
+                            pending_snap_at = now
+
+                    if not is_down and pending_snap_at is None:
+                        try:
+                            mt = desktop_path.stat().st_mtime
+                            if mt != last_mtime:
+                                last_mtime = mt
+                                pending_snap_at = now + 0.25
+                        except Exception:
+                            pass
+
+                    if is_down or pending_snap_at is None or now < pending_snap_at:
+                        continue
+                    pending_snap_at = None
+
+                    res, err = read_script.executeAndReturnError_(None)
+                    if err or not res or res.numberOfItems() < 2:
+                        continue
+                    names_desc = res.descriptorAtIndex_(1)
+                    pos_desc = res.descriptorAtIndex_(2)
+                    n = names_desc.numberOfItems()
+                    if n == 0:
+                        continue
+
+                    current_items: List[Tuple[str, int, int]] = []
+                    for i in range(1, n + 1):
+                        nm = names_desc.descriptorAtIndex_(i).stringValue()
+                        pt = pos_desc.descriptorAtIndex_(i)
+                        if nm and pt and pt.numberOfItems() >= 2:
+                            x = int(pt.descriptorAtIndex_(1).int32Value())
+                            y = int(pt.descriptorAtIndex_(2).int32Value())
+                            current_items.append((nm, x, y))
+
+                    stationary: List[Tuple[str, int, int, Tuple[int, int]]] = []
+                    moved: List[Tuple[str, int, int]] = []
+                    occupied: Dict[Tuple[int, int], str] = {}
+
+                    for nm, x, y in current_items:
+                        c, r = to_cell(x, y)
+                        gx, gy = to_px(c, r)
+                        if (
+                            nm in last_px
+                            and last_px[nm] == (x, y)
+                            and (x, y) == (gx, gy)
+                            and (c, r) not in occupied
+                        ):
+                            stationary.append((nm, x, y, (c, r)))
+                            occupied[(c, r)] = nm
+                        else:
+                            moved.append((nm, x, y))
+
+                    if not moved:
+                        continue
+
+                    new_cells: Dict[str, Tuple[int, int]] = {
+                        nm: cell for nm, _, _, cell in stationary
+                    }
+
+                    for nm, x, y in moved:
+                        tc, tr = to_cell(x, y)
+                        target = (tc, tr)
+                        prev_cell = last_cells.get(nm)
+                        if target not in occupied:
+                            occupied[target] = nm
+                            new_cells[nm] = target
+                        elif target in occupied and occupied[target] in last_cells:
+                            # Nếu kéo đè lên ô đã có icon cố định -> hoán đổi vị trí cho nhau như Windows
+                            other_nm = occupied[target]
+                            if (
+                                prev_cell is not None
+                                and prev_cell not in occupied
+                                and other_nm != nm
+                            ):
+                                occupied[target] = nm
+                                new_cells[nm] = target
+                                occupied[prev_cell] = other_nm
+                                new_cells[other_nm] = prev_cell
+                            else:
+                                free_c = nearest_free_cell(
+                                    tc, tr, set(occupied.keys()), x, y
+                                )
+                                occupied[free_c] = nm
+                                new_cells[nm] = free_c
+                        else:
+                            free_c = nearest_free_cell(
+                                tc, tr, set(occupied.keys()), x, y
+                            )
+                            occupied[free_c] = nm
+                            new_cells[nm] = free_c
+
+                    cmds: List[str] = []
+                    cur_map = {nm: (x, y) for nm, x, y in current_items}
+                    for nm, cell in new_cells.items():
+                        gx, gy = to_px(cell[0], cell[1])
+                        last_cells[nm] = cell
+                        last_px[nm] = (gx, gy)
+                        if cur_map.get(nm) != (gx, gy):
+                            safe_nm = nm.replace("\\", "\\\\").replace('"', '\\"')
+                            cmds.append(
+                                f'set desktop position of item "{safe_nm}" of desktop to {{{gx}, {gy}}}'
+                            )
+
+                    if cmds:
+                        src = (
+                            'tell application "Finder"\n  try\n    '
+                            + "\n    ".join(cmds)
+                            + "\n  end try\nend tell"
+                        )
+                        ws = Foundation.NSAppleScript.alloc().initWithSource_(src)
+                        ws.executeAndReturnError_(None)
+        except Exception as exc:
+            logger.debug("Desktop grid manager stopped: %s", exc)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+
 def start_git_auto_updater(check_every_sec: float = 45.0) -> None:
     """Tự động kiểm tra GitHub định kỳ; nếu có bản server.py mới trên origin/main thì tự git pull và khởi động lại ngầm."""
     import os
@@ -2257,6 +2477,7 @@ if __name__ == "__main__":
     check_macos_screen_recording(prompt=True)
     start_notification_auto_dismisser(max_seconds=4.0)
     start_clipboard_retina_normalizer(poll_sec=0.25)
+    start_desktop_and_folder_grid_manager()
     start_git_auto_updater(check_every_sec=45.0)
     banner_ips = detect_network_ips()
     print("\n" + "=" * 62)
