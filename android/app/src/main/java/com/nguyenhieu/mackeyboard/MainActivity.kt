@@ -1,13 +1,18 @@
 package com.nguyenhieu.mackeyboard
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.app.AlertDialog
 import android.app.DownloadManager
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
@@ -17,10 +22,13 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
+import android.speech.RecognizerIntent
 import android.text.InputType
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -32,6 +40,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -70,6 +79,65 @@ class MainActivity : AppCompatActivity() {
     private var downloadPollJob: Job? = null
     private var installTriggeredForId: Long = -1L
     private var lastBackPressedAt: Long = 0L
+    private var pendingWebPermissionRequest: PermissionRequest? = null
+    private var pendingVoiceLang: String? = null
+
+    private val audioPermLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val webReq = pendingWebPermissionRequest
+        pendingWebPermissionRequest = null
+        if (webReq != null) {
+            if (granted) {
+                webReq.grant(webReq.resources)
+            } else {
+                webReq.deny()
+            }
+        }
+        val lang = pendingVoiceLang
+        pendingVoiceLang = null
+        if (lang != null) {
+            if (granted) {
+                launchNativeSpeechRecognizer(lang)
+            } else {
+                webView.evaluateJavascript("window.__onRemoteVoiceState && window.__onRemoteVoiceState(false);", null)
+                Toast.makeText(this, "Cần cấp quyền Microphone để đọc giọng nói.", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private val voiceResultLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        applyImmersiveStickyFullscreen()
+        webView.evaluateJavascript("window.__onRemoteVoiceState && window.__onRemoteVoiceState(false);", null)
+        if (result.resultCode == Activity.RESULT_OK) {
+            val matches = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            val best = matches?.firstOrNull()?.trim().orEmpty()
+            if (best.isNotEmpty()) {
+                val escaped = JSONObject.quote(best)
+                webView.evaluateJavascript(
+                    "window.__onRemoteVoiceText && window.__onRemoteVoiceText($escaped);",
+                    null
+                )
+            }
+        }
+    }
+
+    private fun launchNativeSpeechRecognizer(lang: String) {
+        try {
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang.ifBlank { "vi-VN" })
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            }
+            webView.evaluateJavascript("window.__onRemoteVoiceState && window.__onRemoteVoiceState(true);", null)
+            voiceResultLauncher.launch(intent)
+        } catch (_: Exception) {
+            webView.evaluateJavascript("window.__onRemoteVoiceState && window.__onRemoteVoiceState(false);", null)
+            Toast.makeText(this, "Thiết bị chưa bật dịch vụ nhận diện giọng nói.", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     private val downloadCompleteReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -175,12 +243,43 @@ class MainActivity : AppCompatActivity() {
 
             addJavascriptInterface(AndroidWebBridge(), "AndroidBridge")
 
+            webChromeClient = object : WebChromeClient() {
+                override fun onPermissionRequest(request: PermissionRequest?) {
+                    if (request == null) return
+                    runOnUiThread {
+                        val wantsMic = request.resources.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)
+                        if (!wantsMic) {
+                            request.deny()
+                            return@runOnUiThread
+                        }
+                        if (ContextCompat.checkSelfPermission(
+                                this@MainActivity,
+                                Manifest.permission.RECORD_AUDIO
+                            ) == PackageManager.PERMISSION_GRANTED
+                        ) {
+                            request.grant(request.resources)
+                        } else {
+                            pendingWebPermissionRequest = request
+                            audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    }
+                }
+            }
+
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
                     view: WebView,
                     request: WebResourceRequest
                 ): WebResourceResponse? {
                     serveOtaWebAssetIfNewer(request.url)?.let { return it }
+                    val u = request.url
+                    if (u.host == "appassets.androidplatform.net" && u.path?.endsWith(".wasm") == true) {
+                        val rel = u.path!!.removePrefix("/assets/").trimStart('/')
+                        try {
+                            return WebResourceResponse("application/wasm", null, assets.open(rel))
+                        } catch (_: Exception) {
+                        }
+                    }
                     return assetLoader.shouldInterceptRequest(request.url)
                 }
 
@@ -325,18 +424,28 @@ class MainActivity : AppCompatActivity() {
         if (otaVer.isEmpty() || !isRemoteVersionNewer(otaVer, BuildConfig.VERSION_NAME)) return null
 
         val relName = uri.path?.removePrefix("/assets/")?.trim('/') ?: return null
-        if (relName !in listOf("index.html", "style.css", "app.js", "manifest.json")) return null
+        val allowed = setOf(
+            "index.html",
+            "style.css",
+            "app.js",
+            "manifest.json",
+            "ironrdp/rdp_client.js",
+            "ironrdp/rdp_client_bg.wasm"
+        )
+        if (relName !in allowed) return null
 
         val f = File(getOtaWebDir(), relName)
         if (!f.exists() || f.length() <= 0L) return null
+        val isWasm = relName.endsWith(".wasm")
         val mime = when {
             relName.endsWith(".html") -> "text/html"
             relName.endsWith(".css") -> "text/css"
             relName.endsWith(".js") -> "application/javascript"
+            isWasm -> "application/wasm"
             else -> "application/json"
         }
         return try {
-            WebResourceResponse(mime, "UTF-8", f.inputStream())
+            WebResourceResponse(mime, if (isWasm) null else "UTF-8", f.inputStream())
         } catch (_: Exception) {
             null
         }
@@ -892,6 +1001,41 @@ class MainActivity : AppCompatActivity() {
                     ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 }
                 applyImmersiveStickyFullscreen()
+            }
+        }
+
+        @JavascriptInterface
+        fun startVoiceInput(lang: String) {
+            runOnUiThread {
+                if (ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    launchNativeSpeechRecognizer(lang)
+                } else {
+                    pendingVoiceLang = lang.ifBlank { "vi-VN" }
+                    audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun getClipboardText(): String {
+            return try {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                cm?.primaryClip?.getItemAt(0)?.coerceToText(this@MainActivity)?.toString().orEmpty()
+            } catch (_: Exception) {
+                ""
+            }
+        }
+
+        @JavascriptInterface
+        fun setClipboardText(text: String) {
+            try {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+                cm.setPrimaryClip(ClipData.newPlainText("RemotePC", text))
+            } catch (_: Exception) {
             }
         }
     }

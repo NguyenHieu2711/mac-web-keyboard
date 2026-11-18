@@ -98,6 +98,9 @@
           <div class="mode-dropdown-item" data-select-layout="mac">
             <span><svg class="apple-ico" viewBox="0 0 384 512" aria-hidden="true"><path fill="currentColor" d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg> Mac ngang</span><span class="mode-check" data-check="mac">✓</span>
           </div>
+          <div class="mode-dropdown-item" data-select-layout="remote">
+            <span>🖥 Remote PC</span><span class="mode-check" data-check="remote">✓</span>
+          </div>
         </div>
       </div>
 
@@ -355,6 +358,9 @@
             <div class="mode-dropdown-item" data-select-layout="mac">
               <span><svg class="apple-ico" viewBox="0 0 384 512" aria-hidden="true"><path fill="currentColor" d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg> Mac ngang</span><span class="mode-check" data-check="mac">✓</span>
             </div>
+            <div class="mode-dropdown-item" data-select-layout="remote">
+              <span>🖥 Remote PC</span><span class="mode-check" data-check="remote">✓</span>
+            </div>
           </div>
         </div>
 
@@ -606,6 +612,110 @@
           <button type="button" class="key ss-key ss-key-enter" data-action="press" data-key="enter">
             <span class="key-main">⏎</span>
           </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =========================================================================
+       CHẾ ĐỘ THỨ 4 ĐỘC LẬP: REMOTE PC (2248x1080 @ 100% SCALING • WI-FI RDP)
+       ========================================================================= -->
+  <section id="remote-shell" class="remote-shell">
+    <div id="remote-viewport" class="remote-viewport">
+      <div id="remote-stage" class="remote-stage">
+        <canvas id="remote-pc-canvas" class="remote-pc-canvas" width="2248" height="1080" tabindex="0"></canvas>
+        <div id="remote-kvm-cursor" class="remote-kvm-cursor is-hidden">
+          <img id="remote-cursor-img" class="remote-cursor-img is-hidden" alt="" />
+          <svg id="remote-cursor-svg" class="remote-cursor-svg" viewBox="0 0 24 24">
+            <path d="M2 1.5L2 19.5L6.8 15L10.2 22L13.1 20.6L9.7 13.6L16 13.6Z" fill="#ffffff" stroke="#090c12" stroke-width="1.8" stroke-linejoin="round" />
+          </svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- Thanh công cụ nổi tối giản (mặc định thu gọn thành nút nhỏ sát mép trên) -->
+    <div id="remote-hud" class="remote-hud">
+      <button type="button" id="remote-hud-pill" class="remote-hud-pill">
+        <span id="remote-status-dot" class="remote-dot"></span>
+        <span>🖥</span>
+        <span class="remote-caret">▾</span>
+      </button>
+
+      <div id="remote-hud-bar" class="remote-hud-bar is-hidden">
+        <div class="remote-mode-wrap">
+          <button type="button" class="remote-pill-btn remote-mode-btn" data-action="toggle-remote-menu">
+            <span>🖥 Remote ▾</span>
+          </button>
+          <div id="remote-mode-menu" class="mode-dropdown-menu remote-dropdown-menu is-hidden">
+            <div class="mode-dropdown-item" data-select-layout="pad">
+              <span>📱 Windows dọc</span><span class="mode-check" data-check="pad">✓</span>
+            </div>
+            <div class="mode-dropdown-item" data-select-layout="win">
+              <span>🖥 Win ngang</span><span class="mode-check" data-check="win">✓</span>
+            </div>
+            <div class="mode-dropdown-item" data-select-layout="mac">
+              <span><svg class="apple-ico" viewBox="0 0 384 512"><path fill="currentColor" d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg> Mac ngang</span><span class="mode-check" data-check="mac">✓</span>
+            </div>
+            <div class="mode-dropdown-item is-selected" data-select-layout="remote">
+              <span>🖥 Remote PC</span><span class="mode-check" data-check="remote">✓</span>
+            </div>
+          </div>
+        </div>
+
+        <button type="button" id="btn-remote-mic" class="remote-pill-btn">🎤 Mic</button>
+        <button type="button" id="btn-remote-kb" class="remote-pill-btn">⌨ Phím</button>
+        <button type="button" id="btn-remote-edge" class="remote-pill-btn">✥ Mọi phía</button>
+        <button type="button" id="btn-remote-zoom-reset" class="remote-pill-btn is-hidden">100%</button>
+        <button type="button" id="btn-remote-cfg" class="remote-pill-btn">⚙</button>
+        <button type="button" id="btn-remote-collapse" class="remote-pill-btn">▴</button>
+      </div>
+    </div>
+
+    <!-- Dải phím bổ trợ siêu gọn chỉ hiện khi đang bật bàn phím gõ chữ -->
+    <div id="remote-special-bar" class="remote-special-bar is-hidden">
+      <button type="button" class="remote-spec-key" data-rdp-key="Escape">Esc</button>
+      <button type="button" class="remote-spec-key" data-rdp-key="Tab">Tab</button>
+      <button type="button" class="remote-spec-key" data-rdp-mod="ControlLeft">Ctrl</button>
+      <button type="button" class="remote-spec-key" data-rdp-mod="MetaLeft">⊞ Win</button>
+      <button type="button" class="remote-spec-key" data-rdp-mod="AltLeft">Alt</button>
+      <button type="button" class="remote-spec-key" data-rdp-combo="ctrl-v">Paste</button>
+      <button type="button" class="remote-spec-key" data-rdp-key="Delete">Del</button>
+      <button type="button" id="btn-remote-hide-kb" class="remote-spec-key">✕</button>
+    </div>
+
+    <textarea
+      id="remote-ime-input"
+      class="remote-ime-input"
+      rows="1"
+      autocapitalize="off"
+      autocomplete="off"
+      autocorrect="off"
+      spellcheck="false"
+    ></textarea>
+
+    <!-- Hộp kết nối tối giản chuẩn Notion / Linear -->
+    <div id="remote-login-overlay" class="remote-login-overlay">
+      <div class="remote-login-card">
+        <div class="remote-login-head">
+          <div class="remote-login-title-group">
+            <span class="remote-login-title">🖥 Remote PC</span>
+            <span class="remote-res-badge">2248×1080 • 100%</span>
+          </div>
+          <div class="remote-login-head-actions">
+            <button type="button" id="btn-rdp-switch-back" class="remote-head-btn">← Tab</button>
+            <button type="button" id="btn-rdp-close-card" class="remote-head-btn is-hidden">✕</button>
+          </div>
+        </div>
+
+        <input id="rdp-host-input" class="remote-input" type="text" value="192.168.52.230" placeholder="IP PC (192.168.52.230)" autocomplete="off" />
+        <input id="rdp-user-input" class="remote-input" type="text" value="DESKTOP-4LTT2HE\User" placeholder="Tài khoản (DESKTOP-4LTT2HE\User)" autocomplete="username" />
+        <input id="rdp-pass-input" class="remote-input" type="password" value="" placeholder="Mật khẩu Windows PC" autocomplete="current-password" />
+
+        <div id="rdp-login-status" class="remote-login-status is-hidden"></div>
+
+        <div class="remote-login-actions">
+          <button type="button" id="btn-rdp-connect" class="remote-btn-primary">Kết nối</button>
+          <button type="button" id="btn-rdp-disconnect" class="remote-btn-secondary is-hidden">Ngắt</button>
         </div>
       </div>
     </div>

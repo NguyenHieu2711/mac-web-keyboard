@@ -15,13 +15,14 @@ import io
 import json
 import logging
 import socket
+import ssl
 import struct
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -580,6 +581,10 @@ class KeyboardInjector:
                 self._event_source = Quartz.CGEventSourceCreate(
                     Quartz.kCGEventSourceStateHIDSystemState
                 )
+                if self._event_source is not None and hasattr(
+                    Quartz, "CGEventSourceSetUserData"
+                ):
+                    Quartz.CGEventSourceSetUserData(self._event_source, 0x4D4B4231)
                 self._use_quartz = True
                 ensure_macos_abc_input_source()
                 self._init_macos_focus_detector()
@@ -1665,8 +1670,568 @@ class LiveLensCapturer:
         return header + jpeg_bytes
 
 
+class MacKvmBridge:
+    """
+    Cầu nối chuột Bluetooth xuyên màn hình (Universal Control / KVM) giữa MacBook và tab Remote PC trên điện thoại:
+    - Chỉ kích hoạt khi điện thoại đang mở tab `remote` (kvm_enabled = True).
+    - Khi đẩy chuột vượt qua mép màn hình MacBook (mọi phía hoặc mép chọn), khóa & giấu con trỏ trên Mac
+      (CGAssociateMouseAndMouseCursorPosition(False) + nuốt sự kiện chuột trên Mac) và truyền thẳng sang điện thoại.
+    - Khi đẩy chuột ngược qua mép đối diện trên điện thoại (hoặc bấm Ctrl+Option+Cmd trên Mac / thoát tab Remote),
+      nhả con trỏ về lại đúng vị trí mép tương ứng trên MacBook.
+    """
+
+    OPPOSITE_EDGE = {
+        "bottom": "top",
+        "top": "bottom",
+        "right": "left",
+        "left": "right",
+    }
+
+    def __init__(self) -> None:
+        self.available: bool = False
+        self.captured: bool = False
+        self._kvm_enabled: bool = False
+        self._edge_mode: str = "any"
+        self._active_ws: Optional[WebSocket] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._send_queue: Optional[asyncio.Queue] = None
+        self._mac_exit_edge: str = "bottom"
+        self._saved_pos: Tuple[float, float] = (600.0, 400.0)
+        self._edge_push: float = 0.0
+        self._push_dir: str = ""
+        self._last_return_at: float = 0.0
+        self._bounds_cache: Tuple[float, float, float, float] = (0.0, 0.0, 1440.0, 900.0)
+        self._bounds_at: float = 0.0
+        self._quartz: Any = None
+        self._tap: Any = None
+        self._lock = threading.Lock()
+
+        if IS_MACOS:
+            self._start_tap_thread()
+
+    def _get_desktop_bounds(self) -> Tuple[float, float, float, float]:
+        now = time.monotonic()
+        if now - self._bounds_at < 1.5:
+            return self._bounds_cache
+        self._bounds_at = now
+        q = self._quartz
+        if q is None:
+            return self._bounds_cache
+        try:
+            err, active_ids, count = q.CGGetActiveDisplayList(8, None, None)
+            if err == 0 and count > 0:
+                min_x = min(float(q.CGDisplayBounds(d).origin.x) for d in active_ids[:count])
+                min_y = min(float(q.CGDisplayBounds(d).origin.y) for d in active_ids[:count])
+                max_x = max(
+                    float(q.CGDisplayBounds(d).origin.x + q.CGDisplayBounds(d).size.width)
+                    for d in active_ids[:count]
+                )
+                max_y = max(
+                    float(q.CGDisplayBounds(d).origin.y + q.CGDisplayBounds(d).size.height)
+                    for d in active_ids[:count]
+                )
+                self._bounds_cache = (min_x, min_y, max_x, max_y)
+        except Exception:
+            pass
+        return self._bounds_cache
+
+    def _enqueue_payload(self, payload: dict) -> None:
+        loop = self._loop
+        q_obj = self._send_queue
+        if loop is None or q_obj is None:
+            return
+        try:
+            msg_str = json.dumps(payload)
+            loop.call_soon_threadsafe(q_obj.put_nowait, msg_str)
+        except Exception:
+            pass
+
+    def attach_client(
+        self,
+        ws: WebSocket,
+        loop: asyncio.AbstractEventLoop,
+        send_queue: asyncio.Queue,
+        enabled: bool,
+        edge_mode: str = "any",
+    ) -> None:
+        with self._lock:
+            self._active_ws = ws
+            self._loop = loop
+            self._send_queue = send_queue
+            self._kvm_enabled = bool(enabled)
+            if edge_mode in ("any", "bottom", "right", "left", "top"):
+                self._edge_mode = edge_mode
+            if not self._kvm_enabled and self.captured:
+                self._release_mac_cursor_locked(None, None)
+
+    def detach_client(self, ws: WebSocket) -> None:
+        with self._lock:
+            if self._active_ws is ws:
+                self._kvm_enabled = False
+                self._active_ws = None
+                self._loop = None
+                self._send_queue = None
+                if self.captured:
+                    self._release_mac_cursor_locked(None, None)
+
+    def _enter_phone_locked(
+        self,
+        mac_edge: str,
+        ratio: float,
+        min_x: float,
+        min_y: float,
+        max_x: float,
+        max_y: float,
+        cur_x: float,
+        cur_y: float,
+    ) -> None:
+        q = self._quartz
+        if q is None or self.captured:
+            return
+        self._saved_pos = (cur_x, cur_y)
+        self._mac_exit_edge = mac_edge
+        self._edge_push = 0.0
+        self._push_dir = ""
+        self.captured = True
+        try:
+            src = q.CGEventSourceCreate(q.kCGEventSourceStateCombinedSessionState)
+            if src is not None and hasattr(q, "CGEventSourceSetLocalEventsSuppressionInterval"):
+                q.CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0)
+            q.CGWarpMouseCursorPosition((max_x - 1.0, max_y - 1.0))
+            q.CGAssociateMouseAndMouseCursorPosition(False)
+        except Exception as exc:
+            logger.debug("KVM warp/disassociate error: %s", exc)
+        phone_edge = self.OPPOSITE_EDGE.get(mac_edge, "top")
+        self._enqueue_payload(
+            {
+                "type": "kvm_enter",
+                "mac_edge": mac_edge,
+                "phone_edge": phone_edge,
+                "ratio": round(ratio, 4),
+            }
+        )
+
+    def _release_mac_cursor_locked(
+        self, mac_edge: Optional[str], ratio: Optional[float]
+    ) -> None:
+        q = self._quartz
+        was_captured = self.captured
+        self.captured = False
+        self._edge_push = 0.0
+        self._push_dir = ""
+        self._last_return_at = time.monotonic()
+        if q is None:
+            return
+        try:
+            min_x, min_y, max_x, max_y = self._get_desktop_bounds()
+            w = max(1.0, max_x - min_x)
+            h = max(1.0, max_y - min_y)
+            edge = mac_edge if mac_edge in ("bottom", "top", "left", "right") else self._mac_exit_edge
+            r = max(0.02, min(0.98, float(ratio))) if ratio is not None else None
+            if r is not None:
+                if edge == "bottom":
+                    rx, ry = min_x + r * w, max_y - 6.0
+                elif edge == "top":
+                    rx, ry = min_x + r * w, min_y + 6.0
+                elif edge == "right":
+                    rx, ry = max_x - 6.0, min_y + r * h
+                else:
+                    rx, ry = min_x + 6.0, min_y + r * h
+            else:
+                rx, ry = self._saved_pos
+                rx = max(min_x + 8.0, min(max_x - 8.0, rx))
+                ry = max(min_y + 8.0, min(max_y - 8.0, ry))
+
+            q.CGAssociateMouseAndMouseCursorPosition(True)
+            src = q.CGEventSourceCreate(q.kCGEventSourceStateCombinedSessionState)
+            if src is not None and hasattr(q, "CGEventSourceSetLocalEventsSuppressionInterval"):
+                q.CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0)
+            q.CGWarpMouseCursorPosition((rx, ry))
+        except Exception as exc:
+            logger.debug("KVM release error: %s", exc)
+        if was_captured:
+            self._enqueue_payload({"type": "kvm_released"})
+
+    def release_to_mac(
+        self, mac_edge: Optional[str] = None, ratio: Optional[float] = None
+    ) -> None:
+        with self._lock:
+            self._release_mac_cursor_locked(mac_edge, ratio)
+
+    def _start_tap_thread(self) -> None:
+        def _runner() -> None:
+            try:
+                import Quartz  # type: ignore
+
+                self._quartz = Quartz
+                q = Quartz
+
+                def _cb(proxy, event_type, event, refcon):
+                    try:
+                        if event_type in (
+                            q.kCGEventTapDisabledByTimeout,
+                            q.kCGEventTapDisabledByUserInput,
+                        ):
+                            if self._tap is not None:
+                                q.CGEventTapEnable(self._tap, True)
+                            return event
+
+                        if event_type == q.kCGEventFlagsChanged:
+                            if self.captured:
+                                flags = int(q.CGEventGetFlags(event))
+                                req = (
+                                    int(q.kCGEventFlagMaskControl)
+                                    | int(q.kCGEventFlagMaskAlternate)
+                                    | int(q.kCGEventFlagMaskCommand)
+                                )
+                                if (flags & req) == req:
+                                    self.release_to_mac()
+                            return event
+
+                        if not self._kvm_enabled or self._active_ws is None:
+                            if self.captured:
+                                self.release_to_mac()
+                            return event
+
+                        user_tag = int(
+                            q.CGEventGetIntegerValueField(event, q.kCGEventSourceUserData)
+                        )
+                        if user_tag == 0x4D4B4231:
+                            return event
+
+                        dx = float(q.CGEventGetIntegerValueField(event, q.kCGMouseEventDeltaX))
+                        dy = float(q.CGEventGetIntegerValueField(event, q.kCGMouseEventDeltaY))
+
+                        if not self.captured:
+                            if event_type not in (
+                                q.kCGEventMouseMoved,
+                                q.kCGEventLeftMouseDragged,
+                            ):
+                                return event
+                            if time.monotonic() - self._last_return_at < 0.18:
+                                return event
+
+                            loc = q.CGEventGetLocation(event)
+                            lx, ly = float(loc.x), float(loc.y)
+                            min_x, min_y, max_x, max_y = self._get_desktop_bounds()
+                            w = max(1.0, max_x - min_x)
+                            h = max(1.0, max_y - min_y)
+
+                            mode = self._edge_mode
+                            allowed = (
+                                ("bottom", "right", "left", "top")
+                                if mode == "any"
+                                else (mode,)
+                            )
+
+                            cand = ""
+                            push = 0.0
+                            ratio = 0.5
+                            if "bottom" in allowed and ly >= max_y - 2.5 and dy > 0:
+                                cand = "bottom"
+                                push = dy
+                                ratio = (lx - min_x) / w
+                            elif "top" in allowed and ly <= min_y + 2.0 and dy < 0:
+                                cand = "top"
+                                push = -dy
+                                ratio = (lx - min_x) / w
+                            elif "right" in allowed and lx >= max_x - 2.5 and dx > 0:
+                                cand = "right"
+                                push = dx
+                                ratio = (ly - min_y) / h
+                            elif "left" in allowed and lx <= min_x + 2.0 and dx < 0:
+                                cand = "left"
+                                push = -dx
+                                ratio = (ly - min_y) / h
+
+                            if cand:
+                                with self._lock:
+                                    if self._push_dir == cand:
+                                        self._edge_push += push
+                                    else:
+                                        self._push_dir = cand
+                                        self._edge_push = push
+                                    if self._edge_push >= 24.0:
+                                        self._enter_phone_locked(
+                                            cand,
+                                            max(0.02, min(0.98, ratio)),
+                                            min_x,
+                                            min_y,
+                                            max_x,
+                                            max_y,
+                                            lx,
+                                            ly,
+                                        )
+                                        return None
+                            elif (
+                                min_x + 6.0 < lx < max_x - 6.0
+                                and min_y + 6.0 < ly < max_y - 6.0
+                            ):
+                                self._edge_push = 0.0
+                                self._push_dir = ""
+                            return event
+
+                        # Đang ở trên màn Remote PC của điện thoại -> nuốt sự kiện Mac & đẩy sang điện thoại
+                        if event_type in (
+                            q.kCGEventMouseMoved,
+                            q.kCGEventLeftMouseDragged,
+                            q.kCGEventRightMouseDragged,
+                            q.kCGEventOtherMouseDragged,
+                        ):
+                            if dx != 0.0 or dy != 0.0:
+                                self._enqueue_payload(
+                                    {
+                                        "type": "kvm_mouse",
+                                        "ev": "move",
+                                        "dx": dx,
+                                        "dy": dy,
+                                    }
+                                )
+                            return None
+
+                        if event_type == q.kCGEventLeftMouseDown:
+                            self._enqueue_payload({"type": "kvm_mouse", "ev": "down", "btn": 0})
+                            return None
+                        if event_type == q.kCGEventLeftMouseUp:
+                            self._enqueue_payload({"type": "kvm_mouse", "ev": "up", "btn": 0})
+                            return None
+                        if event_type == q.kCGEventRightMouseDown:
+                            self._enqueue_payload({"type": "kvm_mouse", "ev": "down", "btn": 2})
+                            return None
+                        if event_type == q.kCGEventRightMouseUp:
+                            self._enqueue_payload({"type": "kvm_mouse", "ev": "up", "btn": 2})
+                            return None
+                        if event_type == q.kCGEventOtherMouseDown:
+                            self._enqueue_payload({"type": "kvm_mouse", "ev": "down", "btn": 1})
+                            return None
+                        if event_type == q.kCGEventOtherMouseUp:
+                            self._enqueue_payload({"type": "kvm_mouse", "ev": "up", "btn": 1})
+                            return None
+
+                        if event_type == q.kCGEventScrollWheel:
+                            is_cont = int(
+                                q.CGEventGetIntegerValueField(
+                                    event, q.kCGScrollWheelEventIsContinuous
+                                )
+                            )
+                            if is_cont != 0:
+                                sy = int(
+                                    q.CGEventGetIntegerValueField(
+                                        event, q.kCGScrollWheelEventPointDeltaAxis1
+                                    )
+                                )
+                                sx = int(
+                                    q.CGEventGetIntegerValueField(
+                                        event, q.kCGScrollWheelEventPointDeltaAxis2
+                                    )
+                                )
+                                if sx != 0 or sy != 0:
+                                    self._enqueue_payload(
+                                        {
+                                            "type": "kvm_mouse",
+                                            "ev": "wheel",
+                                            "unit": "px",
+                                            "sx": sx,
+                                            "sy": sy,
+                                        }
+                                    )
+                            else:
+                                sy = int(
+                                    q.CGEventGetIntegerValueField(
+                                        event, q.kCGScrollWheelEventDeltaAxis1
+                                    )
+                                )
+                                sx = int(
+                                    q.CGEventGetIntegerValueField(
+                                        event, q.kCGScrollWheelEventDeltaAxis2
+                                    )
+                                )
+                                if sx != 0 or sy != 0:
+                                    self._enqueue_payload(
+                                        {
+                                            "type": "kvm_mouse",
+                                            "ev": "wheel",
+                                            "unit": "line",
+                                            "sx": sx,
+                                            "sy": sy,
+                                        }
+                                    )
+                            return None
+
+                        return event
+                    except Exception:
+                        return event
+
+                mask = (
+                    (1 << int(q.kCGEventMouseMoved))
+                    | (1 << int(q.kCGEventLeftMouseDown))
+                    | (1 << int(q.kCGEventLeftMouseUp))
+                    | (1 << int(q.kCGEventLeftMouseDragged))
+                    | (1 << int(q.kCGEventRightMouseDown))
+                    | (1 << int(q.kCGEventRightMouseUp))
+                    | (1 << int(q.kCGEventRightMouseDragged))
+                    | (1 << int(q.kCGEventOtherMouseDown))
+                    | (1 << int(q.kCGEventOtherMouseUp))
+                    | (1 << int(q.kCGEventOtherMouseDragged))
+                    | (1 << int(q.kCGEventScrollWheel))
+                    | (1 << int(q.kCGEventFlagsChanged))
+                )
+
+                tap = q.CGEventTapCreate(
+                    q.kCGHIDEventTap,
+                    q.kCGHeadInsertEventTap,
+                    q.kCGEventTapOptionDefault,
+                    mask,
+                    _cb,
+                    None,
+                )
+                if tap is None:
+                    logger.warning("KVM CGEventTapCreate trả về None (kiểm tra quyền Accessibility).")
+                    return
+
+                self._tap = tap
+                self.available = True
+                run_loop_src = q.CFMachPortCreateRunLoopSource(None, tap, 0)
+                loop_ref = q.CFRunLoopGetCurrent()
+                q.CFRunLoopAddSource(loop_ref, run_loop_src, q.kCFRunLoopCommonModes)
+                q.CGEventTapEnable(tap, True)
+                logger.info("Đã kích hoạt MacKvmBridge (Chuột Bluetooth xuyên màn hình Mac <-> Điện thoại).")
+                q.CFRunLoopRun()
+            except Exception as exc:
+                logger.warning("Không thể khởi tạo MacKvmBridge: %s", exc)
+
+        t = threading.Thread(target=_runner, daemon=True)
+        t.start()
+
+
+# ============================================================================
+# RDCLEANPATH ASN.1 DER PROXY (CHO IRONRDP WASM REMOTE PC TRÊN MẠNG LAN)
+# ============================================================================
+_RDCLEANPATH_VERSION_1 = 3390
+
+
+def _der_len(n: int) -> bytes:
+    if n < 0x80:
+        return bytes([n])
+    out = bytearray()
+    tmp = n
+    while tmp > 0:
+        out.insert(0, tmp & 0xFF)
+        tmp >>= 8
+    return bytes([0x80 | len(out)]) + bytes(out)
+
+
+def _der_wrap(tag: int, content: bytes) -> bytes:
+    return bytes([tag]) + _der_len(len(content)) + content
+
+
+def _der_int(val: int) -> bytes:
+    if val == 0:
+        return _der_wrap(0x02, b"\x00")
+    out = bytearray()
+    tmp = val
+    while tmp > 0:
+        out.insert(0, tmp & 0xFF)
+        tmp >>= 8
+    if out[0] & 0x80:
+        out.insert(0, 0)
+    return _der_wrap(0x02, bytes(out))
+
+
+def _der_read_tlv(buf: bytes, offset: int) -> Tuple[int, bytes, int]:
+    tag = buf[offset]
+    first = buf[offset + 1]
+    if first < 0x80:
+        length = first
+        hlen = 2
+    else:
+        nbytes = first & 0x7F
+        length = int.from_bytes(buf[offset + 2 : offset + 2 + nbytes], "big")
+        hlen = 2 + nbytes
+    val = buf[offset + hlen : offset + hlen + length]
+    return tag, val, hlen + length
+
+
+def _parse_rdcleanpath_req(data: bytes) -> Tuple[str, bytes]:
+    outer_tag, outer_val, _ = _der_read_tlv(data, 0)
+    if outer_tag != 0x30:
+        raise ValueError("Invalid RDCleanPath outer tag")
+    off = 0
+    ver = None
+    dest = ""
+    x224 = b""
+    while off < len(outer_val):
+        ctag, cval, clen = _der_read_tlv(outer_val, off)
+        off += clen
+        idx = ctag & 0x1F
+        if idx == 0:
+            _, iv, _ = _der_read_tlv(cval, 0)
+            ver = int.from_bytes(iv, "big")
+        elif idx == 2:
+            _, sv, _ = _der_read_tlv(cval, 0)
+            dest = sv.decode("utf-8", errors="replace")
+        elif idx == 6:
+            _, ov, _ = _der_read_tlv(cval, 0)
+            x224 = bytes(ov)
+    if ver != _RDCLEANPATH_VERSION_1 or not dest or not x224:
+        raise ValueError("Incomplete RDCleanPath request")
+    return dest, x224
+
+
+def _build_rdcleanpath_resp(server_addr: str, x224_resp: bytes, certs: List[bytes]) -> bytes:
+    cert_seq = _der_wrap(0x30, b"".join(_der_wrap(0x04, c) for c in certs))
+    parts = (
+        _der_wrap(0xA0, _der_int(_RDCLEANPATH_VERSION_1))
+        + _der_wrap(0xA6, _der_wrap(0x04, x224_resp))
+        + _der_wrap(0xA7, cert_seq)
+        + _der_wrap(0xA9, _der_wrap(0x0C, server_addr.encode("utf-8")))
+    )
+    return _der_wrap(0x30, parts)
+
+
+def _build_rdcleanpath_err(code: int = 1, http_status: int = 502) -> bytes:
+    err_seq = _der_wrap(
+        0x30,
+        _der_wrap(0xA0, _der_int(code)) + _der_wrap(0xA1, _der_int(http_status)),
+    )
+    return _der_wrap(
+        0x30,
+        _der_wrap(0xA0, _der_int(_RDCLEANPATH_VERSION_1)) + _der_wrap(0xA1, err_seq),
+    )
+
+
+def _tcp_x224_exchange(host: str, port: int, x224_req: bytes) -> Tuple[socket.socket, bytes]:
+    raw_sock = socket.create_connection((host, port), timeout=10.0)
+    try:
+        raw_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        raw_sock.sendall(x224_req)
+        hdr = bytearray()
+        while len(hdr) < 4:
+            chunk = raw_sock.recv(4 - len(hdr))
+            if not chunk:
+                raise ConnectionError("RDP closed during X.224 header")
+            hdr.extend(chunk)
+        if hdr[0] == 0x03 and hdr[1] == 0x00:
+            expected = (hdr[2] << 8) | hdr[3]
+            while len(hdr) < expected:
+                chunk = raw_sock.recv(expected - len(hdr))
+                if not chunk:
+                    raise ConnectionError("RDP closed during X.224 body")
+                hdr.extend(chunk)
+        raw_sock.settimeout(None)
+        raw_sock.setblocking(False)
+        return raw_sock, bytes(hdr)
+    except Exception:
+        try:
+            raw_sock.close()
+        except Exception:
+            pass
+        raise
+
+
 injector = KeyboardInjector()
 lens_capturer = LiveLensCapturer(injector)
+kvm_bridge = MacKvmBridge()
 app = FastAPI(title="Mac Web Virtual Keyboard", docs_url=None, redoc_url=None)
 
 
@@ -1705,6 +2270,112 @@ async def manifest_json() -> FileResponse:
     )
 
 
+@app.get("/ironrdp/{filename}")
+async def ironrdp_asset(filename: str) -> FileResponse:
+    safe_name = Path(filename).name
+    target = STATIC_DIR / "ironrdp" / safe_name
+    media = (
+        "application/wasm"
+        if safe_name.endswith(".wasm")
+        else "application/javascript"
+    )
+    return FileResponse(
+        target,
+        media_type=media,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.websocket("/rdp-ws")
+async def rdp_cleanpath_ws(ws: WebSocket) -> None:
+    subproto = None
+    raw_proto = ws.headers.get("sec-websocket-protocol", "")
+    if raw_proto:
+        subproto = raw_proto.split(",")[0].strip() or None
+    await ws.accept(subprotocol=subproto)
+
+    writer: Optional[asyncio.StreamWriter] = None
+    pump_task: Optional[asyncio.Task] = None
+    try:
+        first_pkt = await asyncio.wait_for(ws.receive_bytes(), timeout=12.0)
+        dest, x224_req = _parse_rdcleanpath_req(first_pkt)
+        host = "192.168.52.230"
+        port = 3389
+        clean = dest.strip()
+        if clean:
+            if ":" in clean:
+                h_part, p_part = clean.rsplit(":", 1)
+                host = h_part.strip() or host
+                try:
+                    port = int(p_part)
+                except ValueError:
+                    port = 3389
+            else:
+                host = clean
+
+        raw_sock, x224_resp = await asyncio.to_thread(
+            _tcp_x224_exchange, host, port, x224_req
+        )
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(sock=raw_sock, ssl=ssl_ctx, server_hostname=host),
+            timeout=10.0,
+        )
+        ssl_obj = writer.get_extra_info("ssl_object")
+        der_cert = ssl_obj.getpeercert(binary_form=True) if ssl_obj else None
+        certs = [der_cert] if der_cert else []
+        resp_pdu = _build_rdcleanpath_resp(f"{host}:{port}", x224_resp, certs)
+        await ws.send_bytes(resp_pdu)
+
+        async def _tls_to_ws() -> None:
+            try:
+                while True:
+                    chunk = await reader.read(65536)
+                    if not chunk:
+                        break
+                    await ws.send_bytes(chunk)
+            except Exception:
+                pass
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+        pump_task = asyncio.create_task(_tls_to_ws())
+
+        while True:
+            msg = await ws.receive()
+            mtype = msg.get("type")
+            if mtype == "websocket.disconnect":
+                break
+            bdata = msg.get("bytes")
+            if bdata and writer is not None:
+                writer.write(bdata)
+                await writer.drain()
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.warning("RDP proxy handshake/relay error: %s", exc)
+        try:
+            await ws.send_bytes(_build_rdcleanpath_err(1, 502))
+        except Exception:
+            pass
+    finally:
+        if pump_task is not None:
+            pump_task.cancel()
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
 @app.get("/apk")
 async def download_apk() -> FileResponse:
     apk_path = BASE_DIR / "releases" / "app-release.apk"
@@ -1725,12 +2396,14 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.1.0",
+        "version": "2.1.1",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
         "kb_layout": injector.kb_layout,
         "lens_available": lens_capturer.available,
+        "kvm_available": kvm_bridge.available,
+        "kvm_captured": kvm_bridge.captured,
         "screen_recording_ok": check_macos_screen_recording(prompt=False),
         "remote_pc_focused": is_rem,
         "focused_app": Path(foc_app).name if "/" in foc_app else foc_app,
@@ -1869,6 +2542,18 @@ async def keyboard_ws(ws: WebSocket) -> None:
                     pass
 
     lens_task = asyncio.create_task(stream_lens_loop())
+    kvm_queue: asyncio.Queue = asyncio.Queue()
+    cur_loop = asyncio.get_running_loop()
+
+    async def stream_kvm_loop() -> None:
+        try:
+            while lens_cfg["running"]:
+                msg_str = await kvm_queue.get()
+                await ws.send_text(msg_str)
+        except Exception:
+            pass
+
+    kvm_task = asyncio.create_task(stream_kvm_loop())
 
     try:
         while True:
@@ -1937,10 +2622,12 @@ async def keyboard_ws(ws: WebSocket) -> None:
                     injector.telex.reset()
                     if injector.vn_enabled:
                         ensure_macos_abc_input_source()
-                if "layout" in data and data["layout"] in ("win", "mac", "pad"):
+                if "layout" in data and data["layout"] in ("win", "mac", "pad", "remote"):
                     injector._commit_telex_word_to_preview()
                     injector.kb_layout = str(data["layout"])
                     injector.telex.reset()
+                    if injector.kb_layout != "remote":
+                        kvm_bridge.attach_client(ws, cur_loop, kvm_queue, False)
                 await ws.send_text(
                     json.dumps(
                         {
@@ -1949,6 +2636,17 @@ async def keyboard_ws(ws: WebSocket) -> None:
                             "layout": injector.kb_layout,
                         }
                     )
+                )
+            elif msg_type == "kvm_config":
+                kvm_on = bool(data.get("enabled", False))
+                edge_m = str(data.get("edge", "any"))
+                kvm_bridge.attach_client(ws, cur_loop, kvm_queue, kvm_on, edge_m)
+            elif msg_type == "kvm_return":
+                r_edge = data.get("mac_edge")
+                r_ratio = data.get("ratio")
+                kvm_bridge.release_to_mac(
+                    str(r_edge) if r_edge is not None else None,
+                    float(r_ratio) if r_ratio is not None else None,
                 )
             elif msg_type == "lens_config":
                 if "enabled" in data:
@@ -1969,6 +2667,8 @@ async def keyboard_ws(ws: WebSocket) -> None:
     finally:
         lens_cfg["running"] = False
         lens_task.cancel()
+        kvm_task.cancel()
+        kvm_bridge.detach_client(ws)
         injector.release_all_modifiers()
 
 

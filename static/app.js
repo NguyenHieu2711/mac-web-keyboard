@@ -169,19 +169,33 @@
     pad: "📱 Windows dọc",
     win: "🖥 Win",
     mac: `${APPLE_SVG} Mac`,
+    remote: "🖥 Remote",
   };
 
   let kbLayout = "pad";
+  let lastNonRemoteLayout = "pad";
   let padSplitHorizontal = false;
   let vnEnabled = true;
   let symLayer = false;
   let symShifted = false;
   let modeMenuOpen = false;
+  let rdpEdgeMode = "any";
+  let onEnterRemoteLayout = null;
+  let onLeaveRemoteLayout = null;
+  let handleKvmServerMessage = null;
 
   try {
     const savedLayout = localStorage.getItem(STORAGE_LAYOUT_KEY);
-    if (savedLayout === "win" || savedLayout === "mac" || savedLayout === "pad") {
+    if (
+      savedLayout === "win" ||
+      savedLayout === "mac" ||
+      savedLayout === "pad" ||
+      savedLayout === "remote"
+    ) {
       kbLayout = savedLayout;
+      if (savedLayout !== "remote") {
+        lastNonRemoteLayout = savedLayout;
+      }
     }
     const savedSplit = localStorage.getItem(STORAGE_PAD_SPLIT_KEY);
     if (savedSplit === "horizontal" || savedSplit === "1") {
@@ -190,6 +204,16 @@
     const savedVn = localStorage.getItem(STORAGE_VN_KEY);
     if (savedVn === "0" || savedVn === "false") {
       vnEnabled = false;
+    }
+    const savedEdge = localStorage.getItem("mac_kb_rdp_edge_mode");
+    if (
+      savedEdge === "any" ||
+      savedEdge === "bottom" ||
+      savedEdge === "right" ||
+      savedEdge === "left" ||
+      savedEdge === "top"
+    ) {
+      rdpEdgeMode = savedEdge;
     }
   } catch {
     // ignore
@@ -265,6 +289,16 @@
   }
 
   function pushLensConfigToServer() {
+    if (kbLayout === "remote") {
+      sendPayload({
+        type: "lens_config",
+        enabled: false,
+        aspect: 1.85,
+        scale: +lensFovScale.toFixed(2),
+        mode: "landscape",
+      });
+      return;
+    }
     const activeSurface =
       kbLayout === "pad"
         ? document.getElementById("trackpad-surface")
@@ -285,12 +319,23 @@
     });
   }
 
+  function pushKvmConfigToServer() {
+    const activeRemote =
+      kbLayout === "remote" && document.visibilityState === "visible";
+    sendPayload({
+      type: "kvm_config",
+      enabled: activeRemote,
+      edge: rdpEdgeMode,
+    });
+  }
+
   function pushConfigToServer() {
     sendPayload({
       type: "config",
       layout: kbLayout,
       vn: vnEnabled,
     });
+    pushKvmConfigToServer();
     setTimeout(pushLensConfigToServer, 60);
   }
 
@@ -312,6 +357,10 @@
   function selectKeyboardLayout(newLayout) {
     if (!LAYOUT_LABELS[newLayout]) return;
     releaseAllActiveTouches();
+    const prevLayout = kbLayout;
+    if (prevLayout !== "remote" && newLayout === "remote") {
+      lastNonRemoteLayout = prevLayout;
+    }
     kbLayout = newLayout;
     modeMenuOpen = false;
     symLayer = false;
@@ -323,6 +372,11 @@
     }
     syncModeUI();
     pushConfigToServer();
+    if (kbLayout === "remote") {
+      if (typeof onEnterRemoteLayout === "function") onEnterRemoteLayout();
+    } else if (prevLayout === "remote") {
+      if (typeof onLeaveRemoteLayout === "function") onLeaveRemoteLayout();
+    }
   }
 
   modeItems.forEach((item) => {
@@ -688,7 +742,16 @@
       if (typeof ev.data === "string") {
         try {
           const msg = JSON.parse(ev.data);
-          if (msg && msg.type === "typed_preview") {
+          if (
+            msg &&
+            (msg.type === "kvm_enter" ||
+              msg.type === "kvm_mouse" ||
+              msg.type === "kvm_released")
+          ) {
+            if (typeof handleKvmServerMessage === "function") {
+              handleKvmServerMessage(msg);
+            }
+          } else if (msg && msg.type === "typed_preview") {
             renderSimpleText(msg.text || "", msg.badge || "");
           } else if (msg && msg.type === "state" && typeof msg.screen_ok === "boolean") {
             screenRecordingOk = msg.screen_ok;
@@ -748,9 +811,12 @@
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         reconnectDelay = 200;
         connectWebSocket();
+      } else {
+        pushKvmConfigToServer();
       }
     } else {
       releaseAllActiveTouches();
+      pushKvmConfigToServer();
     }
   });
 
@@ -2119,11 +2185,1394 @@
   connectWebSocket();
 
   // ============================================================================
-  // 8. CẬP NHẬT THÔNG MINH TRỰC TIẾP KHI ĐANG DÙNG APP (LIVE OTA HOT-UPDATE)
+  // 8. TAB 4 ĐỘC LẬP: REMOTE PC (2248x1080 @ 100% SCALING • TOUCH + KVM + MIC)
+  // ============================================================================
+  const RDP_TARGET_W = 2248;
+  const RDP_TARGET_H = 1080;
+  const RDP_SCALE_FACTOR = 100;
+  const STORAGE_RDP_HOST = "mac_kb_rdp_host";
+  const STORAGE_RDP_USER = "mac_kb_rdp_user";
+  const STORAGE_RDP_PASS = "mac_kb_rdp_pass";
+  const STORAGE_RDP_EDGE = "mac_kb_rdp_edge_mode";
+
+  const EDGE_CYCLE = ["any", "bottom", "right", "left", "top"];
+  const EDGE_LABELS = {
+    any: "✥ Mọi phía",
+    bottom: "⬇ Dưới",
+    right: "➡ Phải",
+    left: "⬅ Trái",
+    top: "⬆ Trên",
+  };
+
+  const RDP_SCANCODE_MAP = {
+    Escape: 0x01, Digit1: 0x02, Digit2: 0x03, Digit3: 0x04, Digit4: 0x05,
+    Digit5: 0x06, Digit6: 0x07, Digit7: 0x08, Digit8: 0x09, Digit9: 0x0a,
+    Digit0: 0x0b, Minus: 0x0c, Equal: 0x0d, Backspace: 0x0e, Tab: 0x0f,
+    KeyQ: 0x10, KeyW: 0x11, KeyE: 0x12, KeyR: 0x13, KeyT: 0x14,
+    KeyY: 0x15, KeyU: 0x16, KeyI: 0x17, KeyO: 0x18, KeyP: 0x19,
+    BracketLeft: 0x1a, BracketRight: 0x1b, Enter: 0x1c, ControlLeft: 0x1d,
+    KeyA: 0x1e, KeyS: 0x1f, KeyD: 0x20, KeyF: 0x21, KeyG: 0x22,
+    KeyH: 0x23, KeyJ: 0x24, KeyK: 0x25, KeyL: 0x26, Semicolon: 0x27,
+    Quote: 0x28, Backquote: 0x29, ShiftLeft: 0x2a, Backslash: 0x2b,
+    KeyZ: 0x2c, KeyX: 0x2d, KeyC: 0x2e, KeyV: 0x2f, KeyB: 0x30,
+    KeyN: 0x31, KeyM: 0x32, Comma: 0x33, Period: 0x34, Slash: 0x35,
+    ShiftRight: 0x36, AltLeft: 0x38, Space: 0x39, CapsLock: 0x3a,
+    F1: 0x3b, F2: 0x3c, F3: 0x3d, F4: 0x3e, F5: 0x3f, F6: 0x40,
+    F7: 0x41, F8: 0x42, F9: 0x43, F10: 0x44, F11: 0x57, F12: 0x58,
+    ControlRight: 0xe01d, AltRight: 0xe038, Home: 0xe047, ArrowUp: 0xe048,
+    PageUp: 0xe049, ArrowLeft: 0xe04b, ArrowRight: 0xe04d, End: 0xe04f,
+    ArrowDown: 0xe050, PageDown: 0xe051, Insert: 0xe052, Delete: 0xe053,
+    MetaLeft: 0xe05b, MetaRight: 0xe05c,
+  };
+
+  const CHAR_TO_CODE = {
+    a: "KeyA", b: "KeyB", c: "KeyC", d: "KeyD", e: "KeyE", f: "KeyF",
+    g: "KeyG", h: "KeyH", i: "KeyI", j: "KeyJ", k: "KeyK", l: "KeyL",
+    m: "KeyM", n: "KeyN", o: "KeyO", p: "KeyP", q: "KeyQ", r: "KeyR",
+    s: "KeyS", t: "KeyT", u: "KeyU", v: "KeyV", w: "KeyW", x: "KeyX",
+    y: "KeyY", z: "KeyZ", "0": "Digit0", "1": "Digit1", "2": "Digit2",
+    "3": "Digit3", "4": "Digit4", "5": "Digit5", "6": "Digit6",
+    "7": "Digit7", "8": "Digit8", "9": "Digit9",
+  };
+
+  const remoteViewport = document.getElementById("remote-viewport");
+  const remoteStage = document.getElementById("remote-stage");
+  const remoteCanvas = document.getElementById("remote-pc-canvas");
+  const remoteKvmCursor = document.getElementById("remote-kvm-cursor");
+  const remoteCursorImg = document.getElementById("remote-cursor-img");
+  const remoteCursorSvg = document.getElementById("remote-cursor-svg");
+  const remoteHudPill = document.getElementById("remote-hud-pill");
+  const remoteHudBar = document.getElementById("remote-hud-bar");
+  const remoteStatusDot = document.getElementById("remote-status-dot");
+  const remoteModeMenu = document.getElementById("remote-mode-menu");
+  const btnRemoteMic = document.getElementById("btn-remote-mic");
+  const btnRemoteKb = document.getElementById("btn-remote-kb");
+  const btnRemoteEdge = document.getElementById("btn-remote-edge");
+  const btnRemoteZoomReset = document.getElementById("btn-remote-zoom-reset");
+  const btnRemoteCfg = document.getElementById("btn-remote-cfg");
+  const btnRemoteCollapse = document.getElementById("btn-remote-collapse");
+  const remoteSpecialBar = document.getElementById("remote-special-bar");
+  const btnRemoteHideKb = document.getElementById("btn-remote-hide-kb");
+  const remoteImeInput = document.getElementById("remote-ime-input");
+  const remoteLoginOverlay = document.getElementById("remote-login-overlay");
+  const rdpHostInput = document.getElementById("rdp-host-input");
+  const rdpUserInput = document.getElementById("rdp-user-input");
+  const rdpPassInput = document.getElementById("rdp-pass-input");
+  const rdpLoginStatus = document.getElementById("rdp-login-status");
+  const btnRdpConnect = document.getElementById("btn-rdp-connect");
+  const btnRdpDisconnect = document.getElementById("btn-rdp-disconnect");
+  const btnRdpSwitchBack = document.getElementById("btn-rdp-switch-back");
+  const btnRdpCloseCard = document.getElementById("btn-rdp-close-card");
+
+  let rdpMod = null;
+  let rdpModPromise = null;
+  let rdpSession = null;
+  let rdpConnecting = false;
+  let rdpHudExpanded = false;
+  let rdpRemoteMenuOpen = false;
+  let rdpImeOpen = false;
+  let rdpComposing = false;
+  let rdpActiveMods = new Set();
+
+  let rdpZoom = 1.0;
+  let rdpPanX = 0;
+  let rdpPanY = 0;
+
+  let kvmActive = false;
+  let kvmX = RDP_TARGET_W / 2;
+  let kvmY = RDP_TARGET_H / 2;
+  let kvmMacEdge = "bottom";
+  let kvmPhoneEdge = "top";
+  let kvmReturnPush = 0;
+  let cursorHotspotX = 0;
+  let cursorHotspotY = 0;
+  let cursorHiddenByServer = false;
+
+  let webSpeechRec = null;
+  let voiceListening = false;
+
+  try {
+    const sHost = localStorage.getItem(STORAGE_RDP_HOST);
+    const sUser = localStorage.getItem(STORAGE_RDP_USER);
+    const sPass = localStorage.getItem(STORAGE_RDP_PASS);
+    if (sHost && rdpHostInput) rdpHostInput.value = sHost;
+    if (sUser && rdpUserInput) rdpUserInput.value = sUser;
+    if (sPass && rdpPassInput) rdpPassInput.value = sPass;
+  } catch {
+    // ignore
+  }
+
+  function syncRemoteEdgeLabel() {
+    if (btnRemoteEdge) {
+      btnRemoteEdge.textContent = EDGE_LABELS[rdpEdgeMode] || EDGE_LABELS.any;
+    }
+  }
+  syncRemoteEdgeLabel();
+
+  function setRemoteHudExpanded(expanded) {
+    rdpHudExpanded = Boolean(expanded);
+    if (!rdpHudExpanded) rdpRemoteMenuOpen = false;
+    if (remoteHudPill) remoteHudPill.classList.toggle("is-hidden", rdpHudExpanded);
+    if (remoteHudBar) remoteHudBar.classList.toggle("is-hidden", !rdpHudExpanded);
+    if (remoteModeMenu) remoteModeMenu.classList.toggle("is-hidden", !rdpRemoteMenuOpen);
+  }
+
+  function setRdpStatus(text, isOk = false) {
+    if (!rdpLoginStatus) return;
+    if (!text) {
+      rdpLoginStatus.textContent = "";
+      rdpLoginStatus.classList.add("is-hidden");
+      return;
+    }
+    rdpLoginStatus.textContent = text;
+    rdpLoginStatus.classList.toggle("is-ok", Boolean(isOk));
+    rdpLoginStatus.classList.remove("is-hidden");
+  }
+
+  function syncRdpConnectionUI() {
+    const connected = Boolean(rdpSession);
+    if (remoteStatusDot) {
+      remoteStatusDot.classList.toggle("is-online", connected);
+      remoteStatusDot.classList.toggle("is-connecting", rdpConnecting && !connected);
+    }
+    if (btnRdpConnect) {
+      btnRdpConnect.disabled = rdpConnecting;
+      btnRdpConnect.textContent = rdpConnecting
+        ? "Đang kết nối..."
+        : connected
+          ? "Kết nối lại"
+          : "Kết nối";
+    }
+    if (btnRdpDisconnect) {
+      btnRdpDisconnect.classList.toggle("is-hidden", !connected);
+    }
+    if (btnRdpCloseCard) {
+      btnRdpCloseCard.classList.toggle("is-hidden", !connected);
+    }
+  }
+
+  function clampRdpPan() {
+    if (!remoteViewport || !remoteStage || rdpZoom <= 1.005) {
+      rdpZoom = 1.0;
+      rdpPanX = 0;
+      rdpPanY = 0;
+      return;
+    }
+    const vw = remoteViewport.clientWidth || 1;
+    const vh = remoteViewport.clientHeight || 1;
+    const sw = remoteStage.offsetWidth * rdpZoom;
+    const sh = remoteStage.offsetHeight * rdpZoom;
+    const baseLeft = (vw - remoteStage.offsetWidth) / 2;
+    const baseTop = (vh - remoteStage.offsetHeight) / 2;
+    const minX = Math.min(0, vw - sw - baseLeft);
+    const maxX = Math.max(0, -baseLeft);
+    const minY = Math.min(0, vh - sh - baseTop);
+    const maxY = Math.max(0, -baseTop);
+    rdpPanX = Math.max(minX, Math.min(maxX, rdpPanX));
+    rdpPanY = Math.max(minY, Math.min(maxY, rdpPanY));
+  }
+
+  function applyRdpStageTransform() {
+    if (!remoteStage) return;
+    clampRdpPan();
+    if (rdpZoom <= 1.005) {
+      remoteStage.style.transform = "";
+      if (btnRemoteZoomReset) btnRemoteZoomReset.classList.add("is-hidden");
+    } else {
+      remoteStage.style.transform = `translate3d(${rdpPanX.toFixed(1)}px, ${rdpPanY.toFixed(1)}px, 0) scale(${rdpZoom.toFixed(3)})`;
+      if (btnRemoteZoomReset) {
+        btnRemoteZoomReset.textContent = `${Math.round(rdpZoom * 100)}%`;
+        btnRemoteZoomReset.classList.remove("is-hidden");
+      }
+    }
+  }
+
+  function updateOverlayCursorVisual() {
+    if (!remoteKvmCursor || !remoteCanvas) return;
+    if (!kvmActive || cursorHiddenByServer) {
+      remoteKvmCursor.classList.add("is-hidden");
+      return;
+    }
+    const cw = remoteCanvas.offsetWidth || RDP_TARGET_W;
+    const ch = remoteCanvas.offsetHeight || RDP_TARGET_H;
+    const px = (kvmX / (remoteCanvas.width || RDP_TARGET_W)) * cw - cursorHotspotX;
+    const py = (kvmY / (remoteCanvas.height || RDP_TARGET_H)) * ch - cursorHotspotY;
+    remoteKvmCursor.style.transform = `translate3d(${px.toFixed(1)}px, ${py.toFixed(1)}px, 0)`;
+    remoteKvmCursor.classList.remove("is-hidden");
+  }
+
+  async function ensureIronRdpLoaded() {
+    if (rdpMod) return rdpMod;
+    if (!rdpModPromise) {
+      rdpModPromise = (async () => {
+        const mod = await import("./ironrdp/rdp_client.js");
+        const wasmRes = await fetch("./ironrdp/rdp_client_bg.wasm");
+        if (!wasmRes.ok) {
+          throw new Error(`Không tải được WASM (${wasmRes.status})`);
+        }
+        const wasmBuf = await wasmRes.arrayBuffer();
+        await mod.default({ module_or_path: wasmBuf });
+        mod.setup("warn");
+        rdpMod = mod;
+        return mod;
+      })().catch((err) => {
+        rdpModPromise = null;
+        throw err;
+      });
+    }
+    return rdpModPromise;
+  }
+
+  async function probeHttpHealth(httpUrl, timeoutMs = 850) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(httpUrl, {
+        method: "GET",
+        cache: "no-store",
+        signal: ctrl.signal,
+      });
+      return res.ok;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function buildRdpProxyCandidates(pcHost) {
+    const pcIp = String(pcHost || "192.168.52.230")
+      .trim()
+      .replace(/^https?:\/\/|^wss?:\/\//, "")
+      .split(":")[0]
+      .trim();
+
+    const rawCandidates = [];
+    if (pcIp) {
+      rawCandidates.push({
+        wsUrl: `ws://${pcIp}:5051`,
+        healthUrl: `http://${pcIp}:5051/health`,
+      });
+    }
+    for (const h of resolveCandidateHosts()) {
+      const cleanH = h.replace(/^https?:\/\/|^wss?:\/\//, "").split("/")[0];
+      if (!cleanH) continue;
+      rawCandidates.push({
+        wsUrl: `ws://${cleanH}/rdp-ws`,
+        healthUrl: `http://${cleanH}/health`,
+      });
+    }
+
+    const seen = new Set();
+    const unique = rawCandidates.filter((c) => {
+      if (seen.has(c.wsUrl)) return false;
+      seen.add(c.wsUrl);
+      return true;
+    });
+
+    const checks = await Promise.all(
+      unique.map(async (c) => ({
+        wsUrl: c.wsUrl,
+        ok: await probeHttpHealth(c.healthUrl, 850),
+      }))
+    );
+
+    const alive = checks.filter((c) => c.ok).map((c) => c.wsUrl);
+    const rest = checks.filter((c) => !c.ok).map((c) => c.wsUrl);
+    return [...alive, ...rest];
+  }
+
+  function formatIronRdpError(err) {
+    if (!err) return "Lỗi kết nối không xác định";
+    try {
+      if (typeof err.kind === "function") {
+        const k = err.kind();
+        if (k === 1) return "Sai mật khẩu Windows PC.";
+        if (k === 2) return "Đăng nhập thất bại (kiểm tra tài khoản / mật khẩu PC).";
+        if (k === 3) return "Tài khoản không có quyền Remote Desktop.";
+        if (k === 5) return "Không kết nối được cổng Gateway trên Wi-Fi.";
+      }
+      if (typeof err.backtrace === "function") {
+        const bt = String(err.backtrace() || "");
+        const firstLine = bt.split("\n")[0].trim();
+        if (firstLine) return firstLine;
+      }
+    } catch {
+      // ignore
+    }
+    return String(err.message || err);
+  }
+
+  function applyRdpDeviceEvents(events) {
+    if (!rdpSession || !rdpMod || !events || events.length === 0) return;
+    try {
+      const tx = new rdpMod.InputTransaction();
+      for (const ev of events) {
+        if (ev) tx.addEvent(ev);
+      }
+      rdpSession.applyInputs(tx);
+    } catch {
+      // ignore transient input error
+    }
+  }
+
+  function rdpSendMouseMove(rx, ry) {
+    if (!rdpSession || !rdpMod) return;
+    const cx = Math.max(0, Math.min((remoteCanvas.width || RDP_TARGET_W) - 1, Math.round(rx)));
+    const cy = Math.max(0, Math.min((remoteCanvas.height || RDP_TARGET_H) - 1, Math.round(ry)));
+    applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseMove(cx, cy)]);
+  }
+
+  function rdpSendMouseClick(rx, ry, button = 0, count = 1) {
+    if (!rdpSession || !rdpMod) return;
+    const cx = Math.max(0, Math.min((remoteCanvas.width || RDP_TARGET_W) - 1, Math.round(rx)));
+    const cy = Math.max(0, Math.min((remoteCanvas.height || RDP_TARGET_H) - 1, Math.round(ry)));
+    const evs = [rdpMod.DeviceEvent.mouseMove(cx, cy)];
+    for (let i = 0; i < count; i += 1) {
+      evs.push(rdpMod.DeviceEvent.mouseButtonPressed(button));
+      evs.push(rdpMod.DeviceEvent.mouseButtonReleased(button));
+    }
+    applyRdpDeviceEvents(evs);
+  }
+
+  function rdpSendScancodeTap(codeName, withActiveMods = true) {
+    if (!rdpSession || !rdpMod) return;
+    const sc = RDP_SCANCODE_MAP[codeName];
+    if (sc === undefined) return;
+    const evs = [];
+    const modsToUse = withActiveMods ? Array.from(rdpActiveMods) : [];
+    for (const m of modsToUse) {
+      const msc = RDP_SCANCODE_MAP[m];
+      if (msc !== undefined) evs.push(rdpMod.DeviceEvent.keyPressed(msc));
+    }
+    evs.push(rdpMod.DeviceEvent.keyPressed(sc));
+    evs.push(rdpMod.DeviceEvent.keyReleased(sc));
+    for (let i = modsToUse.length - 1; i >= 0; i -= 1) {
+      const msc = RDP_SCANCODE_MAP[modsToUse[i]];
+      if (msc !== undefined) evs.push(rdpMod.DeviceEvent.keyReleased(msc));
+    }
+    applyRdpDeviceEvents(evs);
+    if (withActiveMods && rdpActiveMods.size > 0) {
+      rdpActiveMods.clear();
+      syncRdpModButtons();
+    }
+  }
+
+  function injectUnicodeTextToRdp(text) {
+    if (!rdpSession || !rdpMod || !text) return;
+    const str = String(text);
+    if (rdpActiveMods.size > 0 && str.length === 1) {
+      const lower = str.toLowerCase();
+      if (CHAR_TO_CODE[lower]) {
+        rdpSendScancodeTap(CHAR_TO_CODE[lower], true);
+        return;
+      }
+    }
+    const chars = Array.from(str);
+    const BATCH = 24;
+    for (let i = 0; i < chars.length; i += BATCH) {
+      const slice = chars.slice(i, i + BATCH);
+      const evs = [];
+      for (const ch of slice) {
+        if (ch === "\r") continue;
+        if (ch === "\n") {
+          evs.push(rdpMod.DeviceEvent.keyPressed(RDP_SCANCODE_MAP.Enter));
+          evs.push(rdpMod.DeviceEvent.keyReleased(RDP_SCANCODE_MAP.Enter));
+        } else if (ch === "\t") {
+          evs.push(rdpMod.DeviceEvent.keyPressed(RDP_SCANCODE_MAP.Tab));
+          evs.push(rdpMod.DeviceEvent.keyReleased(RDP_SCANCODE_MAP.Tab));
+        } else {
+          evs.push(rdpMod.DeviceEvent.unicodePressed(ch));
+          evs.push(rdpMod.DeviceEvent.unicodeReleased(ch));
+        }
+      }
+      applyRdpDeviceEvents(evs);
+    }
+  }
+
+  async function pasteLocalClipboardToRdp() {
+    if (!rdpSession || !rdpMod) return;
+    let txt = "";
+    try {
+      if (hasAndroidBridge && typeof window.AndroidBridge.getClipboardText === "function") {
+        txt = String(window.AndroidBridge.getClipboardText() || "");
+      } else if (navigator.clipboard && typeof navigator.clipboard.readText === "function") {
+        txt = await navigator.clipboard.readText();
+      }
+    } catch {
+      // ignore
+    }
+    if (txt) {
+      try {
+        const cd = new rdpMod.ClipboardData();
+        cd.addText("text/plain", txt);
+        await rdpSession.onClipboardPaste(cd);
+      } catch {
+        injectUnicodeTextToRdp(txt);
+        return;
+      }
+    }
+    applyRdpDeviceEvents([
+      rdpMod.DeviceEvent.keyPressed(RDP_SCANCODE_MAP.ControlLeft),
+      rdpMod.DeviceEvent.keyPressed(RDP_SCANCODE_MAP.KeyV),
+      rdpMod.DeviceEvent.keyReleased(RDP_SCANCODE_MAP.KeyV),
+      rdpMod.DeviceEvent.keyReleased(RDP_SCANCODE_MAP.ControlLeft),
+    ]);
+  }
+
+  async function connectRdpSession() {
+    if (rdpConnecting || !remoteCanvas) return;
+    const rawHost = (rdpHostInput ? rdpHostInput.value : "192.168.52.230").trim() || "192.168.52.230";
+    const rawUser = (rdpUserInput ? rdpUserInput.value : "DESKTOP-4LTT2HE\\User").trim() || "DESKTOP-4LTT2HE\\User";
+    const rawPass = rdpPassInput ? rdpPassInput.value : "";
+
+    if (!rawPass) {
+      if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
+      setRdpStatus("Nhập mật khẩu Windows PC để kết nối.", false);
+      if (rdpPassInput) rdpPassInput.focus();
+      return;
+    }
+
+    if (rdpSession) {
+      try {
+        rdpSession.shutdown();
+      } catch {
+        // ignore
+      }
+      rdpSession = null;
+    }
+
+    rdpConnecting = true;
+    syncRdpConnectionUI();
+    setRdpStatus("Đang khởi tạo kết nối 2248×1080 (100%)...", true);
+
+    try {
+      const mod = await ensureIronRdpLoaded();
+      const dest = rawHost.includes(":") ? rawHost : `${rawHost}:3389`;
+      let domain = "";
+      let username = rawUser;
+      if (rawUser.includes("\\")) {
+        const parts = rawUser.split("\\");
+        domain = parts[0] === "." ? "" : parts[0];
+        username = parts.slice(1).join("\\") || rawUser;
+      }
+
+      const proxies = await buildRdpProxyCandidates(rawHost);
+      if (proxies.length === 0) {
+        throw new Error("Chưa có địa chỉ IP PC hoặc MacBook.");
+      }
+
+      let connectedSession = null;
+      let lastErr = null;
+
+      for (const proxyWsUrl of proxies) {
+        try {
+          const builder = new mod.SessionBuilder();
+          builder.username(username);
+          if (domain) builder.serverDomain(domain);
+          builder.password(rawPass);
+          builder.destination(dest);
+          builder.proxyAddress(proxyWsUrl);
+          builder.authToken("local");
+          builder.desktopSize(new mod.DesktopSize(RDP_TARGET_W, RDP_TARGET_H));
+          builder.renderCanvas(remoteCanvas);
+          builder.extension(new mod.Extension("enable_credssp", true));
+          builder.extension(new mod.Extension("display_control", true));
+          builder.extension(new mod.Extension("enable_server_pointer", true));
+
+          builder.remoteClipboardChangedCallback((clipData) => {
+            try {
+              const items = clipData.items();
+              for (const item of items) {
+                if (item.mimeType() === "text/plain") {
+                  const val = String(item.value() || "");
+                  if (val) {
+                    if (
+                      hasAndroidBridge &&
+                      typeof window.AndroidBridge.setClipboardText === "function"
+                    ) {
+                      window.AndroidBridge.setClipboardText(val);
+                    } else if (navigator.clipboard && navigator.clipboard.writeText) {
+                      navigator.clipboard.writeText(val).catch(() => {});
+                    }
+                  }
+                }
+              }
+            } catch {
+              // ignore
+            }
+          });
+          builder.forceClipboardUpdateCallback(() => {});
+
+          builder.setCursorStyleCallbackContext(remoteCanvas);
+          builder.setCursorStyleCallback(function (kind, data, hx, hy) {
+            if (kind === "hidden" || kind === "none") {
+              cursorHiddenByServer = true;
+              remoteCanvas.style.cursor = "none";
+            } else if (kind === "url" && typeof data === "string" && data.startsWith("data:")) {
+              cursorHiddenByServer = false;
+              cursorHotspotX = Number(hx) || 0;
+              cursorHotspotY = Number(hy) || 0;
+              if (remoteCursorImg) {
+                remoteCursorImg.src = data;
+                remoteCursorImg.classList.remove("is-hidden");
+              }
+              if (remoteCursorSvg) remoteCursorSvg.classList.add("is-hidden");
+              remoteCanvas.style.cursor = `url(${data}) ${cursorHotspotX} ${cursorHotspotY}, default`;
+            } else {
+              cursorHiddenByServer = false;
+              cursorHotspotX = 2;
+              cursorHotspotY = 1;
+              if (remoteCursorImg) remoteCursorImg.classList.add("is-hidden");
+              if (remoteCursorSvg) remoteCursorSvg.classList.remove("is-hidden");
+              remoteCanvas.style.cursor = "default";
+            }
+            updateOverlayCursorVisual();
+          });
+
+          connectedSession = await builder.connect();
+          break;
+        } catch (err) {
+          lastErr = err;
+          // Nếu sai mật khẩu thì dừng ngay không thử cổng kế tiếp
+          if (err && typeof err.kind === "function" && (err.kind() === 1 || err.kind() === 2)) {
+            break;
+          }
+        }
+      }
+
+      if (!connectedSession) {
+        throw lastErr || new Error("Không kết nối được tới PC.");
+      }
+
+      rdpSession = connectedSession;
+      try {
+        localStorage.setItem(STORAGE_RDP_HOST, rawHost);
+        localStorage.setItem(STORAGE_RDP_USER, rawUser);
+        localStorage.setItem(STORAGE_RDP_PASS, rawPass);
+      } catch {
+        // ignore
+      }
+
+      const ds = rdpSession.desktopSize();
+      remoteCanvas.width = ds.width || RDP_TARGET_W;
+      remoteCanvas.height = ds.height || RDP_TARGET_H;
+
+      rdpConnecting = false;
+      setRdpStatus("", true);
+      if (remoteLoginOverlay) remoteLoginOverlay.classList.add("is-hidden");
+      setRemoteHudExpanded(false);
+      syncRdpConnectionUI();
+      pushKvmConfigToServer();
+
+      // Ép chính xác 2248x1080 @ 100% scaling qua kênh DisplayControl của Windows RDP
+      setTimeout(() => {
+        if (rdpSession) {
+          try {
+            rdpSession.resize(
+              RDP_TARGET_W,
+              RDP_TARGET_H,
+              RDP_SCALE_FACTOR,
+              RDP_TARGET_W,
+              RDP_TARGET_H
+            );
+          } catch {
+            // ignore
+          }
+        }
+      }, 450);
+
+      rdpSession
+        .run()
+        .then(() => {
+          rdpSession = null;
+          syncRdpConnectionUI();
+          if (kbLayout === "remote" && remoteLoginOverlay) {
+            setRdpStatus("Phiên Remote PC đã ngắt.", false);
+            remoteLoginOverlay.classList.remove("is-hidden");
+          }
+        })
+        .catch((runErr) => {
+          rdpSession = null;
+          syncRdpConnectionUI();
+          if (kbLayout === "remote" && remoteLoginOverlay) {
+            setRdpStatus(formatIronRdpError(runErr), false);
+            remoteLoginOverlay.classList.remove("is-hidden");
+          }
+        });
+    } catch (err) {
+      rdpConnecting = false;
+      rdpSession = null;
+      syncRdpConnectionUI();
+      if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
+      setRdpStatus(formatIronRdpError(err), false);
+    }
+  }
+
+  function disconnectRdpSession() {
+    if (rdpSession) {
+      try {
+        rdpSession.shutdown();
+      } catch {
+        // ignore
+      }
+      rdpSession = null;
+    }
+    rdpConnecting = false;
+    kvmActive = false;
+    updateOverlayCursorVisual();
+    syncRdpConnectionUI();
+    setRdpStatus("Đã ngắt kết nối.", false);
+    if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
+  }
+
+  // ── Xử lý Chuột Bluetooth xuyên màn hình từ MacBook (MacKvmBridge) ──
+  handleKvmServerMessage = (msg) => {
+    if (!msg) return;
+    if (msg.type === "kvm_released") {
+      kvmActive = false;
+      kvmReturnPush = 0;
+      updateOverlayCursorVisual();
+      if (rdpSession) {
+        try {
+          rdpSession.releaseAllInputs();
+        } catch {
+          // ignore
+        }
+      }
+      return;
+    }
+
+    if (kbLayout !== "remote") {
+      sendPayload({ type: "kvm_return" });
+      return;
+    }
+
+    const cw = remoteCanvas ? remoteCanvas.width || RDP_TARGET_W : RDP_TARGET_W;
+    const ch = remoteCanvas ? remoteCanvas.height || RDP_TARGET_H : RDP_TARGET_H;
+
+    if (msg.type === "kvm_enter") {
+      kvmActive = true;
+      kvmMacEdge = msg.mac_edge || "bottom";
+      kvmPhoneEdge = msg.phone_edge || "top";
+      kvmReturnPush = 0;
+      const r = Math.max(0.02, Math.min(0.98, Number(msg.ratio) || 0.5));
+      if (kvmPhoneEdge === "top") {
+        kvmX = Math.round(r * (cw - 1));
+        kvmY = 4;
+      } else if (kvmPhoneEdge === "bottom") {
+        kvmX = Math.round(r * (cw - 1));
+        kvmY = ch - 5;
+      } else if (kvmPhoneEdge === "left") {
+        kvmX = 4;
+        kvmY = Math.round(r * (ch - 1));
+      } else {
+        kvmX = cw - 5;
+        kvmY = Math.round(r * (ch - 1));
+      }
+      updateOverlayCursorVisual();
+      rdpSendMouseMove(kvmX, kvmY);
+      return;
+    }
+
+    if (msg.type === "kvm_mouse") {
+      if (!kvmActive) kvmActive = true;
+      if (msg.ev === "move") {
+        const scale = 1.38;
+        const dx = (Number(msg.dx) || 0) * scale;
+        const dy = (Number(msg.dy) || 0) * scale;
+
+        let pushingOut = false;
+        if (kvmPhoneEdge === "top" && kvmY <= 2 && dy < 0) {
+          kvmReturnPush += -dy;
+          pushingOut = true;
+        } else if (kvmPhoneEdge === "bottom" && kvmY >= ch - 3 && dy > 0) {
+          kvmReturnPush += dy;
+          pushingOut = true;
+        } else if (kvmPhoneEdge === "left" && kvmX <= 2 && dx < 0) {
+          kvmReturnPush += -dx;
+          pushingOut = true;
+        } else if (kvmPhoneEdge === "right" && kvmX >= cw - 3 && dx > 0) {
+          kvmReturnPush += dx;
+          pushingOut = true;
+        }
+
+        if (pushingOut && kvmReturnPush >= 18) {
+          const exitRatio =
+            kvmPhoneEdge === "top" || kvmPhoneEdge === "bottom"
+              ? kvmX / Math.max(1, cw)
+              : kvmY / Math.max(1, ch);
+          kvmActive = false;
+          kvmReturnPush = 0;
+          updateOverlayCursorVisual();
+          if (rdpSession) {
+            try {
+              rdpSession.releaseAllInputs();
+            } catch {
+              // ignore
+            }
+          }
+          sendPayload({
+            type: "kvm_return",
+            mac_edge: kvmMacEdge,
+            ratio: +Math.max(0.02, Math.min(0.98, exitRatio)).toFixed(4),
+          });
+          return;
+        }
+
+        kvmX = Math.max(0, Math.min(cw - 1, kvmX + dx));
+        kvmY = Math.max(0, Math.min(ch - 1, kvmY + dy));
+        if (!pushingOut && kvmX > 6 && kvmX < cw - 7 && kvmY > 6 && kvmY < ch - 7) {
+          kvmReturnPush = 0;
+        }
+        updateOverlayCursorVisual();
+        rdpSendMouseMove(kvmX, kvmY);
+      } else if (msg.ev === "down" && rdpMod) {
+        applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseButtonPressed(Number(msg.btn) || 0)]);
+      } else if (msg.ev === "up" && rdpMod) {
+        applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseButtonReleased(Number(msg.btn) || 0)]);
+      } else if (msg.ev === "wheel" && rdpMod) {
+        const unit = msg.unit === "px" ? 0 : 1;
+        const sy = Number(msg.sy) || 0;
+        const sx = Number(msg.sx) || 0;
+        const evs = [];
+        if (sy !== 0) evs.push(rdpMod.DeviceEvent.wheelRotations(true, sy, unit));
+        if (sx !== 0) evs.push(rdpMod.DeviceEvent.wheelRotations(false, -sx, unit));
+        applyRdpDeviceEvents(evs);
+      }
+    }
+  };
+
+  // ── Chạm cảm ứng trực tiếp (Direct Touch chuẩn Microsoft Remote Desktop) + Chuột gắn trực tiếp ──
+  function clientToRemoteCoords(clientX, clientY) {
+    if (!remoteCanvas) return { x: 0, y: 0 };
+    const r = remoteCanvas.getBoundingClientRect();
+    if (r.width <= 1 || r.height <= 1) return { x: 0, y: 0 };
+    const cw = remoteCanvas.width || RDP_TARGET_W;
+    const ch = remoteCanvas.height || RDP_TARGET_H;
+    const x = Math.max(0, Math.min(cw - 1, Math.round(((clientX - r.left) / r.width) * cw)));
+    const y = Math.max(0, Math.min(ch - 1, Math.round(((clientY - r.top) / r.height) * ch)));
+    return { x, y };
+  }
+
+  if (remoteViewport && remoteCanvas) {
+    let rTouchMode = "none"; // "single" | "drag" | "two"
+    let rStartX = 0;
+    let rStartY = 0;
+    let rLastX = 0;
+    let rLastY = 0;
+    let rMoved = false;
+    let rLongFired = false;
+    let rLongTimer = null;
+    let rLastTapAt = 0;
+    let rLastTapRx = 0;
+    let rLastTapRy = 0;
+    let rPinchStartDist = 0;
+    let rPinchStartZoom = 1.0;
+    let rTwoLastMidX = 0;
+    let rTwoLastMidY = 0;
+    let rScrollAccY = 0;
+    let rScrollAccX = 0;
+
+    const clearRdpLongTimer = () => {
+      if (rLongTimer !== null) {
+        clearTimeout(rLongTimer);
+        rLongTimer = null;
+      }
+    };
+
+    remoteViewport.addEventListener(
+      "touchstart",
+      (e) => {
+        if (rdpHudExpanded) {
+          setRemoteHudExpanded(false);
+        }
+        if (!rdpSession) return;
+        e.preventDefault();
+
+        if (e.touches.length >= 2) {
+          clearRdpLongTimer();
+          if (rTouchMode === "drag" && rdpMod) {
+            applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseButtonReleased(0)]);
+          }
+          rTouchMode = "two";
+          const t0 = e.touches[0];
+          const t1 = e.touches[1];
+          rPinchStartDist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+          rPinchStartZoom = rdpZoom;
+          rTwoLastMidX = (t0.clientX + t1.clientX) / 2;
+          rTwoLastMidY = (t0.clientY + t1.clientY) / 2;
+          rScrollAccY = 0;
+          rScrollAccX = 0;
+          return;
+        }
+
+        if (e.touches.length === 1) {
+          const t = e.touches[0];
+          rTouchMode = "single";
+          rStartX = t.clientX;
+          rStartY = t.clientY;
+          rLastX = t.clientX;
+          rLastY = t.clientY;
+          rMoved = false;
+          rLongFired = false;
+          clearRdpLongTimer();
+
+          rLongTimer = setTimeout(() => {
+            rLongTimer = null;
+            if (rTouchMode === "single" && !rMoved) {
+              rLongFired = true;
+              triggerHaptic(15);
+            }
+          }, 270);
+        }
+      },
+      { passive: false }
+    );
+
+    remoteViewport.addEventListener(
+      "touchmove",
+      (e) => {
+        if (!rdpSession) return;
+        e.preventDefault();
+
+        if (rTouchMode === "two" && e.touches.length >= 2) {
+          const t0 = e.touches[0];
+          const t1 = e.touches[1];
+          const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+          const midX = (t0.clientX + t1.clientX) / 2;
+          const midY = (t0.clientY + t1.clientY) / 2;
+          const dMidX = midX - rTwoLastMidX;
+          const dMidY = midY - rTwoLastMidY;
+          rTwoLastMidX = midX;
+          rTwoLastMidY = midY;
+
+          if (Math.abs(dist - rPinchStartDist) > 24) {
+            const nextZoom = Math.max(
+              1.0,
+              Math.min(3.5, rPinchStartZoom * (dist / Math.max(20, rPinchStartDist)))
+            );
+            rdpZoom = nextZoom;
+            rdpPanX += dMidX;
+            rdpPanY += dMidY;
+            applyRdpStageTransform();
+          } else if (rdpZoom > 1.03) {
+            rdpPanX += dMidX;
+            rdpPanY += dMidY;
+            applyRdpStageTransform();
+          } else if (rdpMod) {
+            rScrollAccY += dMidY * 1.65;
+            rScrollAccX += dMidX * 1.35;
+            const py = Math.trunc(rScrollAccY);
+            const px = Math.trunc(rScrollAccX);
+            const evs = [];
+            if (Math.abs(py) >= 2) {
+              rScrollAccY -= py;
+              evs.push(rdpMod.DeviceEvent.wheelRotations(true, py, 0));
+            }
+            if (Math.abs(px) >= 4) {
+              rScrollAccX -= px;
+              evs.push(rdpMod.DeviceEvent.wheelRotations(false, -px, 0));
+            }
+            if (evs.length > 0) applyRdpDeviceEvents(evs);
+          }
+          return;
+        }
+
+        if (e.touches.length === 1 && (rTouchMode === "single" || rTouchMode === "drag")) {
+          const t = e.touches[0];
+          const distFromStart = Math.hypot(t.clientX - rStartX, t.clientY - rStartY);
+          const dx = t.clientX - rLastX;
+          const dy = t.clientY - rLastY;
+          rLastX = t.clientX;
+          rLastY = t.clientY;
+
+          if (!rMoved && distFromStart > 9) {
+            rMoved = true;
+            clearRdpLongTimer();
+            if (rLongFired && rdpMod) {
+              // Ấn giữ + kéo lướt -> Bôi đen văn bản / Kéo thả cửa sổ trên Windows PC
+              rTouchMode = "drag";
+              const startPt = clientToRemoteCoords(rStartX, rStartY);
+              applyRdpDeviceEvents([
+                rdpMod.DeviceEvent.mouseMove(startPt.x, startPt.y),
+                rdpMod.DeviceEvent.mouseButtonPressed(0),
+              ]);
+            }
+          }
+
+          if (rTouchMode === "drag") {
+            const pt = clientToRemoteCoords(t.clientX, t.clientY);
+            rdpSendMouseMove(pt.x, pt.y);
+          } else if (rMoved) {
+            if (rdpZoom > 1.03) {
+              rdpPanX += dx;
+              rdpPanY += dy;
+              applyRdpStageTransform();
+            } else {
+              const pt = clientToRemoteCoords(t.clientX, t.clientY);
+              rdpSendMouseMove(pt.x, pt.y);
+            }
+          }
+        }
+      },
+      { passive: false }
+    );
+
+    const handleRdpTouchEnd = (e) => {
+      clearRdpLongTimer();
+      if (!rdpSession) {
+        rTouchMode = "none";
+        return;
+      }
+
+      if (rTouchMode === "drag") {
+        if (e.touches.length === 0) {
+          if (rdpMod) {
+            applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseButtonReleased(0)]);
+          }
+          rTouchMode = "none";
+        }
+        return;
+      }
+
+      if (rTouchMode === "single" && e.touches.length === 0) {
+        const pt = clientToRemoteCoords(rLastX, rLastY);
+        if (rLongFired && !rMoved) {
+          // Ấn giữ tại chỗ -> Chuột phải chuẩn Microsoft Remote Desktop
+          rdpSendMouseClick(pt.x, pt.y, 2, 1);
+        } else if (!rMoved) {
+          const now = performance.now();
+          if (
+            now - rLastTapAt < 320 &&
+            Math.hypot(pt.x - rLastTapRx, pt.y - rLastTapRy) < 28
+          ) {
+            rdpSendMouseClick(rLastTapRx, rLastTapRy, 0, 1);
+            rLastTapAt = 0;
+          } else {
+            rdpSendMouseClick(pt.x, pt.y, 0, 1);
+            rLastTapAt = now;
+            rLastTapRx = pt.x;
+            rLastTapRy = pt.y;
+          }
+        }
+        rTouchMode = "none";
+      } else if (e.touches.length === 0) {
+        rTouchMode = "none";
+      }
+    };
+
+    remoteViewport.addEventListener("touchend", handleRdpTouchEnd, { passive: false });
+    remoteViewport.addEventListener("touchcancel", handleRdpTouchEnd, { passive: false });
+
+    // Hỗ trợ cả chuột vật lý gắn trực tiếp vào điện thoại / trình duyệt
+    remoteViewport.addEventListener("pointermove", (e) => {
+      if (e.pointerType !== "mouse" || !rdpSession) return;
+      const pt = clientToRemoteCoords(e.clientX, e.clientY);
+      rdpSendMouseMove(pt.x, pt.y);
+    });
+
+    remoteViewport.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "mouse" || !rdpSession || !rdpMod) return;
+      e.preventDefault();
+      remoteCanvas.focus();
+      const pt = clientToRemoteCoords(e.clientX, e.clientY);
+      applyRdpDeviceEvents([
+        rdpMod.DeviceEvent.mouseMove(pt.x, pt.y),
+        rdpMod.DeviceEvent.mouseButtonPressed(e.button),
+      ]);
+    });
+
+    remoteViewport.addEventListener("pointerup", (e) => {
+      if (e.pointerType !== "mouse" || !rdpSession || !rdpMod) return;
+      e.preventDefault();
+      applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseButtonReleased(e.button)]);
+    });
+
+    remoteViewport.addEventListener(
+      "wheel",
+      (e) => {
+        if (!rdpSession || !rdpMod) return;
+        e.preventDefault();
+        const evs = [];
+        if (e.deltaY !== 0) {
+          evs.push(rdpMod.DeviceEvent.wheelRotations(true, e.deltaY > 0 ? -1 : 1, 1));
+        }
+        if (e.deltaX !== 0) {
+          evs.push(rdpMod.DeviceEvent.wheelRotations(false, e.deltaX > 0 ? -1 : 1, 1));
+        }
+        applyRdpDeviceEvents(evs);
+      },
+      { passive: false }
+    );
+  }
+
+  // ── Bàn phím vật lý / Bàn phím ảo điện thoại & Microphone Tiếng Việt ──
+  if (remoteCanvas) {
+    remoteCanvas.addEventListener("keydown", (e) => {
+      if (!rdpSession || !rdpMod || kbLayout !== "remote") return;
+      if (document.activeElement === rdpHostInput || document.activeElement === rdpUserInput || document.activeElement === rdpPassInput) {
+        return;
+      }
+      const sc = RDP_SCANCODE_MAP[e.code];
+      if (sc !== undefined) {
+        e.preventDefault();
+        applyRdpDeviceEvents([rdpMod.DeviceEvent.keyPressed(sc)]);
+      }
+    });
+
+    remoteCanvas.addEventListener("keyup", (e) => {
+      if (!rdpSession || !rdpMod || kbLayout !== "remote") return;
+      const sc = RDP_SCANCODE_MAP[e.code];
+      if (sc !== undefined) {
+        e.preventDefault();
+        applyRdpDeviceEvents([rdpMod.DeviceEvent.keyReleased(sc)]);
+      }
+    });
+  }
+
+  function syncRdpModButtons() {
+    if (!remoteSpecialBar) return;
+    remoteSpecialBar.querySelectorAll("[data-rdp-mod]").forEach((btn) => {
+      btn.classList.toggle("is-active", rdpActiveMods.has(btn.dataset.rdpMod));
+    });
+  }
+
+  function openRemoteSoftKeyboard() {
+    if (!remoteImeInput) return;
+    rdpImeOpen = true;
+    remoteImeInput.value = "\u200B";
+    remoteImeInput.focus();
+    if (btnRemoteKb) btnRemoteKb.classList.add("is-active");
+    if (remoteSpecialBar) remoteSpecialBar.classList.remove("is-hidden");
+  }
+
+  function closeRemoteSoftKeyboard() {
+    rdpImeOpen = false;
+    if (remoteImeInput) remoteImeInput.blur();
+    if (btnRemoteKb) btnRemoteKb.classList.remove("is-active");
+    if (remoteSpecialBar) remoteSpecialBar.classList.add("is-hidden");
+  }
+
+  if (remoteImeInput) {
+    remoteImeInput.value = "\u200B";
+    remoteImeInput.addEventListener("compositionstart", () => {
+      rdpComposing = true;
+    });
+    remoteImeInput.addEventListener("compositionend", () => {
+      rdpComposing = false;
+      flushRemoteImeValue();
+    });
+    remoteImeInput.addEventListener("input", () => {
+      if (!rdpComposing) {
+        flushRemoteImeValue();
+      }
+    });
+    remoteImeInput.addEventListener("keydown", (e) => {
+      if (e.key === "Backspace" && remoteImeInput.value.length <= 1) {
+        e.preventDefault();
+        rdpSendScancodeTap("Backspace", true);
+        remoteImeInput.value = "\u200B";
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        rdpSendScancodeTap("Enter", true);
+        remoteImeInput.value = "\u200B";
+      }
+    });
+    remoteImeInput.addEventListener("blur", () => {
+      if (rdpImeOpen) {
+        setTimeout(() => {
+          if (document.activeElement !== remoteImeInput) {
+            rdpImeOpen = false;
+            if (btnRemoteKb) btnRemoteKb.classList.remove("is-active");
+            if (remoteSpecialBar) remoteSpecialBar.classList.add("is-hidden");
+          }
+        }, 180);
+      }
+    });
+  }
+
+  function flushRemoteImeValue() {
+    if (!remoteImeInput) return;
+    const val = remoteImeInput.value;
+    if (val === "") {
+      rdpSendScancodeTap("Backspace", true);
+      remoteImeInput.value = "\u200B";
+      return;
+    }
+    const clean = val.startsWith("\u200B") ? val.slice(1) : val;
+    remoteImeInput.value = "\u200B";
+    if (clean) {
+      injectUnicodeTextToRdp(clean);
+    }
+  }
+
+  // Nhận văn bản đọc từ Microphone (Android SpeechRecognizer hoặc Web Speech API) -> gõ thẳng vào Windows PC
+  window.__onRemoteVoiceText = (spokenText) => {
+    voiceListening = false;
+    if (btnRemoteMic) btnRemoteMic.classList.remove("is-recording");
+    const txt = String(spokenText || "").trim();
+    if (!txt) return;
+    injectUnicodeTextToRdp(txt + " ");
+  };
+
+  window.__onRemoteVoiceState = (active) => {
+    voiceListening = Boolean(active);
+    if (btnRemoteMic) btnRemoteMic.classList.toggle("is-recording", voiceListening);
+  };
+
+  function toggleRemoteMicrophone() {
+    triggerHaptic(12);
+    if (hasAndroidBridge && typeof window.AndroidBridge.startVoiceInput === "function") {
+      try {
+        window.AndroidBridge.startVoiceInput("vi-VN");
+        return;
+      } catch {
+        // fallback Web Speech
+      }
+    }
+
+    const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRec) {
+      openRemoteSoftKeyboard();
+      return;
+    }
+
+    if (voiceListening && webSpeechRec) {
+      try {
+        webSpeechRec.stop();
+      } catch {
+        // ignore
+      }
+      voiceListening = false;
+      if (btnRemoteMic) btnRemoteMic.classList.remove("is-recording");
+      return;
+    }
+
+    try {
+      webSpeechRec = new SpeechRec();
+      webSpeechRec.lang = "vi-VN";
+      webSpeechRec.interimResults = false;
+      webSpeechRec.continuous = false;
+      webSpeechRec.onstart = () => {
+        voiceListening = true;
+        if (btnRemoteMic) btnRemoteMic.classList.add("is-recording");
+      };
+      webSpeechRec.onresult = (ev) => {
+        let out = "";
+        for (let i = ev.resultIndex; i < ev.results.length; i += 1) {
+          if (ev.results[i].isFinal) {
+            out += ev.results[i][0].transcript;
+          }
+        }
+        if (out.trim()) {
+          injectUnicodeTextToRdp(out.trim() + " ");
+        }
+      };
+      webSpeechRec.onend = () => {
+        voiceListening = false;
+        if (btnRemoteMic) btnRemoteMic.classList.remove("is-recording");
+      };
+      webSpeechRec.onerror = () => {
+        voiceListening = false;
+        if (btnRemoteMic) btnRemoteMic.classList.remove("is-recording");
+      };
+      webSpeechRec.start();
+    } catch {
+      openRemoteSoftKeyboard();
+    }
+  }
+
+  // ── Gắn sự kiện thanh HUD tối giản & Hộp đăng nhập ──
+  if (remoteHudPill) {
+    remoteHudPill.addEventListener("click", (e) => {
+      e.stopPropagation();
+      triggerHaptic(8);
+      setRemoteHudExpanded(true);
+    });
+  }
+
+  if (btnRemoteCollapse) {
+    btnRemoteCollapse.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setRemoteHudExpanded(false);
+    });
+  }
+
+  const btnToggleRemoteMenu = document.querySelector('[data-action="toggle-remote-menu"]');
+  if (btnToggleRemoteMenu) {
+    btnToggleRemoteMenu.addEventListener("click", (e) => {
+      e.stopPropagation();
+      triggerHaptic(8);
+      rdpRemoteMenuOpen = !rdpRemoteMenuOpen;
+      if (remoteModeMenu) remoteModeMenu.classList.toggle("is-hidden", !rdpRemoteMenuOpen);
+    });
+  }
+
+  if (btnRemoteMic) {
+    btnRemoteMic.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleRemoteMicrophone();
+    });
+  }
+
+  if (btnRemoteKb) {
+    btnRemoteKb.addEventListener("click", (e) => {
+      e.stopPropagation();
+      triggerHaptic(8);
+      if (rdpImeOpen) {
+        closeRemoteSoftKeyboard();
+      } else {
+        setRemoteHudExpanded(false);
+        openRemoteSoftKeyboard();
+      }
+    });
+  }
+
+  if (btnRemoteEdge) {
+    btnRemoteEdge.addEventListener("click", (e) => {
+      e.stopPropagation();
+      triggerHaptic(8);
+      const idx = EDGE_CYCLE.indexOf(rdpEdgeMode);
+      rdpEdgeMode = EDGE_CYCLE[(idx + 1) % EDGE_CYCLE.length];
+      try {
+        localStorage.setItem(STORAGE_RDP_EDGE, rdpEdgeMode);
+      } catch {
+        // ignore
+      }
+      syncRemoteEdgeLabel();
+      pushKvmConfigToServer();
+    });
+  }
+
+  if (btnRemoteZoomReset) {
+    btnRemoteZoomReset.addEventListener("click", (e) => {
+      e.stopPropagation();
+      rdpZoom = 1.0;
+      rdpPanX = 0;
+      rdpPanY = 0;
+      applyRdpStageTransform();
+    });
+  }
+
+  if (btnRemoteCfg) {
+    btnRemoteCfg.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setRemoteHudExpanded(false);
+      syncRdpConnectionUI();
+      if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
+    });
+  }
+
+  if (remoteSpecialBar) {
+    remoteSpecialBar.addEventListener("pointerdown", (e) => {
+      const target = e.target.closest("button");
+      if (!target) return;
+      e.preventDefault();
+      e.stopPropagation();
+      triggerHaptic(8);
+
+      if (target.id === "btn-remote-hide-kb") {
+        closeRemoteSoftKeyboard();
+        return;
+      }
+      if (target.dataset.rdpCombo === "ctrl-v") {
+        void pasteLocalClipboardToRdp();
+        return;
+      }
+      if (target.dataset.rdpMod) {
+        const mod = target.dataset.rdpMod;
+        if (rdpActiveMods.has(mod)) {
+          rdpActiveMods.delete(mod);
+        } else {
+          rdpActiveMods.add(mod);
+        }
+        syncRdpModButtons();
+        return;
+      }
+      if (target.dataset.rdpKey) {
+        rdpSendScancodeTap(target.dataset.rdpKey, true);
+      }
+    });
+  }
+
+  if (btnRdpConnect) {
+    btnRdpConnect.addEventListener("click", () => {
+      triggerHaptic(10);
+      void connectRdpSession();
+    });
+  }
+
+  if (rdpPassInput) {
+    rdpPassInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void connectRdpSession();
+      }
+    });
+  }
+
+  if (btnRdpDisconnect) {
+    btnRdpDisconnect.addEventListener("click", () => {
+      triggerHaptic(10);
+      disconnectRdpSession();
+    });
+  }
+
+  if (btnRdpSwitchBack) {
+    btnRdpSwitchBack.addEventListener("click", () => {
+      triggerHaptic(10);
+      selectKeyboardLayout(lastNonRemoteLayout || "pad");
+    });
+  }
+
+  if (btnRdpCloseCard) {
+    btnRdpCloseCard.addEventListener("click", () => {
+      if (rdpSession && remoteLoginOverlay) {
+        remoteLoginOverlay.classList.add("is-hidden");
+      }
+    });
+  }
+
+  onEnterRemoteLayout = () => {
+    setRemoteHudExpanded(false);
+    pushKvmConfigToServer();
+    syncRdpConnectionUI();
+    if (!rdpSession && !rdpConnecting) {
+      const hasSavedPass = Boolean(rdpPassInput && rdpPassInput.value);
+      if (hasSavedPass) {
+        void connectRdpSession();
+      } else if (remoteLoginOverlay) {
+        remoteLoginOverlay.classList.remove("is-hidden");
+      }
+    }
+  };
+
+  onLeaveRemoteLayout = () => {
+    closeRemoteSoftKeyboard();
+    setRemoteHudExpanded(false);
+    kvmActive = false;
+    updateOverlayCursorVisual();
+    pushKvmConfigToServer();
+  };
+
+  window.addEventListener("resize", () => {
+    if (kbLayout === "remote") {
+      applyRdpStageTransform();
+      updateOverlayCursorVisual();
+    }
+  });
+
+  if (kbLayout === "remote") {
+    onEnterRemoteLayout();
+  }
+
+  // ============================================================================
+  // 9. CẬP NHẬT THÔNG MINH TRỰC TIẾP KHI ĐANG DÙNG APP (LIVE OTA HOT-UPDATE)
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.1.0";
+  const BUNDLED_WEB_VERSION = "2.1.1";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();
@@ -2176,7 +3625,7 @@
   }
 
   function triggerWhenIdle() {
-    if (liveUpdateTriggered) return;
+    if (liveUpdateTriggered || rdpSession) return;
     const idleMs = performance.now() - lastUserTouchAt;
     if (document.visibilityState !== "visible" || activePointers.size > 0 || idleMs < 2000) {
       if (pendingUpdateApplyTimer === null) {
