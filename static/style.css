@@ -32,20 +32,18 @@ html,
 body {
   width: 100%;
   height: 100%;
-  height: 100dvh;
   overflow: hidden;
   overscroll-behavior: none;
   background: var(--bg-canvas);
   color: var(--text-primary);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
-  touch-action: none;
 }
 
 .kb-shell {
   width: 100%;
-  height: 100dvh;
-  display: grid;
-  grid-template-rows: 0.82fr 1fr 1fr 1fr 1fr 1.06fr;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
   gap: var(--gap);
   padding-top: max(5px, env(safe-area-inset-top));
   padding-bottom: max(6px, env(safe-area-inset-bottom));
@@ -53,6 +51,261 @@ body {
   padding-right: max(8px, env(safe-area-inset-right));
 }
 
+/* ============================================================================
+   KHUNG KÍNH SOI VÙNG CON CHUỘT (LIVE LENS KIÊM TRACKPAD)
+   ============================================================================ */
+.lens-stage {
+  position: relative;
+  width: 100%;
+  background: #0d121b;
+  border: 1px solid #263449;
+  border-radius: 9px;
+  overflow: hidden;
+  touch-action: none;
+  transition: border-color 120ms ease;
+}
+
+.lens-stage.is-locked {
+  border-color: rgba(56, 189, 248, 0.72);
+}
+
+.lens-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.lens-offline-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 18px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.lens-stage.has-stream .lens-offline-hint {
+  display: none;
+}
+
+.offline-preview-text {
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.4;
+  max-width: 90%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lens-hud-left {
+  position: absolute;
+  top: 6px;
+  left: 7px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  z-index: 3;
+}
+
+.lens-hud-right {
+  position: absolute;
+  top: 6px;
+  right: 7px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 3;
+}
+
+.lens-pill,
+.lens-ctrl-btn,
+.lens-ctrl-label {
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(51, 65, 85, 0.85);
+  background: rgba(13, 18, 27, 0.78);
+  color: #cbd5e1;
+  font-size: 11.5px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.lens-pill.is-locked-mode {
+  border-color: rgba(56, 189, 248, 0.7);
+  color: var(--accent-cyan);
+  background: rgba(15, 29, 46, 0.84);
+}
+
+.lens-ctrl-btn {
+  min-width: 26px;
+  padding: 0 6px;
+  font-size: 13px;
+}
+
+.lens-ctrl-label {
+  padding: 0 6px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.lens-settings-btn {
+  position: relative;
+  min-width: 32px;
+  padding-right: 11px;
+}
+
+.ws-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6.5px;
+  height: 6.5px;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.ws-dot.is-online {
+  background: var(--status-ok);
+  box-shadow: 0 0 6px var(--status-ok);
+}
+
+.ws-dot.is-offline {
+  background: var(--status-err);
+  box-shadow: 0 0 6px var(--status-err);
+}
+
+/* ============================================================================
+   CHẾ ĐỘ MÀN DỌC (PORTRAIT) vs MÀN NGANG (LANDSCAPE)
+   ============================================================================ */
+@media (orientation: portrait) {
+  .lens-stage {
+    flex: 1 1 0;
+    min-height: 110px;
+  }
+
+  .portrait-deck {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 0 0 auto;
+  }
+
+  .landscape-rows {
+    display: none !important;
+  }
+
+  .portrait-macro-row {
+    height: 40px;
+  }
+}
+
+@media (orientation: landscape) {
+  .lens-stage {
+    flex: 0 0 52px;
+    height: 52px;
+    border-radius: 7px;
+  }
+
+  .lens-hud-left,
+  .lens-hud-right {
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  .portrait-deck {
+    display: none !important;
+  }
+
+  .landscape-rows {
+    flex: 1 1 0;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: 0.82fr 1fr 1fr 1fr 1fr 1.06fr;
+    gap: var(--gap);
+    touch-action: none;
+  }
+}
+
+/* ============================================================================
+   THANH GÕ TIẾNG VIỆT GBOARD / VOICE (PORTRAIT COMPOSER)
+   ============================================================================ */
+.portrait-composer {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  height: 44px;
+}
+
+.composer-mode-btn {
+  flex: 0 0 auto;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--key-border);
+  background: var(--key-special-bg);
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.composer-mode-btn.is-live-word {
+  border-color: rgba(56, 189, 248, 0.55);
+  color: var(--accent-cyan);
+  background: #112031;
+}
+
+.vn-input {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid #2b3950;
+  background: #111722;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-family: inherit;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+  touch-action: auto;
+}
+
+.vn-input:focus {
+  border-color: var(--accent-cyan);
+}
+
+.vn-input::placeholder {
+  color: #52627a;
+  font-size: 13.5px;
+}
+
+.composer-send-btn {
+  flex: 0 0 48px;
+  border-radius: 8px;
+  border: 1px solid #2f4b6e;
+  background: #142840;
+  color: #bae6fd;
+  font-size: 17px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.composer-send-btn:active {
+  background: #1f3c5d;
+  border-color: var(--accent-cyan);
+}
+
+/* ============================================================================
+   HỆ THỐNG PHÍM CỨNG CHUNG (MACRO DỌC & FULL 6 HÀNG NGANG)
+   ============================================================================ */
 .kb-row {
   display: flex;
   align-items: stretch;
@@ -77,23 +330,21 @@ body {
   font-family: inherit;
   cursor: pointer;
   outline: none;
-  transition: background-color 45ms ease, border-color 45ms ease, transform 35ms ease;
+  transition: background-color 40ms ease, border-color 40ms ease, transform 30ms ease;
 }
 
 .key-main {
-  font-size: clamp(14px, 3.6vh, 18px);
+  font-size: clamp(13.5px, 3.4vh, 17.5px);
   font-weight: 500;
   line-height: 1.05;
-  letter-spacing: 0.1px;
   pointer-events: none;
 }
 
 .key-shift {
   position: absolute;
-  top: 4px;
-  left: 6px;
-  font-size: clamp(10px, 2.3vh, 12px);
-  font-weight: 400;
+  top: 3px;
+  left: 5px;
+  font-size: clamp(9.5px, 2.1vh, 11.5px);
   color: var(--text-muted);
   line-height: 1;
   pointer-events: none;
@@ -114,14 +365,13 @@ body.is-lowercase .key-alpha .key-main {
 
 .key-special,
 .key-fn,
-.key-arrow,
-.key-util {
+.key-arrow {
   background: var(--key-special-bg);
 }
 
 .key-special .key-main,
 .key-fn .key-main {
-  font-size: clamp(12px, 3vh, 14.5px);
+  font-size: clamp(12px, 2.8vh, 14px);
   color: #cbd5e1;
 }
 
@@ -136,24 +386,24 @@ body.is-lowercase .key-alpha .key-main {
 }
 
 .key-backspace .key-main {
-  font-size: clamp(16px, 4vh, 20px);
+  font-size: clamp(15px, 3.6vh, 19px);
 }
 
 .key-macro {
   background: var(--key-macro-bg);
   border-color: #27374f;
   flex-direction: row;
-  gap: 6px;
+  gap: 5px;
 }
 
 .key-macro .key-main {
-  font-size: clamp(12.5px, 3vh, 14.5px);
+  font-size: clamp(12px, 2.8vh, 14px);
   font-weight: 600;
   color: var(--accent-cyan);
 }
 
 .key-macro .key-sub {
-  font-size: clamp(10.5px, 2.4vh, 12px);
+  font-size: clamp(10px, 2.2vh, 11.5px);
   color: #94a3b8;
   pointer-events: none;
 }
@@ -162,19 +412,17 @@ body.is-lowercase .key-alpha .key-main {
   color: var(--accent-amber);
 }
 
-/* Phản hồi chạm 0ms */
 .key.is-pressed {
   background: var(--key-active-bg);
   border-color: var(--key-active-border);
   transform: translateY(1px) scale(0.985);
 }
 
-/* Trạng thái giữ đa điểm (Held) & khóa 1 chạm (Sticky) cho Ctrl / Opt / Cmd / Shift */
 .mod-dot,
 .caps-led {
   position: absolute;
-  top: 5px;
-  right: 6px;
+  top: 4px;
+  right: 5px;
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -212,11 +460,10 @@ body.is-lowercase .key-alpha .key-main {
   box-shadow: 0 0 6px var(--status-ok);
 }
 
-/* Gờ định vị phím F và J */
 .key-home-bump::after {
   content: "";
   position: absolute;
-  bottom: 5px;
+  bottom: 4px;
   width: 14px;
   height: 2px;
   border-radius: 1px;
@@ -229,29 +476,4 @@ body.is-lowercase .key-alpha .key-main {
   border-radius: 2px;
   background: #2c3a52;
   pointer-events: none;
-}
-
-/* Chấm trạng thái WebSocket góc phải */
-.key-util {
-  position: relative;
-}
-
-.ws-dot {
-  position: absolute;
-  top: 5px;
-  right: 6px;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  pointer-events: none;
-}
-
-.ws-dot.is-online {
-  background: var(--status-ok);
-  box-shadow: 0 0 6px var(--status-ok);
-}
-
-.ws-dot.is-offline {
-  background: var(--status-err);
-  box-shadow: 0 0 6px var(--status-err);
 }

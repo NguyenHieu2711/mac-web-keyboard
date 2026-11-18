@@ -19,6 +19,7 @@ import android.provider.Settings
 import android.text.InputType
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -32,6 +33,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -158,6 +160,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         setContentView(webView)
+
+        // Co giãn chiều cao WebView khớp chính xác phía trên bàn phím Gboard ở chế độ Màn Dọc
+        ViewCompat.setOnApplyWindowInsetsListener(webView) { v, insets ->
+            val imeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            v.setPadding(0, 0, 0, imeBottom)
+            insets
+        }
+
         webView.loadUrl(LOCAL_KEYBOARD_URL)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -518,6 +528,15 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun vibrate(ms: Long) {
             triggerNativeVibration(ms)
+        }
+
+        @JavascriptInterface
+        fun hideSoftKeyboard() {
+            runOnUiThread {
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                imm?.hideSoftInputFromWindow(webView.windowToken, 0)
+                applyImmersiveStickyFullscreen()
+            }
         }
     }
 }

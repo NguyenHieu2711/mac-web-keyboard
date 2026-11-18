@@ -6,7 +6,7 @@
     name="viewport"
     content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover"
   />
-  <meta name="theme-color" content="#0b0e14" />
+  <meta name="theme-color" content="#090c12" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -16,201 +16,205 @@
 </head>
 <body>
   <main id="kb-shell" class="kb-shell">
-    <!-- HÀNG 1: Function & Macro Bar + Chấm trạng thái kết nối -->
-    <div class="kb-row kb-row-fn">
-      <button type="button" class="key key-fn" data-action="press" data-key="esc" data-flex="1.05">
-        <span class="key-main">Esc</span>
-      </button>
+    <!-- KÍNH SOI VÙNG CON TRỎ KIÊM TRACKPAD (Màn Dọc = Khung Rộng / Màn Ngang = Khe Ribbon) -->
+    <section id="lens-stage" class="lens-stage">
+      <canvas id="lens-canvas" class="lens-canvas"></canvas>
 
-      <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,z" data-flex="1.35">
-        <span class="key-sub">Undo</span>
-        <span class="key-main">⌘Z</span>
-      </button>
-      <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,c" data-flex="1.35">
-        <span class="key-sub">Copy</span>
-        <span class="key-main">⌘C</span>
-      </button>
-      <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,v" data-flex="1.35">
-        <span class="key-sub">Paste</span>
-        <span class="key-main">⌘V</span>
-      </button>
-      <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,a" data-flex="1.35">
-        <span class="key-sub">All</span>
-        <span class="key-main">⌘A</span>
-      </button>
-      <button type="button" class="key key-macro key-macro-danger" data-action="combo" data-combo="cmd,backspace" data-flex="1.65">
-        <span class="key-sub">Xóa dòng</span>
-        <span class="key-main">⌘⌫</span>
-      </button>
+      <div id="lens-offline-hint" class="lens-offline-hint">
+        <span id="offline-preview-text" class="offline-preview-text">Rê 1 ngón di chuột • Chạm để Click • Gõ chữ hiển thị trực tiếp tại đây</span>
+      </div>
 
-      <button type="button" class="key key-fn" data-action="press" data-key="del" data-repeat="true" data-flex="1.1">
-        <span class="key-main">Del</span>
-      </button>
+      <div class="lens-hud-left">
+        <button type="button" id="btn-lock-state" class="lens-pill is-mouse-mode">
+          <span id="lock-state-text">🖱 Tâm chuột</span>
+        </button>
+      </div>
 
-      <button type="button" id="btn-fullscreen" class="key key-util" data-action="util" data-flex="0.95">
-        <span id="util-icon" class="key-main">⛶</span>
-        <span id="ws-dot" class="ws-dot is-offline"></span>
-      </button>
-    </div>
+      <div class="lens-hud-right">
+        <button type="button" id="btn-fov-out" class="lens-ctrl-btn">−</button>
+        <button type="button" id="btn-fov-reset" class="lens-ctrl-label">1.0x</button>
+        <button type="button" id="btn-fov-in" class="lens-ctrl-btn">+</button>
+        <button type="button" id="btn-settings" class="lens-ctrl-btn lens-settings-btn">
+          <span id="util-icon">⚙</span>
+          <span id="ws-dot" class="ws-dot is-offline"></span>
+        </button>
+      </div>
+    </section>
 
-    <!-- HÀNG 2: Số & Ký tự + Backspace lớn (Auto-repeat) -->
-    <div class="kb-row">
-      <button type="button" class="key" data-action="press" data-key="`" data-shift="~" data-flex="1">
-        <span class="key-shift">~</span><span class="key-main">`</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="1" data-shift="!" data-flex="1">
-        <span class="key-shift">!</span><span class="key-main">1</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="2" data-shift="@" data-flex="1">
-        <span class="key-shift">@</span><span class="key-main">2</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="3" data-shift="#" data-flex="1">
-        <span class="key-shift">#</span><span class="key-main">3</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="4" data-shift="$" data-flex="1">
-        <span class="key-shift">$</span><span class="key-main">4</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="5" data-shift="%" data-flex="1">
-        <span class="key-shift">%</span><span class="key-main">5</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="6" data-shift="^" data-flex="1">
-        <span class="key-shift">^</span><span class="key-main">6</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="7" data-shift="&amp;" data-flex="1">
-        <span class="key-shift">&amp;</span><span class="key-main">7</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="8" data-shift="*" data-flex="1">
-        <span class="key-shift">*</span><span class="key-main">8</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="9" data-shift="(" data-flex="1">
-        <span class="key-shift">(</span><span class="key-main">9</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="0" data-shift=")" data-flex="1">
-        <span class="key-shift">)</span><span class="key-main">0</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="-" data-shift="_" data-flex="1">
-        <span class="key-shift">_</span><span class="key-main">-</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="=" data-shift="+" data-flex="1">
-        <span class="key-shift">+</span><span class="key-main">=</span>
-      </button>
-      <button type="button" class="key key-special key-backspace" data-action="press" data-key="backspace" data-repeat="true" data-flex="2.05">
-        <span class="key-main">⌫</span>
-      </button>
-    </div>
+    <!-- GIAO DIỆN MÀN DỌC (PORTRAIT): 2 HÀNG MACRO + THANH GÕ GBOARD TIẾNG VIỆT -->
+    <section id="portrait-deck" class="portrait-deck">
+      <div class="kb-row portrait-macro-row">
+        <button type="button" class="key key-fn" data-action="press" data-key="esc" data-flex="1"><span class="key-main">Esc</span></button>
+        <button type="button" class="key key-fn" data-action="press" data-key="tab" data-flex="1"><span class="key-main">Tab</span></button>
+        <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,z" data-flex="1.15"><span class="key-main">⌘Z</span></button>
+        <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,c" data-flex="1.15"><span class="key-main">⌘C</span></button>
+        <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,v" data-flex="1.15"><span class="key-main">⌘V</span></button>
+        <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,a" data-flex="1.15"><span class="key-main">⌘A</span></button>
+        <button type="button" class="key key-macro key-macro-danger" data-action="combo" data-combo="cmd,backspace" data-flex="1.25"><span class="key-main">⌘⌫</span></button>
+      </div>
 
-    <!-- HÀNG 3: Tab + QWERTYUIOP + [ ] \ -->
-    <div class="kb-row">
-      <button type="button" class="key key-special" data-action="press" data-key="tab" data-flex="1.5">
-        <span class="key-main">Tab ⇥</span>
-      </button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="q" data-flex="1"><span class="key-main">Q</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="w" data-flex="1"><span class="key-main">W</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="e" data-flex="1"><span class="key-main">E</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="r" data-flex="1"><span class="key-main">R</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="t" data-flex="1"><span class="key-main">T</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="y" data-flex="1"><span class="key-main">Y</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="u" data-flex="1"><span class="key-main">U</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="i" data-flex="1"><span class="key-main">I</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="o" data-flex="1"><span class="key-main">O</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="p" data-flex="1"><span class="key-main">P</span></button>
-      <button type="button" class="key" data-action="press" data-key="[" data-shift="{" data-flex="1">
-        <span class="key-shift">{</span><span class="key-main">[</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="]" data-shift="}" data-flex="1">
-        <span class="key-shift">}</span><span class="key-main">]</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="\" data-shift="|" data-flex="1.55">
-        <span class="key-shift">|</span><span class="key-main">\</span>
-      </button>
-    </div>
+      <div class="kb-row portrait-macro-row">
+        <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="ctrl" data-flex="1">
+          <span class="mod-dot"></span><span class="key-main">⌃</span>
+        </button>
+        <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="alt" data-flex="1">
+          <span class="mod-dot"></span><span class="key-main">⌥</span>
+        </button>
+        <button type="button" class="key key-special key-mod key-cmd" data-action="modifier" data-mod="cmd" data-flex="1.15">
+          <span class="mod-dot"></span><span class="key-main">⌘</span>
+        </button>
+        <button type="button" class="key key-arrow" data-action="press" data-key="left" data-repeat="true" data-flex="1"><span class="key-main">←</span></button>
+        <button type="button" class="key key-arrow" data-action="press" data-key="up" data-repeat="true" data-flex="1"><span class="key-main">↑</span></button>
+        <button type="button" class="key key-arrow" data-action="press" data-key="down" data-repeat="true" data-flex="1"><span class="key-main">↓</span></button>
+        <button type="button" class="key key-arrow" data-action="press" data-key="right" data-repeat="true" data-flex="1"><span class="key-main">→</span></button>
+        <button type="button" class="key key-special key-backspace" data-action="press" data-key="backspace" data-repeat="true" data-flex="1.25"><span class="key-main">⌫</span></button>
+      </div>
 
-    <!-- HÀNG 4: CapsLock + ASDFGHJKL + ; ' + Enter lớn -->
-    <div class="kb-row">
-      <button type="button" class="key key-special key-caps" data-action="caps" data-key="capslock" data-flex="1.8">
-        <span class="caps-led"></span>
-        <span class="key-main">Caps</span>
-      </button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="a" data-flex="1"><span class="key-main">A</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="s" data-flex="1"><span class="key-main">S</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="d" data-flex="1"><span class="key-main">D</span></button>
-      <button type="button" class="key key-alpha key-home-bump" data-action="press" data-key="f" data-flex="1"><span class="key-main">F</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="g" data-flex="1"><span class="key-main">G</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="h" data-flex="1"><span class="key-main">H</span></button>
-      <button type="button" class="key key-alpha key-home-bump" data-action="press" data-key="j" data-flex="1"><span class="key-main">J</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="k" data-flex="1"><span class="key-main">K</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="l" data-flex="1"><span class="key-main">L</span></button>
-      <button type="button" class="key" data-action="press" data-key=";" data-shift=":" data-flex="1">
-        <span class="key-shift">:</span><span class="key-main">;</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="'" data-shift="&quot;" data-flex="1">
-        <span class="key-shift">&quot;</span><span class="key-main">'</span>
-      </button>
-      <button type="button" class="key key-special key-enter" data-action="press" data-key="enter" data-flex="2.25">
-        <span class="key-main">⏎ Enter</span>
-      </button>
-    </div>
+      <div class="portrait-composer">
+        <button type="button" id="btn-sync-mode" class="composer-mode-btn is-live-word">Từng từ</button>
+        <input
+          id="vn-input"
+          class="vn-input"
+          type="text"
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="sentences"
+          spellcheck="false"
+          enterkeyhint="send"
+          placeholder="Chạm gõ Tiếng Việt / Giọng nói..."
+        />
+        <button type="button" id="btn-send-enter" class="composer-send-btn">⏎</button>
+      </div>
+    </section>
 
-    <!-- HÀNG 5: Shift trái + ZXCVBNM + , . / + Shift phải + ↑ -->
-    <div class="kb-row">
-      <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="shift" data-flex="2.2">
-        <span class="mod-dot"></span>
-        <span class="key-main">⇧ Shift</span>
-      </button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="z" data-flex="1"><span class="key-main">Z</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="x" data-flex="1"><span class="key-main">X</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="c" data-flex="1"><span class="key-main">C</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="v" data-flex="1"><span class="key-main">V</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="b" data-flex="1"><span class="key-main">B</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="n" data-flex="1"><span class="key-main">N</span></button>
-      <button type="button" class="key key-alpha" data-action="press" data-key="m" data-flex="1"><span class="key-main">M</span></button>
-      <button type="button" class="key" data-action="press" data-key="," data-shift="&lt;" data-flex="1">
-        <span class="key-shift">&lt;</span><span class="key-main">,</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="." data-shift="&gt;" data-flex="1">
-        <span class="key-shift">&gt;</span><span class="key-main">.</span>
-      </button>
-      <button type="button" class="key" data-action="press" data-key="/" data-shift="?" data-flex="1">
-        <span class="key-shift">?</span><span class="key-main">/</span>
-      </button>
-      <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="shift" data-flex="1.85">
-        <span class="mod-dot"></span>
-        <span class="key-main">⇧</span>
-      </button>
-      <button type="button" class="key key-arrow" data-action="press" data-key="up" data-repeat="true" data-flex="1">
-        <span class="key-main">↑</span>
-      </button>
-    </div>
+    <!-- GIAO DIỆN MÀN NGANG (LANDSCAPE): BÀN PHÍM FULL MAC/PC 6 HÀNG -->
+    <section id="landscape-rows" class="landscape-rows">
+      <!-- HÀNG 1: Function & Macro Bar -->
+      <div class="kb-row kb-row-fn">
+        <button type="button" class="key key-fn" data-action="press" data-key="esc" data-flex="1.05">
+          <span class="key-main">Esc</span>
+        </button>
+        <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,z" data-flex="1.35">
+          <span class="key-sub">Undo</span><span class="key-main">⌘Z</span>
+        </button>
+        <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,c" data-flex="1.35">
+          <span class="key-sub">Copy</span><span class="key-main">⌘C</span>
+        </button>
+        <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,v" data-flex="1.35">
+          <span class="key-sub">Paste</span><span class="key-main">⌘V</span>
+        </button>
+        <button type="button" class="key key-macro" data-action="combo" data-combo="cmd,a" data-flex="1.35">
+          <span class="key-sub">All</span><span class="key-main">⌘A</span>
+        </button>
+        <button type="button" class="key key-macro key-macro-danger" data-action="combo" data-combo="cmd,backspace" data-flex="1.65">
+          <span class="key-sub">Xóa dòng</span><span class="key-main">⌘⌫</span>
+        </button>
+        <button type="button" class="key key-fn" data-action="press" data-key="del" data-repeat="true" data-flex="1.15">
+          <span class="key-main">Del</span>
+        </button>
+      </div>
 
-    <!-- HÀNG 6: Ctrl, Option, Command, Space dài, ← ↓ → -->
-    <div class="kb-row kb-row-bottom">
-      <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="ctrl" data-flex="1.35">
-        <span class="mod-dot"></span>
-        <span class="key-main">⌃ Ctrl</span>
-      </button>
-      <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="alt" data-flex="1.45">
-        <span class="mod-dot"></span>
-        <span class="key-main">⌥ Opt</span>
-      </button>
-      <button type="button" class="key key-special key-mod key-cmd" data-action="modifier" data-mod="cmd" data-flex="1.75">
-        <span class="mod-dot"></span>
-        <span class="key-main">⌘ Cmd</span>
-      </button>
+      <!-- HÀNG 2: Số & Ký tự + Backspace lớn -->
+      <div class="kb-row">
+        <button type="button" class="key" data-action="press" data-key="`" data-shift="~" data-flex="1"><span class="key-shift">~</span><span class="key-main">`</span></button>
+        <button type="button" class="key" data-action="press" data-key="1" data-shift="!" data-flex="1"><span class="key-shift">!</span><span class="key-main">1</span></button>
+        <button type="button" class="key" data-action="press" data-key="2" data-shift="@" data-flex="1"><span class="key-shift">@</span><span class="key-main">2</span></button>
+        <button type="button" class="key" data-action="press" data-key="3" data-shift="#" data-flex="1"><span class="key-shift">#</span><span class="key-main">3</span></button>
+        <button type="button" class="key" data-action="press" data-key="4" data-shift="$" data-flex="1"><span class="key-shift">$</span><span class="key-main">4</span></button>
+        <button type="button" class="key" data-action="press" data-key="5" data-shift="%" data-flex="1"><span class="key-shift">%</span><span class="key-main">5</span></button>
+        <button type="button" class="key" data-action="press" data-key="6" data-shift="^" data-flex="1"><span class="key-shift">^</span><span class="key-main">6</span></button>
+        <button type="button" class="key" data-action="press" data-key="7" data-shift="&amp;" data-flex="1"><span class="key-shift">&amp;</span><span class="key-main">7</span></button>
+        <button type="button" class="key" data-action="press" data-key="8" data-shift="*" data-flex="1"><span class="key-shift">*</span><span class="key-main">8</span></button>
+        <button type="button" class="key" data-action="press" data-key="9" data-shift="(" data-flex="1"><span class="key-shift">(</span><span class="key-main">9</span></button>
+        <button type="button" class="key" data-action="press" data-key="0" data-shift=")" data-flex="1"><span class="key-shift">)</span><span class="key-main">0</span></button>
+        <button type="button" class="key" data-action="press" data-key="-" data-shift="_" data-flex="1"><span class="key-shift">_</span><span class="key-main">-</span></button>
+        <button type="button" class="key" data-action="press" data-key="=" data-shift="+" data-flex="1"><span class="key-shift">+</span><span class="key-main">=</span></button>
+        <button type="button" class="key key-special key-backspace" data-action="press" data-key="backspace" data-repeat="true" data-flex="2.05">
+          <span class="key-main">⌫</span>
+        </button>
+      </div>
 
-      <button type="button" class="key key-space" data-action="press" data-key="space" data-repeat="true" data-flex="6.5">
-        <span class="space-bar-mark"></span>
-      </button>
+      <!-- HÀNG 3: Tab + QWERTYUIOP + [ ] \ -->
+      <div class="kb-row">
+        <button type="button" class="key key-special" data-action="press" data-key="tab" data-flex="1.5"><span class="key-main">Tab ⇥</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="q" data-flex="1"><span class="key-main">Q</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="w" data-flex="1"><span class="key-main">W</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="e" data-flex="1"><span class="key-main">E</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="r" data-flex="1"><span class="key-main">R</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="t" data-flex="1"><span class="key-main">T</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="y" data-flex="1"><span class="key-main">Y</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="u" data-flex="1"><span class="key-main">U</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="i" data-flex="1"><span class="key-main">I</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="o" data-flex="1"><span class="key-main">O</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="p" data-flex="1"><span class="key-main">P</span></button>
+        <button type="button" class="key" data-action="press" data-key="[" data-shift="{" data-flex="1"><span class="key-shift">{</span><span class="key-main">[</span></button>
+        <button type="button" class="key" data-action="press" data-key="]" data-shift="}" data-flex="1"><span class="key-shift">}</span><span class="key-main">]</span></button>
+        <button type="button" class="key" data-action="press" data-key="\" data-shift="|" data-flex="1.55"><span class="key-shift">|</span><span class="key-main">\</span></button>
+      </div>
 
-      <button type="button" class="key key-arrow" data-action="press" data-key="left" data-repeat="true" data-flex="1">
-        <span class="key-main">←</span>
-      </button>
-      <button type="button" class="key key-arrow" data-action="press" data-key="down" data-repeat="true" data-flex="1">
-        <span class="key-main">↓</span>
-      </button>
-      <button type="button" class="key key-arrow" data-action="press" data-key="right" data-repeat="true" data-flex="1">
-        <span class="key-main">→</span>
-      </button>
-    </div>
+      <!-- HÀNG 4: CapsLock + ASDFGHJKL + ; ' + Enter lớn -->
+      <div class="kb-row">
+        <button type="button" class="key key-special key-caps" data-action="caps" data-key="capslock" data-flex="1.8">
+          <span class="caps-led"></span><span class="key-main">Caps</span>
+        </button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="a" data-flex="1"><span class="key-main">A</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="s" data-flex="1"><span class="key-main">S</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="d" data-flex="1"><span class="key-main">D</span></button>
+        <button type="button" class="key key-alpha key-home-bump" data-action="press" data-key="f" data-flex="1"><span class="key-main">F</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="g" data-flex="1"><span class="key-main">G</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="h" data-flex="1"><span class="key-main">H</span></button>
+        <button type="button" class="key key-alpha key-home-bump" data-action="press" data-key="j" data-flex="1"><span class="key-main">J</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="k" data-flex="1"><span class="key-main">K</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="l" data-flex="1"><span class="key-main">L</span></button>
+        <button type="button" class="key" data-action="press" data-key=";" data-shift=":" data-flex="1"><span class="key-shift">:</span><span class="key-main">;</span></button>
+        <button type="button" class="key" data-action="press" data-key="'" data-shift="&quot;" data-flex="1"><span class="key-shift">&quot;</span><span class="key-main">'</span></button>
+        <button type="button" class="key key-special key-enter" data-action="press" data-key="enter" data-flex="2.25">
+          <span class="key-main">⏎ Enter</span>
+        </button>
+      </div>
+
+      <!-- HÀNG 5: Shift trái + ZXCVBNM + , . / + Shift phải + ↑ -->
+      <div class="kb-row">
+        <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="shift" data-flex="2.2">
+          <span class="mod-dot"></span><span class="key-main">⇧ Shift</span>
+        </button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="z" data-flex="1"><span class="key-main">Z</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="x" data-flex="1"><span class="key-main">X</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="c" data-flex="1"><span class="key-main">C</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="v" data-flex="1"><span class="key-main">V</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="b" data-flex="1"><span class="key-main">B</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="n" data-flex="1"><span class="key-main">N</span></button>
+        <button type="button" class="key key-alpha" data-action="press" data-key="m" data-flex="1"><span class="key-main">M</span></button>
+        <button type="button" class="key" data-action="press" data-key="," data-shift="&lt;" data-flex="1"><span class="key-shift">&lt;</span><span class="key-main">,</span></button>
+        <button type="button" class="key" data-action="press" data-key="." data-shift="&gt;" data-flex="1"><span class="key-shift">&gt;</span><span class="key-main">.</span></button>
+        <button type="button" class="key" data-action="press" data-key="/" data-shift="?" data-flex="1"><span class="key-shift">?</span><span class="key-main">/</span></button>
+        <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="shift" data-flex="1.85">
+          <span class="mod-dot"></span><span class="key-main">⇧</span>
+        </button>
+        <button type="button" class="key key-arrow" data-action="press" data-key="up" data-repeat="true" data-flex="1">
+          <span class="key-main">↑</span>
+        </button>
+      </div>
+
+      <!-- HÀNG 6: Ctrl, Option, Command, Space dài, ← ↓ → -->
+      <div class="kb-row kb-row-bottom">
+        <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="ctrl" data-flex="1.35">
+          <span class="mod-dot"></span><span class="key-main">⌃ Ctrl</span>
+        </button>
+        <button type="button" class="key key-special key-mod" data-action="modifier" data-mod="alt" data-flex="1.45">
+          <span class="mod-dot"></span><span class="key-main">⌥ Opt</span>
+        </button>
+        <button type="button" class="key key-special key-mod key-cmd" data-action="modifier" data-mod="cmd" data-flex="1.75">
+          <span class="mod-dot"></span><span class="key-main">⌘ Cmd</span>
+        </button>
+        <button type="button" class="key key-space" data-action="press" data-key="space" data-repeat="true" data-flex="6.5">
+          <span class="space-bar-mark"></span>
+        </button>
+        <button type="button" class="key key-arrow" data-action="press" data-key="left" data-repeat="true" data-flex="1"><span class="key-main">←</span></button>
+        <button type="button" class="key key-arrow" data-action="press" data-key="down" data-repeat="true" data-flex="1"><span class="key-main">↓</span></button>
+        <button type="button" class="key key-arrow" data-action="press" data-key="right" data-repeat="true" data-flex="1"><span class="key-main">→</span></button>
+      </div>
+    </section>
   </main>
 
   <script src="./app.js"></script>
