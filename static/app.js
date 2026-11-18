@@ -37,12 +37,18 @@
   const STORAGE_LENS_ON_KEY = "mac_kb_lens_enabled";
   const STORAGE_PAD_VIEW_KEY = "mac_kb_pad_view_mode";
   const STORAGE_PAD_SPLIT_KEY = "mac_kb_pad_split_mode";
+  const STORAGE_TP_SPEED_KEY = "mac_kb_trackpad_speed";
 
   const padLensCanvas = document.getElementById("pad-lens-canvas");
   const kbLensCanvas = document.getElementById("kb-lens-canvas");
   const kbRibbonLens = document.getElementById("kb-ribbon-lens");
   const padSplitBtns = Array.from(document.querySelectorAll(".js-pad-split-btn"));
   const padSplitLabels = Array.from(document.querySelectorAll(".js-pad-split-label"));
+  const webSettingsModal = document.getElementById("web-settings-modal");
+  const btnCloseWebSettings = document.getElementById("btn-close-web-settings");
+  const webTpSpeedRange = document.getElementById("web-tp-speed-range");
+  const webTpSpeedVal = document.getElementById("web-tp-speed-val");
+  const btnWebFullscreen = document.getElementById("btn-web-fullscreen");
   const fovLabels = Array.from(document.querySelectorAll(".js-fov-label"));
   const fovOutBtns = Array.from(document.querySelectorAll(".js-fov-out"));
   const fovInBtns = Array.from(document.querySelectorAll(".js-fov-in"));
@@ -63,8 +69,49 @@
   let lensEnabled = true;
   let padViewMode = "lens";
   let screenRecordingOk = true;
+  let trackpadSpeed = 1.6;
   let simpleTextBuffer = "";
   let badgeHideTimer = null;
+
+  try {
+    const savedTpSpeed = parseFloat(localStorage.getItem(STORAGE_TP_SPEED_KEY) || "1.6");
+    if (!Number.isNaN(savedTpSpeed) && savedTpSpeed >= 0.5 && savedTpSpeed <= 4.0) {
+      trackpadSpeed = savedTpSpeed;
+    }
+    if (hasAndroidBridge && typeof window.AndroidBridge.getTrackpadSpeed === "function") {
+      const nativeSpeed = parseFloat(window.AndroidBridge.getTrackpadSpeed());
+      if (!Number.isNaN(nativeSpeed) && nativeSpeed >= 0.5 && nativeSpeed <= 4.0) {
+        trackpadSpeed = nativeSpeed;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  function applyTrackpadSpeedValue(val, syncNative = false) {
+    const parsed = parseFloat(val);
+    if (Number.isNaN(parsed)) return;
+    trackpadSpeed = Math.max(0.5, Math.min(4.0, Math.round(parsed * 10) / 10));
+    try {
+      localStorage.setItem(STORAGE_TP_SPEED_KEY, String(trackpadSpeed));
+    } catch {
+      // ignore
+    }
+    if (webTpSpeedRange) webTpSpeedRange.value = String(trackpadSpeed);
+    if (webTpSpeedVal) webTpSpeedVal.textContent = `${trackpadSpeed.toFixed(1)}x`;
+    if (syncNative && hasAndroidBridge && typeof window.AndroidBridge.setTrackpadSpeed === "function") {
+      try {
+        window.AndroidBridge.setTrackpadSpeed(trackpadSpeed);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  window.__setTrackpadSpeed = (val) => {
+    applyTrackpadSpeedValue(val, false);
+  };
+  applyTrackpadSpeedValue(trackpadSpeed, false);
 
   try {
     const savedScale = parseFloat(localStorage.getItem(STORAGE_LENS_SCALE_KEY) || "1.22");
@@ -951,6 +998,8 @@
         typeof window.AndroidBridge.openServerDialog === "function"
       ) {
         window.AndroidBridge.openServerDialog();
+      } else if (webSettingsModal) {
+        webSettingsModal.classList.remove("is-hidden");
       } else {
         void enterFullscreen(true);
       }
@@ -1359,9 +1408,32 @@
   syncLensControlsUI();
   renderSimpleText("", "");
 
+  if (webTpSpeedRange) {
+    webTpSpeedRange.addEventListener("input", () => {
+      applyTrackpadSpeedValue(webTpSpeedRange.value, true);
+    });
+  }
+  if (btnCloseWebSettings && webSettingsModal) {
+    btnCloseWebSettings.addEventListener("click", () => {
+      webSettingsModal.classList.add("is-hidden");
+    });
+    webSettingsModal.addEventListener("click", (e) => {
+      if (e.target === webSettingsModal) {
+        webSettingsModal.classList.add("is-hidden");
+      }
+    });
+  }
+  if (btnWebFullscreen && webSettingsModal) {
+    btnWebFullscreen.addEventListener("click", () => {
+      webSettingsModal.classList.add("is-hidden");
+      void enterFullscreen(true);
+    });
+  }
+
   function applyPointerAcceleration(dx, dy) {
     const dist = Math.hypot(dx, dy);
-    const gain = Math.min(3.1, 1.35 + dist * 0.085);
+    const baseGain = Math.min(5.2, 1.35 + dist * 0.11);
+    const gain = baseGain * trackpadSpeed;
     return {
       dx: dx * gain,
       dy: dy * gain,

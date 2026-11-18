@@ -28,6 +28,8 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.SeekBar
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
@@ -54,6 +56,9 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val PREFS_NAME = "mac_web_keyboard_prefs"
         private const val KEY_SERVER_HOST = "server_host"
+        private const val KEY_TRACKPAD_SPEED = "trackpad_speed"
+        private const val KEY_OTA_WEB_VERSION = "ota_web_version"
+        private const val DEFAULT_TRACKPAD_SPEED = 1.6f
         private const val LOCAL_KEYBOARD_URL = "http://appassets.androidplatform.net/assets/index.html"
     }
 
@@ -143,6 +148,8 @@ class MainActivity : AppCompatActivity() {
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
             .build()
 
+        cleanupStaleOtaWebCache()
+
         webView = WebView(this).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -173,7 +180,7 @@ class MainActivity : AppCompatActivity() {
                     view: WebView,
                     request: WebResourceRequest
                 ): WebResourceResponse? {
-                    // Luôn nạp đúng giao diện đóng gói bên trong APK hiện tại (0ms, không bao giờ bị server cũ ghi đè version)
+                    serveOtaWebAssetIfNewer(request.url)?.let { return it }
                     return assetLoader.shouldInterceptRequest(request.url)
                 }
 
@@ -265,6 +272,76 @@ class MainActivity : AppCompatActivity() {
         return prefs.getString(KEY_SERVER_HOST, "")?.trim().orEmpty()
     }
 
+    private fun getSavedTrackpadSpeed(): Float {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getFloat(KEY_TRACKPAD_SPEED, DEFAULT_TRACKPAD_SPEED).coerceIn(0.5f, 4.0f)
+    }
+
+    private fun saveTrackpadSpeed(speed: Float) {
+        val clamped = (Math.round(speed.coerceIn(0.5f, 4.0f) * 10f) / 10f)
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putFloat(KEY_TRACKPAD_SPEED, clamped)
+            .apply()
+        webView.evaluateJavascript(
+            "window.__setTrackpadSpeed && window.__setTrackpadSpeed($clamped);",
+            null
+        )
+    }
+
+    private fun getOtaWebDir(): File = File(filesDir, "ota_web")
+
+    private fun getSavedOtaWebVersion(): String {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_OTA_WEB_VERSION, "")?.trim().orEmpty()
+    }
+
+    private fun getEffectiveWebVersion(): String {
+        val otaVer = getSavedOtaWebVersion()
+        return if (otaVer.isNotEmpty() && isRemoteVersionNewer(otaVer, BuildConfig.VERSION_NAME)) {
+            otaVer
+        } else {
+            BuildConfig.VERSION_NAME
+        }
+    }
+
+    private fun cleanupStaleOtaWebCache() {
+        val otaVer = getSavedOtaWebVersion()
+        if (otaVer.isEmpty() || !isRemoteVersionNewer(otaVer, BuildConfig.VERSION_NAME)) {
+            try {
+                getOtaWebDir().deleteRecursively()
+            } catch (_: Exception) {
+            }
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_OTA_WEB_VERSION)
+                .apply()
+        }
+    }
+
+    private fun serveOtaWebAssetIfNewer(uri: Uri): WebResourceResponse? {
+        if (uri.host != "appassets.androidplatform.net") return null
+        val otaVer = getSavedOtaWebVersion()
+        if (otaVer.isEmpty() || !isRemoteVersionNewer(otaVer, BuildConfig.VERSION_NAME)) return null
+
+        val relName = uri.path?.removePrefix("/assets/")?.trim('/') ?: return null
+        if (relName !in listOf("index.html", "style.css", "app.js", "manifest.json")) return null
+
+        val f = File(getOtaWebDir(), relName)
+        if (!f.exists() || f.length() <= 0L) return null
+        val mime = when {
+            relName.endsWith(".html") -> "text/html"
+            relName.endsWith(".css") -> "text/css"
+            relName.endsWith(".js") -> "application/javascript"
+            else -> "application/json"
+        }
+        return try {
+            WebResourceResponse(mime, "UTF-8", f.inputStream())
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun fetchLiveAssetFromServer(relPath: String): WebResourceResponse? {
         val rawHosts = getSavedServerHost()
         if (rawHosts.isBlank()) return null
@@ -311,24 +388,59 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveServerHost(rawHost: String) {
         val cleaned = rawHost.trim()
+        val prev = getSavedServerHost()
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_SERVER_HOST, cleaned)
             .apply()
 
-        val escaped = JSONObject.quote(cleaned)
-        webView.evaluateJavascript("window.__applyServerHost && window.__applyServerHost($escaped);", null)
-        webView.reload()
+        if (cleaned != prev) {
+            val escaped = JSONObject.quote(cleaned)
+            webView.evaluateJavascript("window.__applyServerHost && window.__applyServerHost($escaped);", null)
+        }
     }
 
     private fun showServerConfigDialog(isFirstLaunch: Boolean = false) {
         val density = resources.displayMetrics.density
         val padH = (20 * density).toInt()
-        val padV = (12 * density).toInt()
+        val padV = (10 * density).toInt()
+        val gapV = (14 * density).toInt()
+
+        var currentSpeed = getSavedTrackpadSpeed()
+        val speedTitle = TextView(this).apply {
+            text = String.format("Tốc độ trượt Trackpad: %.1fx", currentSpeed)
+            textSize = 14.5f
+            setPadding(0, 0, 0, (4 * density).toInt())
+        }
+
+        val speedSeek = SeekBar(this).apply {
+            max = 35 // 0.5x -> 4.0x (bước 0.1x)
+            progress = Math.round((currentSpeed - 0.5f) * 10f).coerceIn(0, 35)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    currentSpeed = (5 + progress) / 10f
+                    speedTitle.text = String.format("Tốc độ trượt Trackpad: %.1fx", currentSpeed)
+                    if (fromUser) {
+                        saveTrackpadSpeed(currentSpeed)
+                    }
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                    saveTrackpadSpeed(currentSpeed)
+                }
+            })
+        }
+
+        val ipLabel = TextView(this).apply {
+            text = "Địa chỉ IP MacBook / PC (ngăn cách dấu phẩy nếu dùng cả LAN & Tailscale):"
+            textSize = 13f
+            setPadding(0, gapV, 0, (4 * density).toInt())
+        }
 
         val input = EditText(this).apply {
             setText(getSavedServerHost())
-            hint = "VD: 100.88.1.5:5050 hoặc 192.168.1.20:5050"
+            hint = "VD: 192.168.1.20:5050, 100.88.1.5:5050"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setSingleLine(true)
             setSelection(text.length)
@@ -337,18 +449,21 @@ class MainActivity : AppCompatActivity() {
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(padH, padV, padH, 0)
+            addView(speedTitle)
+            addView(speedSeek)
+            addView(ipLabel)
             addView(input)
         }
 
         val builder = AlertDialog.Builder(this)
-            .setTitle("Kết nối MacBook (v${BuildConfig.VERSION_NAME})")
-            .setMessage("Nhập IP Tailscale hoặc IP LAN của MacBook (hỗ trợ nhập cả 2 ngăn cách bằng dấu phẩy để tự chuyển mạch):")
+            .setTitle("Cài đặt (v${getEffectiveWebVersion()})")
             .setView(container)
-            .setPositiveButton("Lưu và Kết nối") { _, _ ->
+            .setPositiveButton("Lưu") { _, _ ->
+                saveTrackpadSpeed(currentSpeed)
                 saveServerHost(input.text?.toString().orEmpty())
                 applyImmersiveStickyFullscreen()
             }
-            .setNeutralButton("Cập nhật APK") { _, _ ->
+            .setNeutralButton("Cập nhật") { _, _ ->
                 applyImmersiveStickyFullscreen()
                 lifecycleScope.launch {
                     checkForUpdatesFromGitHub(manualCheck = true)
@@ -390,34 +505,119 @@ class MainActivity : AppCompatActivity() {
     // IN-APP AUTO-UPDATE TỪ GITHUB RELEASES (DownloadManager + FileProvider)
     // =========================================================================
     private suspend fun checkForUpdatesFromGitHub(manualCheck: Boolean) {
+        val manifestJson = withContext(Dispatchers.IO) {
+            fetchRawManifestJson()
+        }
+        val remoteWebVer = manifestJson?.optString("web_version", "")?.trim().orEmpty()
+
         val releaseInfo = withContext(Dispatchers.IO) {
-            fetchLatestGitHubRelease()
+            if (manifestJson != null) {
+                val t = manifestJson.optString("tag_name", "").trim()
+                val u = manifestJson.optString("apk_url", "").trim()
+                if (t.isNotEmpty() && u.isNotEmpty()) Pair(t, u) else fetchFromGitHubReleasesApi()
+            } else {
+                fetchLatestGitHubRelease()
+            }
         }
 
-        if (releaseInfo == null) {
-            if (manualCheck) {
+        if (releaseInfo != null) {
+            val (tagName, apkDownloadUrl) = releaseInfo
+            if (isRemoteVersionNewer(tagName, BuildConfig.VERSION_NAME)) {
+                showMandatoryUpdateDialog(tagName, apkDownloadUrl)
+                return
+            }
+        }
+
+        // Nếu vỏ APK đã mới nhất, kiểm tra tiếp gói giao diện OTA (cập nhật ngầm 0.5s không cần cài lại APK)
+        if (remoteWebVer.isNotEmpty() && isRemoteVersionNewer(remoteWebVer, getEffectiveWebVersion())) {
+            val updatedOk = withContext(Dispatchers.IO) {
+                downloadOtaWebAssets(remoteWebVer)
+            }
+            if (updatedOk) {
+                webView.reload()
                 Toast.makeText(
                     this,
-                    "Không thể kiểm tra GitHub Releases lúc này.",
+                    "Đã tự cập nhật giao diện mới (v$remoteWebVer)",
                     Toast.LENGTH_SHORT
                 ).show()
+                return
             }
-            return
         }
 
-        val (tagName, apkDownloadUrl) = releaseInfo
-        if (!isRemoteVersionNewer(tagName, BuildConfig.VERSION_NAME)) {
-            if (manualCheck) {
-                Toast.makeText(
-                    this,
-                    "Bạn đang ở bản mới nhất (v${BuildConfig.VERSION_NAME}).",
-                    Toast.LENGTH_SHORT
-                ).show()
+        if (manualCheck) {
+            val msg = if (releaseInfo == null && manifestJson == null) {
+                "Không thể kiểm tra cập nhật lúc này."
+            } else {
+                "Bạn đang ở bản mới nhất (v${getEffectiveWebVersion()})."
             }
-            return
+            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
         }
+    }
 
-        showMandatoryUpdateDialog(tagName, apkDownloadUrl)
+    private fun fetchRawManifestJson(): JSONObject? {
+        val rawUrl =
+            "https://raw.githubusercontent.com/${BuildConfig.GITHUB_REPO}/main/releases/latest.json?t=${System.currentTimeMillis()}"
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(rawUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5000
+                readTimeout = 5000
+                setRequestProperty("Cache-Control", "no-cache")
+                setRequestProperty("User-Agent", "MacWebKeyboard-Android/${BuildConfig.VERSION_NAME}")
+            }
+            if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            JSONObject(body)
+        } catch (_: Exception) {
+            null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    private fun downloadOtaWebAssets(targetWebVersion: String): Boolean {
+        val files = listOf("index.html", "style.css", "app.js", "manifest.json")
+        val tmpDir = File(filesDir, "ota_web_tmp")
+        return try {
+            tmpDir.deleteRecursively()
+            tmpDir.mkdirs()
+            val ts = System.currentTimeMillis()
+            for (name in files) {
+                val u = "https://raw.githubusercontent.com/${BuildConfig.GITHUB_REPO}/main/static/$name?t=$ts"
+                var conn: HttpURLConnection? = null
+                try {
+                    conn = (URL(u).openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 6000
+                        readTimeout = 8000
+                        setRequestProperty("Cache-Control", "no-cache")
+                    }
+                    if (conn.responseCode != HttpURLConnection.HTTP_OK) return false
+                    val bytes = conn.inputStream.use { it.readBytes() }
+                    if (bytes.isEmpty()) return false
+                    File(tmpDir, name).writeBytes(bytes)
+                } finally {
+                    conn?.disconnect()
+                }
+            }
+            val finalDir = getOtaWebDir()
+            finalDir.deleteRecursively()
+            if (!tmpDir.renameTo(finalDir)) {
+                finalDir.mkdirs()
+                for (name in files) {
+                    File(tmpDir, name).copyTo(File(finalDir, name), overwrite = true)
+                }
+                tmpDir.deleteRecursively()
+            }
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_OTA_WEB_VERSION, targetWebVersion)
+                .apply()
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun showMandatoryUpdateDialog(tagName: String, apkDownloadUrl: String) {
@@ -662,7 +862,17 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
-        fun getAppVersion(): String = BuildConfig.VERSION_NAME
+        fun getAppVersion(): String = getEffectiveWebVersion()
+
+        @JavascriptInterface
+        fun getTrackpadSpeed(): Float = getSavedTrackpadSpeed()
+
+        @JavascriptInterface
+        fun setTrackpadSpeed(speed: Float) {
+            runOnUiThread {
+                saveTrackpadSpeed(speed)
+            }
+        }
 
         @JavascriptInterface
         fun startNativeUpdate() {

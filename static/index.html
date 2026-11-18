@@ -614,6 +614,21 @@
     </div>
   </section>
 
+  <div id="web-settings-modal" class="web-settings-backdrop is-hidden">
+    <div class="web-settings-card">
+      <div class="web-settings-head">
+        <span class="web-settings-title">Cài đặt</span>
+        <button type="button" id="btn-close-web-settings" class="lens-ctrl-btn">✕</button>
+      </div>
+      <div class="web-settings-row">
+        <span>Tốc độ trượt Trackpad</span>
+        <span id="web-tp-speed-val" class="web-settings-val">1.6x</span>
+      </div>
+      <input id="web-tp-speed-range" class="web-tp-range" type="range" min="0.5" max="4.0" step="0.1" value="1.6" />
+      <button type="button" id="btn-web-fullscreen" class="web-settings-btn">⛶ Toàn màn hình</button>
+    </div>
+  </div>
+
   <script src="./app.js"></script>
 </body>
 </html>
