@@ -1443,6 +1443,94 @@
     return Math.min(6.4 * speedNorm, minGain + dynamicGain);
   }
 
+  // Bộ điều khiển cuộn đồng nhất 100% cho CẢ Cuộn 2 ngón trên Trackpad VÀ Thanh cuộn dọc bên phải:
+  // - Giảm thêm 20% tốc độ (0.27x - 0.46x) để kiểm soát từng dòng mượt mà
+  // - Khi vuốt 2 ngón trên Trackpad, con chạy trên thanh cuộn bên phải cũng tự sáng & trượt đồng bộ theo
+  const sharedScrollStripEl = document.getElementById("pad-scroll-strip");
+  const sharedScrollThumbEl = sharedScrollStripEl
+    ? sharedScrollStripEl.querySelector(".js-scroll-thumb")
+    : null;
+  let sharedThumbOffset = 0;
+  let sharedScrollRemX = 0;
+  let sharedScrollRemY = 0;
+  let sharedScrollInertiaRaf = null;
+
+  function stopUnifiedScrollInertia() {
+    if (sharedScrollInertiaRaf !== null) {
+      cancelAnimationFrame(sharedScrollInertiaRaf);
+      sharedScrollInertiaRaf = null;
+    }
+  }
+
+  function setSharedThumbOffset(px) {
+    if (!sharedScrollThumbEl) return;
+    const trackEl = sharedScrollThumbEl.parentElement;
+    const maxOff = trackEl ? Math.max(12, (trackEl.clientHeight - 34) / 2) : 36;
+    sharedThumbOffset = Math.max(-maxOff, Math.min(maxOff, px));
+    sharedScrollThumbEl.style.setProperty("--thumb-offset", `${sharedThumbOffset.toFixed(1)}px`);
+  }
+
+  function setSharedScrollVisual(active) {
+    if (!sharedScrollStripEl) return;
+    sharedScrollStripEl.classList.toggle("is-scrolling", active);
+    if (!active) {
+      setSharedThumbOffset(0);
+    }
+  }
+
+  function resetUnifiedScrollState() {
+    sharedScrollRemX = 0;
+    sharedScrollRemY = 0;
+  }
+
+  function emitUnifiedScroll(dx, dy) {
+    if (Math.abs(dx) < 0.08 && Math.abs(dy) < 0.08) return;
+    const gainX = Math.min(0.46, 0.27 + Math.abs(dx) * 0.006);
+    const gainY = Math.min(0.46, 0.27 + Math.abs(dy) * 0.006);
+    sharedScrollRemX += -dx * gainX;
+    sharedScrollRemY += -dy * gainY;
+    if (Math.abs(sharedScrollRemX) < 1.8 && Math.abs(sharedScrollRemY) < 1.8) return;
+    const sendX = Math.trunc(sharedScrollRemX);
+    const sendY = Math.trunc(sharedScrollRemY);
+    if (sendX !== 0 || sendY !== 0) {
+      sharedScrollRemX -= sendX;
+      sharedScrollRemY -= sendY;
+      sendPayload({
+        type: "mouse_scroll",
+        dx: sendX,
+        dy: sendY,
+      });
+    }
+  }
+
+  function startUnifiedScrollInertia(velPxMs) {
+    stopUnifiedScrollInertia();
+    if (Math.abs(velPxMs) <= 1.15) return;
+    let vFrame = velPxMs * 2.1;
+    let inertiaRem = 0;
+    const stepInertia = () => {
+      vFrame *= 0.78;
+      if (Math.abs(vFrame) < 0.5) {
+        sharedScrollInertiaRaf = null;
+        return;
+      }
+      inertiaRem += -vFrame * 0.36;
+      if (Math.abs(inertiaRem) >= 1.8) {
+        const sendY = Math.trunc(inertiaRem);
+        if (sendY !== 0) {
+          inertiaRem -= sendY;
+          sendPayload({
+            type: "mouse_scroll",
+            dx: 0,
+            dy: sendY,
+          });
+        }
+      }
+      sharedScrollInertiaRaf = requestAnimationFrame(stepInertia);
+    };
+    sharedScrollInertiaRaf = requestAnimationFrame(stepInertia);
+  }
+
   function bindTrackpadSurface(surface) {
     if (!surface) return;
     const tpTouches = new Map();
@@ -1453,8 +1541,8 @@
     let tpTotalMoved = 0;
     let tpRemX = 0;
     let tpRemY = 0;
-    let tpScrollRemX = 0;
-    let tpScrollRemY = 0;
+    let tpTwoFingerScrollVelY = 0;
+    let tpWasTwoFingerScrolling = false;
     let tpLastTapAt = 0;
     let tpPendingDoubleTapCandidate = false;
     let tpDragActive = false;
@@ -1538,22 +1626,27 @@
           return;
         }
 
-        // Chạm >= 2 ngón (Cuộn trang / Chuột phải) -> hủy chờ ấn giữ 1 ngón
+        // Chạm >= 2 ngón (Cuộn trang / Chuột phải) -> hủy chờ ấn giữ 1 ngón & phanh quán tính cuộn cũ
         if (tpTouches.size >= 2) {
           cancelLongPressTimer();
+          stopUnifiedScrollInertia();
+          resetUnifiedScrollState();
+          tpTwoFingerScrollVelY = 0;
           tpPendingDoubleTapCandidate = false;
           return;
         }
 
         if (isFirstFingerDown) {
+          stopUnifiedScrollInertia();
           tpGestureStartAt = now;
           tpPrevMoveAt = now;
           tpSmoothedVel = 0;
           tpTotalMoved = 0;
           tpRemX = 0;
           tpRemY = 0;
-          tpScrollRemX = 0;
-          tpScrollRemY = 0;
+          tpTwoFingerScrollVelY = 0;
+          tpWasTwoFingerScrolling = false;
+          resetUnifiedScrollState();
           tpPendingDoubleTapCandidate = now - tpLastTapAt < 270;
 
           // Cơ chế Force-Touch mô phỏng trên điện thoại: Ấn giữ yên ~230ms rồi kéo lướt -> Bôi đen / Kéo thả!
@@ -1612,24 +1705,14 @@
           }
         }
 
-        // Chạm đúng 2 ngón và không ở chế độ Kéo -> Cuộn trang 2 ngón (đằm, dừng đâu đứng đó)
+        // Chạm đúng 2 ngón và không ở chế độ Kéo -> Đồng bộ 100% cơ chế & thanh hiển thị với Thanh cuộn bên phải
         if (tpTouches.size === 2 && !tpDragActive) {
           cancelLongPressTimer();
-          tpScrollRemX += -dx * 0.42;
-          tpScrollRemY += -dy * 0.42;
-          if (Math.abs(tpScrollRemX) >= 1.8 || Math.abs(tpScrollRemY) >= 1.8) {
-            const sendSx = Math.trunc(tpScrollRemX);
-            const sendSy = Math.trunc(tpScrollRemY);
-            if (sendSx !== 0 || sendSy !== 0) {
-              tpScrollRemX -= sendSx;
-              tpScrollRemY -= sendSy;
-              sendPayload({
-                type: "mouse_scroll",
-                dx: sendSx,
-                dy: sendSy,
-              });
-            }
-          }
+          tpWasTwoFingerScrolling = true;
+          tpTwoFingerScrollVelY = tpTwoFingerScrollVelY * 0.5 + (dy / dt) * 0.5;
+          setSharedScrollVisual(true);
+          setSharedThumbOffset(sharedThumbOffset + dy * 0.42);
+          emitUnifiedScroll(dx, dy);
           return;
         }
 
@@ -1675,6 +1758,11 @@
       if (tpTouches.size === 0) {
         cancelLongPressTimer();
         surface.classList.remove("is-touching");
+        if (tpWasTwoFingerScrolling) {
+          tpWasTwoFingerScrolling = false;
+          setSharedScrollVisual(false);
+          startUnifiedScrollInertia(tpTwoFingerScrollVelY);
+        }
         const duration = performance.now() - tpGestureStartAt;
 
         if (tpDragActive) {
@@ -1723,47 +1811,12 @@
 
   function bindScrollStrip(stripEl) {
     if (!stripEl) return;
-    const thumbEl = stripEl.querySelector(".js-scroll-thumb");
     let activeId = null;
     let startAt = 0;
     let prevY = 0;
     let prevAt = 0;
     let totalMoved = 0;
-    let thumbOffset = 0;
-    let scrollRemY = 0;
     let velocityPxMs = 0;
-    let inertiaRaf = null;
-
-    function stopInertia() {
-      if (inertiaRaf !== null) {
-        cancelAnimationFrame(inertiaRaf);
-        inertiaRaf = null;
-      }
-    }
-
-    function setThumbOffset(px) {
-      if (!thumbEl) return;
-      const trackEl = thumbEl.parentElement;
-      const maxOff = trackEl ? Math.max(12, (trackEl.clientHeight - 34) / 2) : 36;
-      thumbOffset = Math.max(-maxOff, Math.min(maxOff, px));
-      thumbEl.style.setProperty("--thumb-offset", `${thumbOffset.toFixed(1)}px`);
-    }
-
-    function emitScrollStep(deltaY) {
-      if (Math.abs(deltaY) < 0.1) return;
-      const gain = Math.min(0.58, 0.34 + Math.abs(deltaY) * 0.008);
-      scrollRemY += -deltaY * gain;
-      if (Math.abs(scrollRemY) < 1.8) return;
-      const sendY = Math.trunc(scrollRemY);
-      if (sendY !== 0) {
-        scrollRemY -= sendY;
-        sendPayload({
-          type: "mouse_scroll",
-          dx: 0,
-          dy: sendY,
-        });
-      }
-    }
 
     stripEl.addEventListener(
       "touchstart",
@@ -1772,7 +1825,8 @@
         if (!t) return;
         e.preventDefault();
         e.stopPropagation();
-        stopInertia();
+        stopUnifiedScrollInertia();
+        resetUnifiedScrollState();
         closeModeMenu();
         closeSymbolPopup();
         ensureAutoFullscreenOnce();
@@ -1783,9 +1837,8 @@
         prevAt = startAt;
         prevY = t.clientY;
         totalMoved = 0;
-        scrollRemY = 0;
         velocityPxMs = 0;
-        stripEl.classList.add("is-scrolling");
+        setSharedScrollVisual(true);
       },
       { passive: false }
     );
@@ -1806,8 +1859,8 @@
             prevAt = now;
             totalMoved += Math.abs(dy);
             velocityPxMs = velocityPxMs * 0.5 + (dy / dt) * 0.5;
-            setThumbOffset(thumbOffset + dy * 0.45);
-            emitScrollStep(dy);
+            setSharedThumbOffset(sharedThumbOffset + dy * 0.42);
+            emitUnifiedScroll(0, dy);
             break;
           }
         }
@@ -1823,8 +1876,7 @@
           e.preventDefault();
           e.stopPropagation();
           activeId = null;
-          stripEl.classList.remove("is-scrolling");
-          setThumbOffset(0);
+          setSharedScrollVisual(false);
 
           const duration = performance.now() - startAt;
           if (totalMoved < 6 && duration < 240) {
@@ -1832,39 +1884,15 @@
             const relY = rect.height > 0 ? (t.clientY - rect.top) / rect.height : 0.5;
             if (relY < 0.3) {
               triggerHaptic(6);
-              sendPayload({ type: "mouse_scroll", dx: 0, dy: 14 });
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: 11 });
             } else if (relY > 0.7) {
               triggerHaptic(6);
-              sendPayload({ type: "mouse_scroll", dx: 0, dy: -14 });
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: -11 });
             }
             return;
           }
 
-          if (Math.abs(velocityPxMs) > 1.1) {
-            let vFrame = velocityPxMs * 2.6;
-            let inertiaRem = 0;
-            const stepInertia = () => {
-              vFrame *= 0.78;
-              if (Math.abs(vFrame) < 0.5) {
-                inertiaRaf = null;
-                return;
-              }
-              inertiaRem += -vFrame * 0.45;
-              if (Math.abs(inertiaRem) >= 1.8) {
-                const sendY = Math.trunc(inertiaRem);
-                if (sendY !== 0) {
-                  inertiaRem -= sendY;
-                  sendPayload({
-                    type: "mouse_scroll",
-                    dx: 0,
-                    dy: sendY,
-                  });
-                }
-              }
-              inertiaRaf = requestAnimationFrame(stepInertia);
-            };
-            inertiaRaf = requestAnimationFrame(stepInertia);
-          }
+          startUnifiedScrollInertia(velocityPxMs);
           break;
         }
       }
@@ -2004,7 +2032,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.0.8";
+  const BUNDLED_WEB_VERSION = "2.0.9";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();
