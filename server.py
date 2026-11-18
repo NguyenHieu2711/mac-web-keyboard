@@ -39,6 +39,20 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
 IS_MACOS = sys.platform == "darwin"
+
+REMOTE_PC_APP_KEYWORDS = (
+    "microsoft remote desktop",
+    "windows app",
+    "com.microsoft.rdc",
+    "parallels",
+    "vmware",
+    "jump desktop",
+    "anydesk",
+    "teamviewer",
+    "moonlight",
+    "parsec",
+    "royal tsx",
+)
 IS_WINDOWS = sys.platform == "win32"
 
 if IS_WINDOWS:
@@ -539,6 +553,7 @@ class KeyboardInjector:
         self.last_badge: str = ""
         self._use_quartz = False
         self._quartz = None
+        self._objc = None
         self._event_source = None
         self._mouse_x: float = 500.0
         self._mouse_y: float = 500.0
@@ -546,17 +561,28 @@ class KeyboardInjector:
         self._mouse_buttons_down: Set[str] = set()
         self._last_left_click_at: float = 0.0
         self._left_click_count: int = 0
+        self._focused_cache_at: float = 0.0
+        self._focused_is_remote: bool = False
+        self._focused_app_name: str = ""
+        self._ax_sys_wide = None
+        self._ax_focused_attr = None
+        self._ax_lib = None
+        self._cf_lib = None
+        self._proc_lib = None
 
         if IS_MACOS:
             try:
+                import objc  # type: ignore
                 import Quartz  # type: ignore
 
+                self._objc = objc
                 self._quartz = Quartz
                 self._event_source = Quartz.CGEventSourceCreate(
                     Quartz.kCGEventSourceStateHIDSystemState
                 )
                 self._use_quartz = True
                 ensure_macos_abc_input_source()
+                self._init_macos_focus_detector()
                 logger.info(
                     "Đã kích hoạt Quartz CGEvent + Bộ gõ Tiếng Việt Telex chuẩn PC."
                 )
@@ -599,6 +625,136 @@ class KeyboardInjector:
             "alt": Key.alt,
             "ctrl": Key.ctrl,
         }
+
+    # -------------------- Nhận diện cửa sổ Remote PC (Microsoft Remote Desktop / Windows App) --------------------
+    def _init_macos_focus_detector(self) -> None:
+        if not IS_MACOS:
+            return
+        try:
+            import ctypes
+            import ctypes.util
+
+            app_svc_path = ctypes.util.find_library("ApplicationServices")
+            cf_path = ctypes.util.find_library("CoreFoundation")
+            proc_path = ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib"
+            if not app_svc_path or not cf_path:
+                return
+
+            app_svc = ctypes.cdll.LoadLibrary(app_svc_path)
+            cf = ctypes.cdll.LoadLibrary(cf_path)
+            proc = ctypes.cdll.LoadLibrary(proc_path)
+
+            app_svc.AXUIElementCreateSystemWide.restype = ctypes.c_void_p
+            app_svc.AXUIElementCreateSystemWide.argtypes = []
+
+            app_svc.AXUIElementCopyAttributeValue.restype = ctypes.c_int32
+            app_svc.AXUIElementCopyAttributeValue.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+
+            app_svc.AXUIElementGetPid.restype = ctypes.c_int32
+            app_svc.AXUIElementGetPid.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_int32),
+            ]
+
+            cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+            cf.CFStringCreateWithCString.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_char_p,
+                ctypes.c_uint32,
+            ]
+            cf.CFRelease.restype = None
+            cf.CFRelease.argtypes = [ctypes.c_void_p]
+
+            proc.proc_pidpath.restype = ctypes.c_int32
+            proc.proc_pidpath.argtypes = [
+                ctypes.c_int32,
+                ctypes.c_char_p,
+                ctypes.c_uint32,
+            ]
+
+            self._ax_sys_wide = app_svc.AXUIElementCreateSystemWide()
+            self._ax_focused_attr = cf.CFStringCreateWithCString(
+                None, b"AXFocusedApplication", 0x08000100
+            )
+            self._ax_lib = app_svc
+            self._cf_lib = cf
+            self._proc_lib = proc
+        except Exception as exc:
+            logger.debug("Focus detector init fallback: %s", exc)
+
+    def detect_focused_app_info(self, force: bool = False) -> Tuple[bool, str]:
+        if not IS_MACOS:
+            return (False, sys.platform)
+        now = time.monotonic()
+        if not force and (now - self._focused_cache_at) < 0.12:
+            return (self._focused_is_remote, self._focused_app_name)
+
+        app_label = ""
+        try:
+            if (
+                self._ax_lib is not None
+                and self._cf_lib is not None
+                and self._proc_lib is not None
+                and self._ax_sys_wide
+                and self._ax_focused_attr
+            ):
+                import ctypes
+
+                app_ref = ctypes.c_void_p()
+                err = self._ax_lib.AXUIElementCopyAttributeValue(
+                    self._ax_sys_wide, self._ax_focused_attr, ctypes.byref(app_ref)
+                )
+                if err == 0 and app_ref.value:
+                    try:
+                        pid = ctypes.c_int32(0)
+                        if (
+                            self._ax_lib.AXUIElementGetPid(
+                                app_ref.value, ctypes.byref(pid)
+                            )
+                            == 0
+                            and pid.value > 0
+                        ):
+                            buf = ctypes.create_string_buffer(4096)
+                            n = self._proc_lib.proc_pidpath(pid.value, buf, 4096)
+                            if n > 0:
+                                app_label = buf.value.decode("utf-8", errors="ignore")
+                    finally:
+                        self._cf_lib.CFRelease(app_ref.value)
+        except Exception:
+            pass
+
+        if not app_label and self._quartz is not None and self._objc is not None:
+            try:
+                q = self._quartz
+                with self._objc.autorelease_pool():
+                    win_list = q.CGWindowListCopyWindowInfo(
+                        q.kCGWindowListOptionOnScreenOnly
+                        | q.kCGWindowListExcludeDesktopElements,
+                        q.kCGNullWindowID,
+                    )
+                    if win_list:
+                        for w in win_list:
+                            if int(w.get("kCGWindowLayer", -1)) == 0:
+                                owner = str(w.get("kCGWindowOwnerName", "") or "")
+                                if owner:
+                                    app_label = owner
+                                    break
+            except Exception:
+                pass
+
+        lower_lbl = app_label.lower()
+        is_remote = any(kw in lower_lbl for kw in REMOTE_PC_APP_KEYWORDS)
+        self._focused_cache_at = now
+        self._focused_is_remote = is_remote
+        self._focused_app_name = app_label
+        return (is_remote, app_label)
+
+    def is_remote_pc_focused(self) -> bool:
+        return self.detect_focused_app_info(force=False)[0]
 
     # -------------------- Quartz Native macOS Path --------------------
     def _compute_quartz_flags(self, extra_mods: Set[str] | None = None) -> int:
@@ -716,6 +872,8 @@ class KeyboardInjector:
             return
         if norm in ("cmd", "shift", "alt", "ctrl"):
             self.held_modifiers.discard(norm)
+            if norm in ("cmd", "alt"):
+                self._focused_cache_at = 0.0
 
         if self._use_quartz and norm in MAC_VK_MAP:
             self._quartz_post_vk(MAC_VK_MAP[norm], False)
@@ -733,6 +891,9 @@ class KeyboardInjector:
         if self.kb_layout not in ("win", "pad") or "ctrl" not in self.held_modifiers:
             return False
         if "cmd" in self.held_modifiers or "alt" in self.held_modifiers:
+            return False
+        # Khi đang gõ trực tiếp trong Microsoft Remote Desktop / Windows App, giữ nguyên Ctrl gốc chuẩn Windows PC
+        if self.is_remote_pc_focused():
             return False
 
         self._commit_telex_word_to_preview()
@@ -874,6 +1035,13 @@ class KeyboardInjector:
             is_upper = (auto_shift or ("shift" in self.held_modifiers)) != self.caps_locked
             char_in = norm.upper() if is_upper else norm
             old_w, new_w = self.telex.process_char(char_in)
+
+            # Đồng nhất bộ gõ VN giữa Mac và Microsoft Remote Desktop / Windows App:
+            # Khi cửa sổ đang active là Remote PC, truyền thẳng mã phím phần cứng nguyên bản (như ENG)
+            # để UniKey/EVKey trên Windows PC ghép dấu mượt 100%, không bị xung đột hay nuốt chữ Unicode.
+            if self.is_remote_pc_focused():
+                self._send_raw_vk(norm, auto_shift)
+                return
 
             # Tìm tiền tố chung dài nhất giữa từ cũ trên màn hình và từ mới sau khi ghép dấu
             common_len = 0
@@ -1126,6 +1294,7 @@ class KeyboardInjector:
 
     def mouse_down(self, button: str = "left") -> None:
         self.last_activity_at = time.monotonic()
+        self._focused_cache_at = 0.0
         self._commit_telex_word_to_preview()
         self.telex.reset()
         if not self._use_quartz:
@@ -1192,6 +1361,7 @@ class KeyboardInjector:
 
     def mouse_click(self, button: str = "left", count: int = 1) -> None:
         self.last_activity_at = time.monotonic()
+        self._focused_cache_at = 0.0
         self._commit_telex_word_to_preview()
         self.telex.reset()
         if not self._use_quartz:
@@ -1522,15 +1692,18 @@ async def health() -> dict:
 
     real_py = str(Path(sys.executable).resolve())
     py_app = real_py.split("/Python.app/")[0] + "/Python.app" if "/Python.app/" in real_py else real_py
+    is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "1.9.7",
+        "version": "1.9.8",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
         "kb_layout": injector.kb_layout,
         "lens_available": lens_capturer.available,
         "screen_recording_ok": check_macos_screen_recording(prompt=False),
+        "remote_pc_focused": is_rem,
+        "focused_app": Path(foc_app).name if "/" in foc_app else foc_app,
         "python_app": py_app,
     }
 
