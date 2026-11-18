@@ -1414,15 +1414,40 @@ async def download_apk() -> FileResponse:
 
 @app.get("/health")
 async def health() -> dict:
+    real_py = str(Path(sys.executable).resolve())
+    py_app = real_py.split("/Python.app/")[0] + "/Python.app" if "/Python.app/" in real_py else real_py
     return {
         "ok": True,
-        "version": "1.9.2",
+        "version": "1.9.3",
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
         "kb_layout": injector.kb_layout,
         "lens_available": lens_capturer.available,
         "screen_recording_ok": check_macos_screen_recording(prompt=False),
+        "python_app": py_app,
     }
+
+
+@app.post("/open-screen-perm")
+@app.get("/open-screen-perm")
+async def open_screen_perm() -> dict:
+    if not IS_MACOS:
+        return {"ok": False}
+    real_py = str(Path(sys.executable).resolve())
+    py_app = real_py.split("/Python.app/")[0] + "/Python.app" if "/Python.app/" in real_py else real_py
+    check_macos_screen_recording(prompt=True)
+    subprocess.Popen(
+        ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if Path(py_app).exists():
+        subprocess.Popen(
+            ["open", "-R", py_app],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return {"ok": True, "python_app": py_app}
 
 
 @app.websocket("/ws")
