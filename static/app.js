@@ -1430,22 +1430,34 @@
     });
   }
 
-  function applyPointerAcceleration(dx, dy) {
-    const dist = Math.hypot(dx, dy);
-    const baseGain = Math.min(5.2, 1.35 + dist * 0.11);
-    const gain = baseGain * trackpadSpeed;
-    return {
-      dx: dx * gain,
-      dy: dy * gain,
-    };
+  // Đường cong gia tốc Sigmoid 3 vùng chuẩn libinput / Apple Magic Trackpad:
+  // - Vùng chậm (< 0.18 px/ms): ghìm đằm ~0.65x-1.0x + tích lũy sub-pixel để ngắm trúng nút/thẻ nhỏ không trượt lố
+  // - Vùng vừa (0.20 - 0.55 px/ms): tăng mượt chữ S dễ đoán điểm dừng
+  // - Vùng vẩy nhanh (> 0.65 px/ms): bung gia tốc cao để 1 cú gạt đi hết màn hình lớn
+  // - Phanh bất đối xứng (Asymmetric Braking): khi ngón tay giảm tốc để dừng vào thẻ nhỏ, cắt gia tốc ngay lập tức
+  function computeSigmoidGain(smoothedVelPxMs) {
+    const speedNorm = trackpadSpeed / 1.6;
+    const minPrecisionGain = 0.62 * Math.sqrt(speedNorm);
+    const maxFlickGain = 6.2 * speedNorm;
+    const sigmoid = 1 / (1 + Math.exp(-7.4 * (smoothedVelPxMs - 0.5)));
+    return minPrecisionGain + (maxFlickGain - minPrecisionGain) * sigmoid;
   }
 
   function bindTrackpadSurface(surface) {
     if (!surface) return;
     const tpTouches = new Map();
     let tpGestureStartAt = 0;
+    let tpPrevMoveAt = 0;
+    let tpSmoothedVel = 0;
     let tpMaxTouches = 0;
     let tpTotalMoved = 0;
+    let tpAnchorDx = 0;
+    let tpAnchorDy = 0;
+    let tpMoveUnlocked = false;
+    let tpRemX = 0;
+    let tpRemY = 0;
+    let tpScrollRemX = 0;
+    let tpScrollRemY = 0;
     let tpLastTapAt = 0;
     let tpIsTapDragging = false;
 
@@ -1464,10 +1476,20 @@
         const now = performance.now();
         if (tpTouches.size === 0) {
           tpGestureStartAt = now;
+          tpPrevMoveAt = now;
+          tpSmoothedVel = 0;
           tpMaxTouches = 0;
           tpTotalMoved = 0;
+          tpAnchorDx = 0;
+          tpAnchorDy = 0;
+          tpMoveUnlocked = false;
+          tpRemX = 0;
+          tpRemY = 0;
+          tpScrollRemX = 0;
+          tpScrollRemY = 0;
           if (now - tpLastTapAt < 260 && e.touches.length === 1) {
             tpIsTapDragging = true;
+            tpMoveUnlocked = true;
             sendPayload({ type: "mouse_down", button: "left" });
             triggerHaptic(8);
           }
@@ -1510,22 +1532,64 @@
         }
 
         if (movedCount === 0) return;
+        const now = performance.now();
+        const dt = Math.max(4, Math.min(60, now - tpPrevMoveAt));
+        tpPrevMoveAt = now;
+
         const dx = sumDx / movedCount;
         const dy = sumDy / movedCount;
-        tpTotalMoved += Math.hypot(dx, dy);
+        const stepDist = Math.hypot(dx, dy);
+        tpTotalMoved += stepDist;
 
         if (tpTouches.size >= 2) {
-          sendPayload({
-            type: "mouse_scroll",
-            dx: -dx * 2.2,
-            dy: -dy * 2.2,
-          });
+          tpMoveUnlocked = true;
+          tpScrollRemX += -dx * 0.85;
+          tpScrollRemY += -dy * 0.85;
+          const sendSx = Math.trunc(tpScrollRemX);
+          const sendSy = Math.trunc(tpScrollRemY);
+          if (sendSx !== 0 || sendSy !== 0) {
+            tpScrollRemX -= sendSx;
+            tpScrollRemY -= sendSy;
+            sendPayload({
+              type: "mouse_scroll",
+              dx: sendSx,
+              dy: sendSy,
+            });
+          }
+          return;
+        }
+
+        // Khóa chống tọt trượt khi chạm bấm (Tap-Anchor Deadzone 2.8px):
+        // Giữ yên tâm chuột khi thịt đầu ngón tay bè ra lúc chạm Click vào thẻ nhỏ
+        if (!tpMoveUnlocked) {
+          tpAnchorDx += dx;
+          tpAnchorDy += dy;
+          if (Math.hypot(tpAnchorDx, tpAnchorDy) < 2.8 && now - tpGestureStartAt < 160) {
+            return;
+          }
+          tpMoveUnlocked = true;
+        }
+
+        const vInst = stepDist / dt;
+        if (vInst < tpSmoothedVel) {
+          tpSmoothedVel = tpSmoothedVel * 0.25 + vInst * 0.75;
         } else {
-          const accel = applyPointerAcceleration(dx, dy);
+          tpSmoothedVel = tpSmoothedVel * 0.6 + vInst * 0.4;
+        }
+
+        const gain = computeSigmoidGain(tpSmoothedVel);
+        tpRemX += dx * gain;
+        tpRemY += dy * gain;
+
+        if (Math.hypot(tpRemX, tpRemY) >= 0.25) {
+          const outX = Math.round(tpRemX * 100) / 100;
+          const outY = Math.round(tpRemY * 100) / 100;
+          tpRemX -= outX;
+          tpRemY -= outY;
           sendPayload({
             type: "mouse_move",
-            dx: accel.dx,
-            dy: accel.dy,
+            dx: outX,
+            dy: outY,
           });
         }
       },
@@ -1583,6 +1647,7 @@
     let prevAt = 0;
     let totalMoved = 0;
     let thumbOffset = 0;
+    let scrollRemY = 0;
     let velocityPxMs = 0;
     let inertiaRaf = null;
 
@@ -1602,13 +1667,18 @@
     }
 
     function emitScrollStep(deltaY) {
-      if (Math.abs(deltaY) < 0.2) return;
-      const gain = Math.min(4.2, 2.35 + Math.abs(deltaY) * 0.06);
-      sendPayload({
-        type: "mouse_scroll",
-        dx: 0,
-        dy: -deltaY * gain,
-      });
+      if (Math.abs(deltaY) < 0.1) return;
+      const gain = Math.min(1.25, 0.68 + Math.abs(deltaY) * 0.02);
+      scrollRemY += -deltaY * gain;
+      const sendY = Math.trunc(scrollRemY);
+      if (sendY !== 0) {
+        scrollRemY -= sendY;
+        sendPayload({
+          type: "mouse_scroll",
+          dx: 0,
+          dy: sendY,
+        });
+      }
     }
 
     stripEl.addEventListener(
@@ -1629,6 +1699,7 @@
         prevAt = startAt;
         prevY = t.clientY;
         totalMoved = 0;
+        scrollRemY = 0;
         velocityPxMs = 0;
         stripEl.classList.add("is-scrolling");
       },
@@ -1650,8 +1721,8 @@
             prevY = t.clientY;
             prevAt = now;
             totalMoved += Math.abs(dy);
-            velocityPxMs = velocityPxMs * 0.45 + (dy / dt) * 0.55;
-            setThumbOffset(thumbOffset + dy * 0.55);
+            velocityPxMs = velocityPxMs * 0.5 + (dy / dt) * 0.5;
+            setThumbOffset(thumbOffset + dy * 0.45);
             emitScrollStep(dy);
             break;
           }
@@ -1677,27 +1748,33 @@
             const relY = rect.height > 0 ? (t.clientY - rect.top) / rect.height : 0.5;
             if (relY < 0.3) {
               triggerHaptic(6);
-              sendPayload({ type: "mouse_scroll", dx: 0, dy: 68 });
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: 24 });
             } else if (relY > 0.7) {
               triggerHaptic(6);
-              sendPayload({ type: "mouse_scroll", dx: 0, dy: -68 });
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: -24 });
             }
             return;
           }
 
-          if (Math.abs(velocityPxMs) > 0.42) {
-            let vFrame = velocityPxMs * 15;
+          if (Math.abs(velocityPxMs) > 0.65) {
+            let vFrame = velocityPxMs * 6.0;
+            let inertiaRem = 0;
             const stepInertia = () => {
-              vFrame *= 0.89;
-              if (Math.abs(vFrame) < 0.9) {
+              vFrame *= 0.85;
+              if (Math.abs(vFrame) < 0.6) {
                 inertiaRaf = null;
                 return;
               }
-              sendPayload({
-                type: "mouse_scroll",
-                dx: 0,
-                dy: -vFrame * 2.3,
-              });
+              inertiaRem += -vFrame * 0.85;
+              const sendY = Math.trunc(inertiaRem);
+              if (sendY !== 0) {
+                inertiaRem -= sendY;
+                sendPayload({
+                  type: "mouse_scroll",
+                  dx: 0,
+                  dy: sendY,
+                });
+              }
               inertiaRaf = requestAnimationFrame(stepInertia);
             };
             inertiaRaf = requestAnimationFrame(stepInertia);
