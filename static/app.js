@@ -33,6 +33,32 @@
   const STORAGE_HOST_KEY = "mac_kb_server_host";
   const STORAGE_LAYOUT_KEY = "mac_kb_layout_mode";
   const STORAGE_VN_KEY = "mac_kb_vn_mode";
+  const STORAGE_LENS_SCALE_KEY = "mac_kb_lens_scale";
+  const STORAGE_LENS_ON_KEY = "mac_kb_lens_enabled";
+
+  const padLensCanvas = document.getElementById("pad-lens-canvas");
+  const kbLensCanvas = document.getElementById("kb-lens-canvas");
+  const kbRibbonLens = document.getElementById("kb-ribbon-lens");
+  const fovLabels = Array.from(document.querySelectorAll(".js-fov-label"));
+  const fovOutBtns = Array.from(document.querySelectorAll(".js-fov-out"));
+  const fovInBtns = Array.from(document.querySelectorAll(".js-fov-in"));
+  const lensToggleBtns = Array.from(document.querySelectorAll(".js-lens-toggle"));
+
+  // Mặc định 1.22 (~0.8x): thu nhỏ nội dung vừa phải để nhìn rộng bao quát quanh trung tâm con chuột
+  let lensFovScale = 1.22;
+  let lensEnabled = true;
+  try {
+    const savedScale = parseFloat(localStorage.getItem(STORAGE_LENS_SCALE_KEY) || "1.22");
+    if (!Number.isNaN(savedScale) && savedScale >= 0.55 && savedScale <= 1.85) {
+      lensFovScale = savedScale;
+    }
+    const savedOn = localStorage.getItem(STORAGE_LENS_ON_KEY);
+    if (savedOn === "0") {
+      lensEnabled = false;
+    }
+  } catch {
+    // ignore
+  }
 
   const APPLE_SVG =
     '<svg class="apple-ico" viewBox="0 0 384 512" aria-hidden="true"><path fill="currentColor" d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>';
@@ -101,12 +127,42 @@
     applyOrientationForLayout();
   }
 
+  function syncLensControlsUI() {
+    document.body.classList.toggle("is-lens-off", !lensEnabled);
+    const zoomRatio = (1 / lensFovScale).toFixed(1) + "x";
+    fovLabels.forEach((el) => {
+      el.textContent = zoomRatio;
+    });
+  }
+
+  function pushLensConfigToServer() {
+    const activeSurface =
+      kbLayout === "pad"
+        ? document.getElementById("trackpad-surface")
+        : kbRibbonLens;
+    let aspect = kbLayout === "pad" ? 1.85 : 11.0;
+    if (activeSurface) {
+      const r = activeSurface.getBoundingClientRect();
+      if (r.width > 40 && r.height > 20) {
+        aspect = +(r.width / r.height).toFixed(2);
+      }
+    }
+    sendPayload({
+      type: "lens_config",
+      enabled: lensEnabled,
+      aspect,
+      scale: +lensFovScale.toFixed(2),
+      mode: kbLayout === "pad" ? "portrait" : "landscape",
+    });
+  }
+
   function pushConfigToServer() {
     sendPayload({
       type: "config",
       layout: kbLayout,
       vn: vnEnabled,
     });
+    setTimeout(pushLensConfigToServer, 60);
   }
 
   function toggleModeMenu() {
@@ -305,11 +361,131 @@
       dot.classList.toggle("is-online", online);
       dot.classList.toggle("is-offline", !online);
     });
+    if (!online) {
+      const tp = document.getElementById("trackpad-surface");
+      if (tp) tp.classList.remove("has-stream");
+      if (kbRibbonLens) kbRibbonLens.classList.remove("has-stream");
+    }
   }
 
   function sendPayload(obj) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(obj));
+    }
+  }
+
+  // Giải mã khung hình nhị phân LENS & vẽ khoanh vùng trung tâm con chuột sắc nét
+  let isDecodingLens = false;
+  let queuedLensBuffer = null;
+
+  function drawCenteredCursorMarker(ctx, cw, ch, relMx, relMy, isRibbon) {
+    const dpr = Math.min(2.2, window.devicePixelRatio || 1);
+    const px = relMx * cw;
+    const py = relMy * ch;
+
+    ctx.save();
+
+    // Vòng khoanh vùng trung tâm con chuột (Focus Reticle)
+    const radius = (isRibbon ? 12 : 19) * dpr;
+    ctx.beginPath();
+    ctx.arc(px, py, radius, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(56, 189, 248, 0.12)";
+    ctx.fill();
+    ctx.lineWidth = 1.45 * dpr;
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.88)";
+    ctx.stroke();
+
+    // 4 vạch chia ngắm tâm con chuột
+    const tIn = radius - 3 * dpr;
+    const tOut = radius + 3.5 * dpr;
+    ctx.beginPath();
+    ctx.moveTo(px - tOut, py);
+    ctx.lineTo(px - tIn, py);
+    ctx.moveTo(px + tIn, py);
+    ctx.lineTo(px + tOut, py);
+    ctx.moveTo(px, py - tOut);
+    ctx.lineTo(px, py - tIn);
+    ctx.moveTo(px, py + tIn);
+    ctx.lineTo(px, py + tOut);
+    ctx.lineWidth = 1.2 * dpr;
+    ctx.stroke();
+
+    // Mũi tên con trỏ chuột sắc nét tại đúng điểm (px, py)
+    const s = (isRibbon ? 0.82 : 1.05) * dpr;
+    ctx.translate(px, py);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(0, 14.5 * s);
+    ctx.lineTo(4.0 * s, 11.0 * s);
+    ctx.lineTo(6.9 * s, 16.8 * s);
+    ctx.lineTo(9.2 * s, 15.6 * s);
+    ctx.lineTo(6.3 * s, 9.8 * s);
+    ctx.lineTo(11.0 * s, 9.8 * s);
+    ctx.closePath();
+
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 2.0 * s;
+    ctx.strokeStyle = "rgba(9, 12, 18, 0.94)";
+    ctx.stroke();
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  async function processLensPacket(buffer) {
+    if (!lensEnabled || buffer.byteLength <= 12) return;
+    const view = new DataView(buffer);
+    if (view.getUint32(0, false) !== 0x4c454e53) return;
+
+    if (isDecodingLens) {
+      queuedLensBuffer = buffer;
+      return;
+    }
+    isDecodingLens = true;
+
+    try {
+      const isPad = kbLayout === "pad";
+      const targetCanvas = isPad ? padLensCanvas : kbLensCanvas;
+      const targetHostEl = isPad
+        ? document.getElementById("trackpad-surface")
+        : kbRibbonLens;
+      if (!targetCanvas || !targetHostEl) return;
+
+      const relMx = view.getUint16(4, false) / 10000;
+      const relMy = view.getUint16(6, false) / 10000;
+      const jpegSlice = new Uint8Array(buffer, 12);
+      const blob = new Blob([jpegSlice], { type: "image/jpeg" });
+      const bitmap = await createImageBitmap(blob);
+
+      const rect = targetHostEl.getBoundingClientRect();
+      const dpr = Math.min(2.2, window.devicePixelRatio || 1);
+      const cw = Math.max(80, Math.round(rect.width * dpr));
+      const ch = Math.max(36, Math.round(rect.height * dpr));
+      if (targetCanvas.width !== cw || targetCanvas.height !== ch) {
+        targetCanvas.width = cw;
+        targetCanvas.height = ch;
+      }
+
+      const ctx = targetCanvas.getContext("2d", { alpha: false });
+      if (ctx) {
+        ctx.drawImage(bitmap, 0, 0, cw, ch);
+        drawCenteredCursorMarker(ctx, cw, ch, relMx, relMy, !isPad);
+      }
+      bitmap.close();
+
+      if (!targetHostEl.classList.contains("has-stream")) {
+        targetHostEl.classList.add("has-stream");
+      }
+    } catch {
+      // ignore corrupted frame
+    } finally {
+      isDecodingLens = false;
+      if (queuedLensBuffer) {
+        const next = queuedLensBuffer;
+        queuedLensBuffer = null;
+        void processLensPacket(next);
+      }
     }
   }
 
@@ -347,6 +523,7 @@
 
     try {
       ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";
     } catch {
       scheduleReconnect();
       return;
@@ -360,6 +537,12 @@
       pingInterval = setInterval(() => {
         sendPayload({ type: "ping" });
       }, 15000);
+    });
+
+    ws.addEventListener("message", (ev) => {
+      if (ev.data instanceof ArrayBuffer) {
+        void processLensPacket(ev.data);
+      }
     });
 
     ws.addEventListener("close", () => {
@@ -877,15 +1060,61 @@
   }
 
   // ============================================================================
-  // 6. BỘ XỬ LÝ MAGIC TRACKPAD ĐA ĐIỂM
+  // 6. BỘ XỬ LÝ MAGIC TRACKPAD ĐA ĐIỂM + ĐIỀU KHIỂN ZOOM KÍNH SOI TÂM CHUỘT
   // ============================================================================
-  const trackpad = document.getElementById("trackpad-surface");
-  const tpTouches = new Map();
-  let tpGestureStartAt = 0;
-  let tpMaxTouches = 0;
-  let tpTotalMoved = 0;
-  let tpLastTapAt = 0;
-  let tpIsTapDragging = false;
+  function updateLensFov(delta, resetDefault = false) {
+    triggerHaptic(8);
+    if (resetDefault) {
+      lensFovScale = 1.22;
+    } else {
+      lensFovScale = Math.max(0.55, Math.min(1.85, +(lensFovScale + delta).toFixed(2)));
+    }
+    try {
+      localStorage.setItem(STORAGE_LENS_SCALE_KEY, String(lensFovScale));
+    } catch {
+      // ignore
+    }
+    syncLensControlsUI();
+    pushLensConfigToServer();
+  }
+
+  fovOutBtns.forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      updateLensFov(0.18, false);
+    });
+  });
+
+  fovInBtns.forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      updateLensFov(-0.18, false);
+    });
+  });
+
+  fovLabels.forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      updateLensFov(0, true);
+    });
+  });
+
+  lensToggleBtns.forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      triggerHaptic(10);
+      lensEnabled = !lensEnabled;
+      try {
+        localStorage.setItem(STORAGE_LENS_ON_KEY, lensEnabled ? "1" : "0");
+      } catch {
+        // ignore
+      }
+      syncLensControlsUI();
+      pushLensConfigToServer();
+    });
+  });
+
+  syncLensControlsUI();
 
   function applyPointerAcceleration(dx, dy) {
     const dist = Math.hypot(dx, dy);
@@ -896,10 +1125,21 @@
     };
   }
 
-  if (trackpad) {
-    trackpad.addEventListener(
+  function bindTrackpadSurface(surface) {
+    if (!surface) return;
+    const tpTouches = new Map();
+    let tpGestureStartAt = 0;
+    let tpMaxTouches = 0;
+    let tpTotalMoved = 0;
+    let tpLastTapAt = 0;
+    let tpIsTapDragging = false;
+
+    surface.addEventListener(
       "touchstart",
       (e) => {
+        if (e.target.closest(".lens-hud-right")) {
+          return;
+        }
         e.preventDefault();
         e.stopPropagation();
         closeModeMenu();
@@ -926,17 +1166,17 @@
           });
         }
         tpMaxTouches = Math.max(tpMaxTouches, tpTouches.size);
-        trackpad.classList.add("is-touching");
+        surface.classList.add("is-touching");
       },
       { passive: false }
     );
 
-    trackpad.addEventListener(
+    surface.addEventListener(
       "touchmove",
       (e) => {
+        if (tpTouches.size === 0) return;
         e.preventDefault();
         e.stopPropagation();
-        if (tpTouches.size === 0) return;
 
         let sumDx = 0;
         let sumDy = 0;
@@ -978,6 +1218,7 @@
     );
 
     const handleTrackpadTouchEnd = (e) => {
+      if (tpTouches.size === 0) return;
       e.preventDefault();
       e.stopPropagation();
       for (let i = 0; i < e.changedTouches.length; i += 1) {
@@ -985,7 +1226,7 @@
       }
 
       if (tpTouches.size === 0) {
-        trackpad.classList.remove("is-touching");
+        surface.classList.remove("is-touching");
         const duration = performance.now() - tpGestureStartAt;
 
         if (tpIsTapDragging) {
@@ -1010,12 +1251,26 @@
       }
     };
 
-    trackpad.addEventListener("touchend", handleTrackpadTouchEnd, {
+    surface.addEventListener("touchend", handleTrackpadTouchEnd, {
       passive: false,
     });
-    trackpad.addEventListener("touchcancel", handleTrackpadTouchEnd, {
+    surface.addEventListener("touchcancel", handleTrackpadTouchEnd, {
       passive: false,
     });
+  }
+
+  bindTrackpadSurface(document.getElementById("trackpad-surface"));
+  bindTrackpadSurface(kbRibbonLens);
+
+  if (typeof ResizeObserver !== "undefined") {
+    let roTimer = null;
+    const ro = new ResizeObserver(() => {
+      if (roTimer) clearTimeout(roTimer);
+      roTimer = setTimeout(pushLensConfigToServer, 80);
+    });
+    const tpEl = document.getElementById("trackpad-surface");
+    if (tpEl) ro.observe(tpEl);
+    if (kbRibbonLens) ro.observe(kbRibbonLens);
   }
 
   // ============================================================================
@@ -1029,6 +1284,7 @@
       (e) => {
         if (
           e.target.closest("#trackpad-surface") ||
+          e.target.closest("#kb-ribbon-lens") ||
           e.target.closest("#sym-floating-popup") ||
           e.target.closest(".js-mode-menu") ||
           e.target.closest("#btn-joy-arrow")
@@ -1056,6 +1312,7 @@
       (e) => {
         if (
           e.target.closest("#trackpad-surface") ||
+          e.target.closest("#kb-ribbon-lens") ||
           e.target.closest("#sym-floating-popup") ||
           e.target.closest(".js-mode-menu") ||
           e.target.closest("#btn-joy-arrow")
@@ -1075,6 +1332,7 @@
       (e) => {
         if (
           e.target.closest("#trackpad-surface") ||
+          e.target.closest("#kb-ribbon-lens") ||
           e.target.closest("#sym-floating-popup") ||
           e.target.closest(".js-mode-menu") ||
           e.target.closest("#btn-joy-arrow")
@@ -1093,6 +1351,7 @@
       if (e.button !== 0) return;
       if (
         e.target.closest("#trackpad-surface") ||
+        e.target.closest("#kb-ribbon-lens") ||
         e.target.closest("#sym-floating-popup") ||
         e.target.closest(".js-mode-menu") ||
         e.target.closest("#btn-joy-arrow")
@@ -1124,7 +1383,7 @@
   // ============================================================================
   // 8. KIỂM TRA BẮT BUỘC CẬP NHẬT NGAY KHI BẤM MỞ APP (MANDATORY UPDATE GATE)
   // ============================================================================
-  const CURRENT_APP_VERSION = "1.8.4";
+  const CURRENT_APP_VERSION = "1.9.0";
   const updateModal = document.getElementById("mandatory-update-modal");
   const updateTitle = document.getElementById("update-title");
   const updateDesc = document.getElementById("update-desc");

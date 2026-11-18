@@ -8,9 +8,14 @@ Lắng nghe tại 0.0.0.0:5050, phục vụ giao diện PWA / Android WebView v�
 
 from __future__ import annotations
 
+import asyncio
+import ctypes
+import ctypes.util
+import io
 import json
 import logging
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -34,6 +39,16 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
 IS_MACOS = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+
+if IS_WINDOWS:
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 # ============================================================================
 # BẢNG MÃ PHÍM VẬT LÝ CHUẨN APPLE VIRTUAL KEYCODE (macOS HIToolbox Events.h)
@@ -549,8 +564,12 @@ class KeyboardInjector:
                 )
 
         from pynput.keyboard import Controller, Key, KeyCode
+        from pynput.mouse import Button as MouseButton, Controller as MouseController
 
         self._kb = Controller()
+        self._pynput_mouse = MouseController()
+        self._MouseButton = MouseButton
+        self.last_activity_at: float = time.monotonic()
         self._Key = Key
         self._KeyCode = KeyCode
         self._pynput_special = {
@@ -759,6 +778,7 @@ class KeyboardInjector:
             )
 
     def press_key(self, raw_key: str) -> None:
+        self.last_activity_at = time.monotonic()
         norm, auto_shift = self.normalize_key(raw_key)
         if not norm:
             return
@@ -857,6 +877,7 @@ class KeyboardInjector:
     def press_combo(self, keys: List[str]) -> None:
         if not keys:
             return
+        self.last_activity_at = time.monotonic()
         self.telex.reset()
         mods: List[str] = []
         normals: List[str] = []
@@ -927,31 +948,67 @@ class KeyboardInjector:
                 pass
 
     # -------------------- Mouse & Trackpad Control --------------------
-    def _sync_mouse_pos_if_needed(self) -> None:
-        if not self._use_quartz:
-            return
-        now = time.monotonic()
-        if now - self._last_mouse_sync > 0.12:
+    def get_current_mouse_pos(self) -> Tuple[float, float]:
+        if self._use_quartz:
             try:
                 q = self._quartz
                 loc = q.CGEventGetLocation(q.CGEventCreate(None))
-                self._mouse_x = float(loc.x)
-                self._mouse_y = float(loc.y)
+                return (float(loc.x), float(loc.y))
             except Exception:
-                pass
+                return (self._mouse_x, self._mouse_y)
+        try:
+            pos = self._pynput_mouse.position
+            return (float(pos[0]), float(pos[1]))
+        except Exception:
+            return (self._mouse_x, self._mouse_y)
+
+    def _sync_mouse_pos_if_needed(self) -> None:
+        now = time.monotonic()
+        if now - self._last_mouse_sync > 0.12:
+            mx, my = self.get_current_mouse_pos()
+            self._mouse_x = mx
+            self._mouse_y = my
         self._last_mouse_sync = now
 
     def mouse_move(self, dx: float, dy: float) -> None:
+        self.last_activity_at = time.monotonic()
         if not self._use_quartz:
+            try:
+                mx, my = self.get_current_mouse_pos()
+                self._pynput_mouse.position = (int(round(mx + dx)), int(round(my + dy)))
+                self._mouse_x, self._mouse_y = self.get_current_mouse_pos()
+            except Exception:
+                pass
             return
         q = self._quartz
         self._sync_mouse_pos_if_needed()
-        main_id = q.CGMainDisplayID()
-        max_w = float(q.CGDisplayPixelsWide(main_id))
-        max_h = float(q.CGDisplayPixelsHigh(main_id))
+        # Hỗ trợ đa màn hình trên macOS (không kẹp cứng vào màn chính nếu có màn phụ)
+        try:
+            err, active_ids, count = q.CGGetActiveDisplayList(8, None, None)
+            if err == 0 and count > 1:
+                min_x = min(float(q.CGDisplayBounds(d).origin.x) for d in active_ids[:count])
+                min_y = min(float(q.CGDisplayBounds(d).origin.y) for d in active_ids[:count])
+                max_x = max(
+                    float(q.CGDisplayBounds(d).origin.x + q.CGDisplayBounds(d).size.width)
+                    for d in active_ids[:count]
+                )
+                max_y = max(
+                    float(q.CGDisplayBounds(d).origin.y + q.CGDisplayBounds(d).size.height)
+                    for d in active_ids[:count]
+                )
+            else:
+                main_id = q.CGMainDisplayID()
+                min_x, min_y = 0.0, 0.0
+                max_x = float(q.CGDisplayPixelsWide(main_id))
+                max_y = float(q.CGDisplayPixelsHigh(main_id))
+        except Exception:
+            main_id = q.CGMainDisplayID()
+            min_x, min_y = 0.0, 0.0
+            max_x = float(q.CGDisplayPixelsWide(main_id))
+            max_y = float(q.CGDisplayPixelsHigh(main_id))
 
-        self._mouse_x = max(0.0, min(max_w - 1.0, self._mouse_x + dx))
-        self._mouse_y = max(0.0, min(max_h - 1.0, self._mouse_y + dy))
+        self._mouse_x = max(min_x, min(max_x - 1.0, self._mouse_x + dx))
+        self._mouse_y = max(min_y, min(max_y - 1.0, self._mouse_y + dy))
 
         if "left" in self._mouse_buttons_down:
             ev_type = q.kCGEventLeftMouseDragged
@@ -971,8 +1028,15 @@ class KeyboardInjector:
         q.CGEventPost(q.kCGHIDEventTap, ev)
 
     def mouse_down(self, button: str = "left") -> None:
+        self.last_activity_at = time.monotonic()
         self.telex.reset()
         if not self._use_quartz:
+            try:
+                btn_obj = self._MouseButton.right if button == "right" else self._MouseButton.left
+                self._mouse_buttons_down.add(button)
+                self._pynput_mouse.press(btn_obj)
+            except Exception:
+                pass
             return
         q = self._quartz
         self._sync_mouse_pos_if_needed()
@@ -1000,7 +1064,14 @@ class KeyboardInjector:
         q.CGEventPost(q.kCGHIDEventTap, ev)
 
     def mouse_up(self, button: str = "left") -> None:
+        self.last_activity_at = time.monotonic()
         if not self._use_quartz:
+            try:
+                btn_obj = self._MouseButton.right if button == "right" else self._MouseButton.left
+                self._mouse_buttons_down.discard(button)
+                self._pynput_mouse.release(btn_obj)
+            except Exception:
+                pass
             return
         q = self._quartz
         self._sync_mouse_pos_if_needed()
@@ -1022,8 +1093,14 @@ class KeyboardInjector:
         q.CGEventPost(q.kCGHIDEventTap, ev)
 
     def mouse_click(self, button: str = "left", count: int = 1) -> None:
+        self.last_activity_at = time.monotonic()
         self.telex.reset()
         if not self._use_quartz:
+            try:
+                btn_obj = self._MouseButton.right if button == "right" else self._MouseButton.left
+                self._pynput_mouse.click(btn_obj, max(1, count))
+            except Exception:
+                pass
             return
         q = self._quartz
         self._sync_mouse_pos_if_needed()
@@ -1060,7 +1137,12 @@ class KeyboardInjector:
         q.CGEventPost(q.kCGHIDEventTap, ev_u)
 
     def mouse_scroll(self, dx: float, dy: float) -> None:
+        self.last_activity_at = time.monotonic()
         if not self._use_quartz:
+            try:
+                self._pynput_mouse.scroll(dx / 36.0, dy / 36.0)
+            except Exception:
+                pass
             return
         q = self._quartz
         ev = q.CGEventCreateScrollWheelEvent(
@@ -1073,7 +1155,202 @@ class KeyboardInjector:
         q.CGEventPost(q.kCGHIDEventTap, ev)
 
 
+class LiveLensCapturer:
+    """
+    Chụp trực tiếp vùng màn hình lấy con trỏ chuột trên Mac / PC làm trung tâm:
+    - Trên macOS: dùng trực tiếp Quartz CGWindowListCreateImage (kCGWindowImageNominalResolution) + AppKit NSBitmapImageRep
+      (tăng tốc phần cứng < 1ms, không cần cài thêm thư viện ngoài).
+    - Trên Windows / Linux: dùng mss + Pillow.
+    """
+
+    def __init__(self, kb_injector: KeyboardInjector) -> None:
+        self.inj = kb_injector
+        self._quartz = None
+        self._appkit = None
+        self._mss_mod = None
+        self._pil_image = None
+        self._prev_mouse: Tuple[float, float] = (0.0, 0.0)
+
+        if IS_MACOS:
+            try:
+                import AppKit  # type: ignore
+                import Quartz  # type: ignore
+
+                self._quartz = Quartz
+                self._appkit = AppKit
+            except Exception as exc:
+                logger.warning("Không nạp được Quartz/AppKit cho Live Lens: %s", exc)
+
+        if self._quartz is None:
+            try:
+                import mss  # type: ignore
+                from PIL import Image  # type: ignore
+
+                self._mss_mod = mss
+                self._pil_image = Image
+            except Exception as exc:
+                logger.warning("Chưa cài mss/Pillow cho Live Lens (%s)", exc)
+
+    @property
+    def available(self) -> bool:
+        return (self._quartz is not None and self._appkit is not None) or (
+            self._mss_mod is not None and self._pil_image is not None
+        )
+
+    def _compute_crop_geometry(
+        self,
+        mx: float,
+        my: float,
+        mon_left: float,
+        mon_top: float,
+        mon_w: float,
+        mon_h: float,
+        aspect: float,
+        fov_scale: float,
+        mode: str,
+    ) -> Tuple[int, int, int, int]:
+        safe_aspect = max(1.05, min(16.0, float(aspect or 1.85)))
+        safe_scale = max(0.55, min(1.85, float(fov_scale or 1.15)))
+
+        if mode == "landscape":
+            base_w = min(mon_w, max(700.0, mon_w * 0.62) * safe_scale)
+            crop_w = int(round(base_w))
+            crop_h = max(68, min(int(mon_h), int(round(crop_w / safe_aspect))))
+        else:
+            # Chế độ Windows dọc: lấy rộng ~68% bề ngang màn hình để chữ nhỏ vừa vặn, nhìn bao quát rộng quanh tâm chuột
+            base_w = min(mon_w, max(860.0, mon_w * 0.68) * safe_scale)
+            crop_w = int(round(base_w))
+            crop_h = max(180, min(int(mon_h), int(round(crop_w / safe_aspect))))
+
+        crop_w = max(240, min(int(mon_w), crop_w))
+        crop_h = max(64, min(int(mon_h), crop_h))
+
+        left = int(round(mx - crop_w / 2.0))
+        top = int(round(my - crop_h / 2.0))
+
+        min_l = int(round(mon_left))
+        max_l = int(round(mon_left + mon_w - crop_w))
+        min_t = int(round(mon_top))
+        max_t = int(round(mon_top + mon_h - crop_h))
+
+        left = max(min_l, min(max_l, left))
+        top = max(min_t, min(max_t, top))
+        return (left, top, crop_w, crop_h)
+
+    def capture_packet(
+        self, sct, aspect: float, fov_scale: float, mode: str
+    ) -> Optional[bytes]:
+        if not self.available:
+            return None
+
+        mx, my = self.inj.get_current_mouse_pos()
+        if abs(mx - self._prev_mouse[0]) > 2.5 or abs(my - self._prev_mouse[1]) > 2.5:
+            self._prev_mouse = (mx, my)
+            self.inj.last_activity_at = time.monotonic()
+
+        jpeg_bytes: Optional[bytes] = None
+        left, top, crop_w, crop_h = 0, 0, 800, 400
+
+        # 1. Đường dẫn phần cứng gốc trên macOS (Quartz + NSBitmapImageRep)
+        if self._quartz is not None and self._appkit is not None:
+            q = self._quartz
+            ak = self._appkit
+            mon_left, mon_top = 0.0, 0.0
+            main_id = q.CGMainDisplayID()
+            mon_w = float(q.CGDisplayPixelsWide(main_id))
+            mon_h = float(q.CGDisplayPixelsHigh(main_id))
+            try:
+                err, active_ids, count = q.CGGetActiveDisplayList(8, None, None)
+                if err == 0 and count > 0:
+                    for did in active_ids[:count]:
+                        b = q.CGDisplayBounds(did)
+                        bx, by = float(b.origin.x), float(b.origin.y)
+                        bw, bh = float(b.size.width), float(b.size.height)
+                        if bx <= mx < bx + bw and by <= my < by + bh:
+                            mon_left, mon_top, mon_w, mon_h = bx, by, bw, bh
+                            break
+            except Exception:
+                pass
+
+            left, top, crop_w, crop_h = self._compute_crop_geometry(
+                mx, my, mon_left, mon_top, mon_w, mon_h, aspect, fov_scale, mode
+            )
+            rect = q.CGRectMake(float(left), float(top), float(crop_w), float(crop_h))
+            nominal_flag = getattr(q, "kCGWindowImageNominalResolution", 16)
+            cg_img = q.CGWindowListCreateImage(
+                rect,
+                q.kCGWindowListOptionOnScreenOnly,
+                q.kCGNullWindowID,
+                nominal_flag,
+            )
+            if cg_img is None:
+                return None
+
+            rep = ak.NSBitmapImageRep.alloc().initWithCGImage_(cg_img)
+            if rep is None:
+                return None
+            jpeg_type = getattr(ak, "NSBitmapImageFileTypeJPEG", 4)
+            comp_key = getattr(
+                ak, "NSImageCompressionFactor", "NSImageCompressionFactor"
+            )
+            ns_data = rep.representationUsingType_properties_(
+                jpeg_type, {comp_key: 0.66}
+            )
+            if ns_data is None:
+                return None
+            jpeg_bytes = bytes(ns_data)
+
+        # 2. Đường dẫn đa nền tảng trên Windows / Linux (mss + Pillow)
+        elif sct is not None and self._pil_image is not None:
+            Image = self._pil_image
+            monitors = sct.monitors
+            chosen = monitors[1] if len(monitors) > 1 else monitors[0]
+            for mon in monitors[1:]:
+                if (
+                    mon["left"] <= mx < mon["left"] + mon["width"]
+                    and mon["top"] <= my < mon["top"] + mon["height"]
+                ):
+                    chosen = mon
+                    break
+
+            left, top, crop_w, crop_h = self._compute_crop_geometry(
+                mx,
+                my,
+                float(chosen["left"]),
+                float(chosen["top"]),
+                float(chosen["width"]),
+                float(chosen["height"]),
+                aspect,
+                fov_scale,
+                mode,
+            )
+            raw = sct.grab(
+                {"left": left, "top": top, "width": crop_w, "height": crop_h}
+            )
+            img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+            target_w = 880 if mode == "landscape" else 840
+            if img.width > target_w:
+                out_h = max(48, int(round(img.height * (target_w / float(img.width)))))
+                resample_attr = getattr(Image, "Resampling", Image).BILINEAR
+                img = img.resize((target_w, out_h), resample_attr)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=68, optimize=False)
+            jpeg_bytes = buf.getvalue()
+
+        if not jpeg_bytes:
+            return None
+
+        rel_mx = max(0.0, min(1.0, (mx - left) / float(crop_w)))
+        rel_my = max(0.0, min(1.0, (my - top) / float(crop_h)))
+        u_mx = int(round(rel_mx * 10000))
+        u_my = int(round(rel_my * 10000))
+
+        header = struct.pack(">4sHHBHB", b"LENS", u_mx, u_my, 0, u_mx, 0)
+        return header + jpeg_bytes
+
+
 injector = KeyboardInjector()
+lens_capturer = LiveLensCapturer(injector)
 app = FastAPI(title="Mac Web Virtual Keyboard", docs_url=None, redoc_url=None)
 
 
@@ -1138,12 +1415,14 @@ async def keyboard_ws(ws: WebSocket) -> None:
     await ws.accept()
     client_host = ws.client.host if ws.client else "unknown"
     trusted = check_macos_accessibility(prompt=True)
+    check_macos_screen_recording(prompt=True)
     if injector.vn_enabled:
         ensure_macos_abc_input_source()
     logger.info(
-        "Đã kết nối điện thoại từ: %s (Accessibility=%s, Layout=%s, VN=%s)",
+        "Đã kết nối điện thoại từ: %s (Accessibility=%s, Lens=%s, Layout=%s, VN=%s)",
         client_host,
         trusted,
+        lens_capturer.available,
         injector.kb_layout,
         injector.vn_enabled,
     )
@@ -1155,11 +1434,63 @@ async def keyboard_ws(ws: WebSocket) -> None:
                 "vn": injector.vn_enabled,
                 "layout": injector.kb_layout,
                 "trusted": trusted,
+                "lens": lens_capturer.available,
             }
         )
     )
     if IS_MACOS and not trusted:
         await ws.send_text('{"type":"error","reason":"accessibility_denied"}')
+
+    lens_cfg = {
+        "enabled": True,
+        "aspect": 1.85,
+        "scale": 1.15,
+        "mode": "portrait",
+        "running": True,
+    }
+
+    async def stream_lens_loop() -> None:
+        if not lens_capturer.available:
+            return
+        sct = (
+            lens_capturer._mss_mod.mss()
+            if (lens_capturer._quartz is None and lens_capturer._mss_mod is not None)
+            else None
+        )
+        try:
+            while lens_cfg["running"]:
+                if not lens_cfg["enabled"]:
+                    await asyncio.sleep(0.25)
+                    continue
+
+                idle_sec = time.monotonic() - injector.last_activity_at
+                interval = 0.045 if idle_sec < 2.5 else 0.24
+                try:
+                    packet = await asyncio.to_thread(
+                        lens_capturer.capture_packet,
+                        sct,
+                        lens_cfg["aspect"],
+                        lens_cfg["scale"],
+                        lens_cfg["mode"],
+                    )
+                    if packet:
+                        await ws.send_bytes(packet)
+                except WebSocketDisconnect:
+                    break
+                except Exception as exc:
+                    logger.debug("Lens frame skipped: %s", exc)
+                    await asyncio.sleep(0.2)
+
+                await asyncio.sleep(interval)
+        finally:
+            if sct is not None:
+                try:
+                    sct.close()
+                except Exception:
+                    pass
+
+    lens_task = asyncio.create_task(stream_lens_loop())
+
     try:
         while True:
             raw_msg = await ws.receive_text()
@@ -1226,6 +1557,16 @@ async def keyboard_ws(ws: WebSocket) -> None:
                         }
                     )
                 )
+            elif msg_type == "lens_config":
+                if "enabled" in data:
+                    lens_cfg["enabled"] = bool(data["enabled"])
+                if "aspect" in data:
+                    lens_cfg["aspect"] = float(data["aspect"])
+                if "scale" in data:
+                    lens_cfg["scale"] = float(data["scale"])
+                if "mode" in data:
+                    lens_cfg["mode"] = str(data["mode"])
+                injector.last_activity_at = time.monotonic()
             elif msg_type == "ping":
                 await ws.send_text('{"type":"pong"}')
     except WebSocketDisconnect:
@@ -1233,6 +1574,8 @@ async def keyboard_ws(ws: WebSocket) -> None:
     except Exception as exc:
         logger.error("Lỗi WebSocket (%s): %s", client_host, exc)
     finally:
+        lens_cfg["running"] = False
+        lens_task.cancel()
         injector.release_all_modifiers()
 
 
@@ -1288,6 +1631,22 @@ def check_macos_accessibility(prompt: bool = True) -> bool:
         return trusted
     except Exception:
         return True
+
+
+def check_macos_screen_recording(prompt: bool = True) -> bool:
+    if not IS_MACOS:
+        return True
+    try:
+        import Quartz  # type: ignore
+
+        if hasattr(Quartz, "CGPreflightScreenCaptureAccess"):
+            ok = bool(Quartz.CGPreflightScreenCaptureAccess())
+            if not ok and prompt and hasattr(Quartz, "CGRequestScreenCaptureAccess"):
+                Quartz.CGRequestScreenCaptureAccess()
+            return ok
+    except Exception:
+        pass
+    return True
 
 
 def detect_network_ips() -> List[str]:

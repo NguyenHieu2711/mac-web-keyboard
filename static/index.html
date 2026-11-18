@@ -19,6 +19,18 @@
        CHẾ ĐỘ BÀN PHÍM NGANG CỐ ĐỊNH: BÀN PHÍM DÂY WINDOWS (WIN) & BÀN PHÍM MAC (MAC)
        ========================================================================= -->
   <main id="kb-shell" class="kb-shell">
+    <!-- KHE KÍNH SOI TÂM CHUỘT (RIBBON LENS) TRÊN MÀN NGANG -->
+    <div id="kb-ribbon-lens" class="kb-ribbon-lens">
+      <canvas id="kb-lens-canvas" class="lens-canvas"></canvas>
+      <div class="lens-ribbon-hint">Kính Soi Tâm Chuột • Rê 1 ngón để di chuột &amp; chạm Click</div>
+      <div class="lens-hud-right">
+        <button type="button" class="lens-ctrl-btn js-fov-out">−</button>
+        <button type="button" class="lens-ctrl-label js-fov-label">0.8x</button>
+        <button type="button" class="lens-ctrl-btn js-fov-in">+</button>
+        <button type="button" class="lens-ctrl-btn js-lens-toggle">👁</button>
+      </div>
+    </div>
+
     <!-- HÀNG 1: F1-F12 (WIN) / Macro (MAC) + Dropdown dọc nhỏ chọn chế độ & VN/EN -->
     <div class="kb-row kb-row-fn">
       <button type="button" class="key key-fn" data-action="press" data-key="esc" data-flex="1.0">
@@ -349,9 +361,16 @@
       </div>
 
       <div id="trackpad-surface" class="trackpad-surface">
+        <canvas id="pad-lens-canvas" class="lens-canvas"></canvas>
         <div class="trackpad-hint">
-          <div class="trackpad-title">TRACKPAD</div>
+          <div class="trackpad-title">TRACKPAD • LIVE LENS</div>
           <div class="trackpad-sub">1 ngón: Di chuột / Chạm Click • 2 ngón: Cuộn / Chuột phải</div>
+        </div>
+        <div class="lens-hud-right">
+          <button type="button" class="lens-ctrl-btn js-fov-out">−</button>
+          <button type="button" class="lens-ctrl-label js-fov-label">0.8x</button>
+          <button type="button" class="lens-ctrl-btn js-fov-in">+</button>
+          <button type="button" class="lens-ctrl-btn js-lens-toggle">👁</button>
         </div>
       </div>
 
@@ -549,7 +568,7 @@
           </button>
 
           <!-- 1 NÚT MŨI TÊN THÔNG MINH DUY NHẤT (Ấn & gạt Lên/Xuống/Trái/Phải) -->
-          <button type="button" id="btn-joy-arrow" class="key ss-key ss-key-joy" title="Ấn và gạt Lên/Xuống/Trái/Phải">
+          <button type="button" id="btn-joy-arrow" class="key ss-key ss-key-joy">
             <span id="joy-arrow-label" class="key-main">✥</span>
           </button>
 
