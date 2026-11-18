@@ -3572,7 +3572,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.1.1";
+  const BUNDLED_WEB_VERSION = "2.1.2";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();
