@@ -12,6 +12,9 @@ const crypto = require('crypto');
 const net = require('net');
 const tls = require('tls');
 const os = require('os');
+const path = require('path');
+const fs = require('fs');
+const { spawn } = require('child_process');
 
 const LISTEN_HOST = '0.0.0.0';
 const LISTEN_PORT = Number(process.env.PC_GATEWAY_PORT || 5051);
@@ -461,9 +464,12 @@ class RdpAudioSession {
     this.serverStreamBuf = Buffer.alloc(0);
 
     this.csNetNames = [];
+    this.ioChanId = null;
     this.rdpsndChanId = null;
     this.drdynvcChanId = null;
     this.mcsInitiator = null;
+    this.patchedClientInfo = false;
+    this.gotRdpsndWave = false;
 
     this.rdpsndVcBuf = Buffer.alloc(0);
     this.pendingLegacyWave = null;
@@ -485,8 +491,11 @@ class RdpAudioSession {
 
   attachAudioWs(wsConn) {
     this.audioWs = wsConn;
+    syncWasapiProcess();
     if (this.spkFormat) {
       wsConn.sendText(JSON.stringify({ type: 'spk_format', ...this.spkFormat }));
+    } else if (wasapiFormat) {
+      wsConn.sendText(JSON.stringify({ type: 'spk_format', ...wasapiFormat }));
     }
     if (this.audinOpen && this.micSpec) {
       wsConn.sendText(JSON.stringify({ type: 'mic_start', ...this.micSpec }));
@@ -499,6 +508,7 @@ class RdpAudioSession {
     };
     wsConn.onClose = () => {
       if (this.audioWs === wsConn) this.audioWs = null;
+      syncWasapiProcess();
     };
   }
 
@@ -509,6 +519,7 @@ class RdpAudioSession {
       try { a.close(); } catch (_) {}
     }
     audioSessions.delete(this.sid);
+    syncWasapiProcess();
   }
 
   sendToTlsVc(channelId, vcPayload) {
@@ -632,6 +643,20 @@ class RdpAudioSession {
           if (this.rdpsndChanId !== null && chanId === this.rdpsndChanId) {
             continue; // Chặn phản hồi rỗng của NoopRdpsndBackend
           }
+          if (!this.patchedClientInfo && (this.ioChanId === null || chanId === this.ioChanId)) {
+            const secOff = (pkt[13] & 0x80) !== 0 ? 15 : 14;
+            if (pkt.length >= secOff + 12) {
+              const secFlags = pkt.readUInt16LE(secOff);
+              if ((secFlags & 0x0040) !== 0 && (secFlags & 0x0080) === 0) {
+                const oldFlags = pkt.readUInt32LE(secOff + 8);
+                if ((oldFlags & 0x00000011) !== 0) {
+                  const newFlags = ((oldFlags & ~0x00080000) | 0x00200000) >>> 0;
+                  pkt.writeUInt32LE(newFlags, secOff + 8);
+                  this.patchedClientInfo = true;
+                }
+              }
+            }
+          }
         }
       }
       writeToTls(pkt);
@@ -707,6 +732,7 @@ class RdpAudioSession {
           ioChan <= 1100 &&
           (blockLen === 8 + n * 2 + expectedPad || blockLen === 8 + n * 2)
         ) {
+          this.ioChanId = ioChan;
           for (let i = 0; i < count; i++) {
             const cid = pkt.readUInt16LE(pos + 8 + i * 2);
             if (this.csNetNames[i] === 'rdpsnd') this.rdpsndChanId = cid;
@@ -833,6 +859,7 @@ class RdpAudioSession {
 
   _pushSpeakerPcm(pcm) {
     if (!this.audioWs || !pcm || pcm.length === 0) return;
+    this.gotRdpsndWave = true;
     const out = Buffer.allocUnsafe(1 + pcm.length);
     out[0] = 0x01;
     pcm.copy(out, 1);
@@ -1085,7 +1112,7 @@ const server = http.createServer((req, res) => {
     const payload = JSON.stringify({
       ok: true,
       service: 'pc-rdp-gateway',
-      version: '2.1.4',
+      version: '2.1.5',
       hostname: os.hostname(),
       default_user: `${os.hostname()}\\${os.userInfo().username}`,
       port: LISTEN_PORT,
@@ -1148,7 +1175,150 @@ server.on('upgrade', (req, socket, head) => {
   handleRdpWebSocket(wsConn, sid);
 });
 
+// ── Bộ thu âm thanh hệ thống trực tiếp WASAPI Loopback (truyền sang điện thoại khi chạy Song song cùng MacBook) ──
+const WASAPI_EXE = path.join(__dirname, 'pc_wasapi_loopback.exe');
+const MAC_BRIDGE_URL = process.env.MAC_BRIDGE_URL || 'ws://192.168.52.103:5050/pc-bridge-ws';
+
+let wasapiProc = null;
+let wasapiRxBuf = Buffer.alloc(0);
+let wasapiFormat = { rate: 44100, channels: 2 };
+let macBridgeWs = null;
+let macWantsAudio = false;
+
+function hasLocalFallbackAudioListeners() {
+  for (const sess of audioSessions.values()) {
+    if (sess.audioWs && !sess.gotRdpsndWave) return true;
+  }
+  return false;
+}
+
+function broadcastWasapiFormat() {
+  const fmtStr = JSON.stringify({ type: 'spk_format', ...wasapiFormat });
+  if (macWantsAudio && macBridgeWs && macBridgeWs.readyState === 1) {
+    try { macBridgeWs.send(fmtStr); } catch (_) {}
+  }
+  for (const sess of audioSessions.values()) {
+    if (sess.audioWs && !sess.gotRdpsndWave) {
+      try { sess.audioWs.sendText(fmtStr); } catch (_) {}
+    }
+  }
+}
+
+function broadcastWasapiPcm(pcmChunk) {
+  const needMac = macWantsAudio && macBridgeWs && macBridgeWs.readyState === 1;
+  const needLocal = hasLocalFallbackAudioListeners();
+  if (!needMac && !needLocal) return;
+  const out = Buffer.allocUnsafe(1 + pcmChunk.length);
+  out[0] = 0x01;
+  pcmChunk.copy(out, 1);
+  if (needMac) {
+    try { macBridgeWs.send(out); } catch (_) {}
+  }
+  if (needLocal) {
+    for (const sess of audioSessions.values()) {
+      if (sess.audioWs && !sess.gotRdpsndWave) {
+        try { sess.audioWs.sendBinary(out); } catch (_) {}
+      }
+    }
+  }
+}
+
+function syncWasapiProcess() {
+  const want = macWantsAudio || hasLocalFallbackAudioListeners();
+  if (!want) {
+    if (wasapiProc) {
+      try { wasapiProc.kill(); } catch (_) {}
+      wasapiProc = null;
+    }
+    wasapiRxBuf = Buffer.alloc(0);
+    return;
+  }
+  if (wasapiProc || !fs.existsSync(WASAPI_EXE)) return;
+
+  wasapiRxBuf = Buffer.alloc(0);
+  const proc = spawn(WASAPI_EXE, [], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  wasapiProc = proc;
+
+  proc.stdout.on('data', (chunk) => {
+    wasapiRxBuf = wasapiRxBuf.length === 0 ? chunk : Buffer.concat([wasapiRxBuf, chunk]);
+    while (wasapiRxBuf.length >= 2) {
+      if (
+        wasapiRxBuf.length >= 8 &&
+        wasapiRxBuf[0] === 0x57 &&
+        wasapiRxBuf[1] === 0x41 &&
+        wasapiRxBuf[2] === 0x53 &&
+        wasapiRxBuf[3] === 0x50
+      ) {
+        const rate = wasapiRxBuf.readUInt16LE(4) || 44100;
+        const ch = wasapiRxBuf[6] || 2;
+        wasapiFormat = { rate, channels: ch };
+        wasapiRxBuf = wasapiRxBuf.subarray(8);
+        broadcastWasapiFormat();
+        continue;
+      }
+      if (wasapiRxBuf[0] === 0x57 && wasapiRxBuf.length < 8) break;
+
+      const pcmLen = wasapiRxBuf.readUInt16LE(0);
+      if (pcmLen === 0 || pcmLen > 16384) {
+        wasapiRxBuf = Buffer.alloc(0);
+        break;
+      }
+      if (wasapiRxBuf.length < 2 + pcmLen) break;
+      const pcm = wasapiRxBuf.subarray(2, 2 + pcmLen);
+      wasapiRxBuf = wasapiRxBuf.subarray(2 + pcmLen);
+      broadcastWasapiPcm(pcm);
+    }
+  });
+
+  proc.on('exit', () => {
+    if (wasapiProc === proc) {
+      wasapiProc = null;
+      if (macWantsAudio) setTimeout(syncWasapiProcess, 800);
+    }
+  });
+}
+
+function connectOutboundMacBridge() {
+  if (typeof WebSocket === 'undefined') return;
+  try {
+    const ws = new WebSocket(MAC_BRIDGE_URL);
+    macBridgeWs = ws;
+    ws.onopen = () => {
+      if (macWantsAudio) {
+        syncWasapiProcess();
+        broadcastWasapiFormat();
+      }
+    };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data !== 'string') return;
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.cmd === 'wasapi_start') {
+          macWantsAudio = true;
+          syncWasapiProcess();
+          broadcastWasapiFormat();
+        } else if (msg.cmd === 'wasapi_stop') {
+          macWantsAudio = false;
+          syncWasapiProcess();
+        }
+      } catch (_) {}
+    };
+    ws.onclose = () => {
+      if (macBridgeWs === ws) macBridgeWs = null;
+      macWantsAudio = false;
+      syncWasapiProcess();
+      setTimeout(connectOutboundMacBridge, 3500);
+    };
+    ws.onerror = () => {
+      try { ws.close(); } catch (_) {}
+    };
+  } catch (_) {
+    setTimeout(connectOutboundMacBridge, 4000);
+  }
+}
+
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   const ips = getLanIps().map((x) => `${x.ip}:${LISTEN_PORT}`).join(', ');
   console.log(`[PC-RDP-Gateway] Listening on ${LISTEN_HOST}:${LISTEN_PORT} (${ips})`);
+  connectOutboundMacBridge();
 });

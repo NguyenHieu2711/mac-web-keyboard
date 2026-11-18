@@ -744,7 +744,8 @@
           const msg = JSON.parse(ev.data);
           if (
             msg &&
-            (msg.type === "kvm_enter" ||
+            (msg.type === "kvm_state" ||
+              msg.type === "kvm_enter" ||
               msg.type === "kvm_mouse" ||
               msg.type === "kvm_released")
           ) {
@@ -2241,14 +2242,18 @@
   const remoteKvmCursor = document.getElementById("remote-kvm-cursor");
   const remoteCursorImg = document.getElementById("remote-cursor-img");
   const remoteCursorSvg = document.getElementById("remote-cursor-svg");
+  const remoteHudPills = document.getElementById("remote-hud-pills");
   const remoteHudPill = document.getElementById("remote-hud-pill");
+  const remotePillModeIco = document.getElementById("remote-pill-mode-ico");
+  const btnRemoteMousePill = document.getElementById("btn-remote-mouse-pill");
   const remoteHudBar = document.getElementById("remote-hud-bar");
   const remoteStatusDot = document.getElementById("remote-status-dot");
   const remoteModeMenu = document.getElementById("remote-mode-menu");
+  const btnRemoteCoexist = document.getElementById("btn-remote-coexist");
   const btnRemoteSpk = document.getElementById("btn-remote-spk");
   const btnRemoteMic = document.getElementById("btn-remote-mic");
+  const btnRemoteMouse = document.getElementById("btn-remote-mouse");
   const btnRemoteKb = document.getElementById("btn-remote-kb");
-  const btnRemoteEdge = document.getElementById("btn-remote-edge");
   const btnRemoteZoomReset = document.getElementById("btn-remote-zoom-reset");
   const btnRemoteCfg = document.getElementById("btn-remote-cfg");
   const btnRemoteCollapse = document.getElementById("btn-remote-collapse");
@@ -2268,6 +2273,10 @@
   let rdpMod = null;
   let rdpModPromise = null;
   let rdpSession = null;
+  let rdpParallelWs = null;
+  let rdpActiveEngine = "none"; // "none" | "parallel" | "native"
+  let rdpPreferExclusive = false;
+  let rdpManualDisconnect = false;
   let rdpConnecting = false;
   let rdpHudExpanded = false;
   let rdpRemoteMenuOpen = false;
@@ -2284,9 +2293,6 @@
   let localPointerHideTimer = null;
   let kvmX = RDP_TARGET_W / 2;
   let kvmY = RDP_TARGET_H / 2;
-  let kvmMacEdge = "bottom";
-  let kvmPhoneEdge = "top";
-  let kvmReturnPush = 0;
   let cursorHotspotX = 2;
   let cursorHotspotY = 1;
   let cursorHiddenByServer = false;
@@ -2303,6 +2309,9 @@
   let rdpWebMicStream = null;
   let rdpWebMicProc = null;
 
+  let parallelDecoding = false;
+  let parallelQueuedBuf = null;
+
   let webSpeechRec = null;
   let voiceListening = false;
 
@@ -2317,17 +2326,55 @@
     // ignore
   }
 
-  function syncRemoteEdgeLabel() {
-    if (btnRemoteEdge) {
-      btnRemoteEdge.textContent = EDGE_LABELS[rdpEdgeMode] || EDGE_LABELS.any;
+  function isRemoteConnected() {
+    return Boolean(
+      rdpSession ||
+        (rdpParallelWs && rdpParallelWs.readyState === WebSocket.OPEN)
+    );
+  }
+
+  function syncSmartKvmButtonsUI() {
+    if (btnRemoteMousePill) {
+      btnRemoteMousePill.textContent = kvmActive ? "🖱 ĐT" : "🖱";
+      btnRemoteMousePill.classList.toggle("is-active", kvmActive);
+    }
+    if (btnRemoteMouse) {
+      btnRemoteMouse.textContent = kvmActive ? "🖱 Đang dùng" : "🖱 Chuột";
+      btnRemoteMouse.classList.toggle("is-active", kvmActive);
     }
   }
-  syncRemoteEdgeLabel();
+  syncSmartKvmButtonsUI();
+
+  function syncCoexistButtonUI() {
+    const isPar = rdpActiveEngine === "parallel";
+    if (btnRemoteCoexist) {
+      if (isPar) {
+        btnRemoteCoexist.textContent = "⚡ Song song";
+        btnRemoteCoexist.classList.add("is-active");
+      } else if (rdpActiveEngine === "native") {
+        btnRemoteCoexist.textContent = "🎧 Độc quyền";
+        btnRemoteCoexist.classList.add("is-active");
+      } else {
+        btnRemoteCoexist.textContent = rdpPreferExclusive
+          ? "🎧 Độc quyền"
+          : "⚡ Song song";
+        btnRemoteCoexist.classList.toggle("is-active", rdpPreferExclusive);
+      }
+    }
+    if (remotePillModeIco) {
+      remotePillModeIco.textContent = isPar ? "⚡" : "🖥";
+    }
+    if (typeof syncRdpAudioButtonsUI === "function") {
+      syncRdpAudioButtonsUI();
+    }
+  }
+  syncCoexistButtonUI();
 
   function setRemoteHudExpanded(expanded) {
     rdpHudExpanded = Boolean(expanded);
     if (!rdpHudExpanded) rdpRemoteMenuOpen = false;
-    if (remoteHudPill) remoteHudPill.classList.toggle("is-hidden", rdpHudExpanded);
+    if (remoteHudPills) remoteHudPills.classList.toggle("is-hidden", rdpHudExpanded);
+    else if (remoteHudPill) remoteHudPill.classList.toggle("is-hidden", rdpHudExpanded);
     if (remoteHudBar) remoteHudBar.classList.toggle("is-hidden", !rdpHudExpanded);
     if (remoteModeMenu) remoteModeMenu.classList.toggle("is-hidden", !rdpRemoteMenuOpen);
   }
@@ -2345,7 +2392,7 @@
   }
 
   function syncRdpConnectionUI() {
-    const connected = Boolean(rdpSession);
+    const connected = isRemoteConnected();
     if (remoteStatusDot) {
       remoteStatusDot.classList.toggle("is-online", connected);
       remoteStatusDot.classList.toggle("is-connecting", rdpConnecting && !connected);
@@ -2364,6 +2411,7 @@
     if (btnRdpCloseCard) {
       btnRdpCloseCard.classList.toggle("is-hidden", !connected);
     }
+    syncCoexistButtonUI();
   }
 
   function clampRdpPan() {
@@ -2555,6 +2603,42 @@
     return String(err.message || err);
   }
 
+  const CODE_TO_SERVER_KEY = {
+    Escape: "esc", Tab: "tab", Backspace: "backspace", Enter: "enter",
+    Space: "space", Delete: "delete", Home: "home", End: "end",
+    PageUp: "pageup", PageDown: "pagedown",
+    ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+    Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]",
+    Backslash: "\\", Semicolon: ";", Quote: "'", Backquote: "`",
+    Comma: ",", Period: ".", Slash: "/",
+    F1: "f1", F2: "f2", F3: "f3", F4: "f4", F5: "f5", F6: "f6",
+    F7: "f7", F8: "f8", F9: "f9", F10: "f10", F11: "f11", F12: "f12",
+  };
+  for (let i = 0; i <= 9; i += 1) CODE_TO_SERVER_KEY[`Digit${i}`] = String(i);
+  for (let c = 65; c <= 90; c += 1) {
+    const ch = String.fromCharCode(c);
+    CODE_TO_SERVER_KEY[`Key${ch}`] = ch.toLowerCase();
+  }
+
+  function sendParallelJson(payload) {
+    if (rdpParallelWs && rdpParallelWs.readyState === WebSocket.OPEN) {
+      try {
+        rdpParallelWs.send(JSON.stringify(payload));
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  function coordsToNormalizedRatio(rx, ry) {
+    const cw = Math.max(1, remoteCanvas ? remoteCanvas.width || RDP_TARGET_W : RDP_TARGET_W);
+    const ch = Math.max(1, remoteCanvas ? remoteCanvas.height || RDP_TARGET_H : RDP_TARGET_H);
+    return {
+      rx: +Math.max(0, Math.min(1, rx / cw)).toFixed(5),
+      ry: +Math.max(0, Math.min(1, ry / ch)).toFixed(5),
+    };
+  }
+
   function applyRdpDeviceEvents(events) {
     if (!rdpSession || !rdpMod || !events || events.length === 0) return;
     try {
@@ -2569,22 +2653,70 @@
   }
 
   function rdpSendMouseMove(rx, ry, autoHideMs = 0) {
-    if (!rdpSession || !rdpMod) return;
+    if (!isRemoteConnected()) return;
     const cx = Math.max(0, Math.min((remoteCanvas.width || RDP_TARGET_W) - 1, Math.round(rx)));
     const cy = Math.max(0, Math.min((remoteCanvas.height || RDP_TARGET_H) - 1, Math.round(ry)));
     if (!kvmActive) {
       showLocalRemoteCursor(cx, cy, autoHideMs);
     }
-    applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseMove(cx, cy)]);
+    if (rdpActiveEngine === "parallel") {
+      const norm = coordsToNormalizedRatio(cx, cy);
+      sendParallelJson({ type: "ptr_move", rx: norm.rx, ry: norm.ry });
+      return;
+    }
+    if (rdpSession && rdpMod) {
+      applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseMove(cx, cy)]);
+    }
   }
 
-  function rdpSendMouseClick(rx, ry, button = 0, count = 1) {
-    if (!rdpSession || !rdpMod) return;
+  function rdpSendMouseDown(rx, ry, button = 0, count = 1) {
+    if (!isRemoteConnected()) return;
     const cx = Math.max(0, Math.min((remoteCanvas.width || RDP_TARGET_W) - 1, Math.round(rx)));
     const cy = Math.max(0, Math.min((remoteCanvas.height || RDP_TARGET_H) - 1, Math.round(ry)));
     if (!kvmActive) {
       showLocalRemoteCursor(cx, cy, 1400);
     }
+    if (rdpActiveEngine === "parallel") {
+      const norm = coordsToNormalizedRatio(cx, cy);
+      sendParallelJson({ type: "ptr_down", rx: norm.rx, ry: norm.ry, btn: button, count });
+      return;
+    }
+    if (rdpSession && rdpMod) {
+      applyRdpDeviceEvents([
+        rdpMod.DeviceEvent.mouseMove(cx, cy),
+        rdpMod.DeviceEvent.mouseButtonPressed(button),
+      ]);
+    }
+  }
+
+  function rdpSendMouseUp(rx, ry, button = 0, count = 1) {
+    if (!isRemoteConnected()) return;
+    const cx = Math.max(0, Math.min((remoteCanvas.width || RDP_TARGET_W) - 1, Math.round(rx)));
+    const cy = Math.max(0, Math.min((remoteCanvas.height || RDP_TARGET_H) - 1, Math.round(ry)));
+    if (rdpActiveEngine === "parallel") {
+      const norm = coordsToNormalizedRatio(cx, cy);
+      sendParallelJson({ type: "ptr_up", rx: norm.rx, ry: norm.ry, btn: button, count });
+      return;
+    }
+    if (rdpSession && rdpMod) {
+      applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseButtonReleased(button)]);
+    }
+  }
+
+  function rdpSendMouseClick(rx, ry, button = 0, count = 1) {
+    if (!isRemoteConnected()) return;
+    const cx = Math.max(0, Math.min((remoteCanvas.width || RDP_TARGET_W) - 1, Math.round(rx)));
+    const cy = Math.max(0, Math.min((remoteCanvas.height || RDP_TARGET_H) - 1, Math.round(ry)));
+    if (!kvmActive) {
+      showLocalRemoteCursor(cx, cy, 1400);
+    }
+    if (rdpActiveEngine === "parallel") {
+      const norm = coordsToNormalizedRatio(cx, cy);
+      sendParallelJson({ type: "ptr_down", rx: norm.rx, ry: norm.ry, btn: button, count });
+      sendParallelJson({ type: "ptr_up", rx: norm.rx, ry: norm.ry, btn: button, count });
+      return;
+    }
+    if (!rdpSession || !rdpMod) return;
     const evs = [rdpMod.DeviceEvent.mouseMove(cx, cy)];
     for (let i = 0; i < count; i += 1) {
       evs.push(rdpMod.DeviceEvent.mouseButtonPressed(button));
@@ -2593,12 +2725,51 @@
     applyRdpDeviceEvents(evs);
   }
 
+  function rdpSendWheel(dxPx, dyPx, unit = 0) {
+    if (!isRemoteConnected()) return;
+    if (rdpActiveEngine === "parallel") {
+      const norm = coordsToNormalizedRatio(kvmX, kvmY);
+      const mul = unit === 1 ? 32 : 1;
+      sendParallelJson({
+        type: "ptr_wheel",
+        rx: norm.rx,
+        ry: norm.ry,
+        dx: dxPx * mul,
+        dy: dyPx * mul,
+      });
+      return;
+    }
+    if (!rdpSession || !rdpMod) return;
+    const evs = [];
+    if (dyPx !== 0) evs.push(rdpMod.DeviceEvent.wheelRotations(true, dyPx, unit));
+    if (dxPx !== 0) evs.push(rdpMod.DeviceEvent.wheelRotations(false, -dxPx, unit));
+    if (evs.length > 0) applyRdpDeviceEvents(evs);
+  }
+
   function rdpSendScancodeTap(codeName, withActiveMods = true) {
+    if (!isRemoteConnected()) return;
+    const modsToUse = withActiveMods ? Array.from(rdpActiveMods) : [];
+    if (rdpActiveEngine === "parallel") {
+      const srvKey = CODE_TO_SERVER_KEY[codeName];
+      if (srvKey) {
+        const mappedMods = modsToUse.map((m) => {
+          if (m.startsWith("Control")) return "ctrl";
+          if (m.startsWith("Alt")) return "alt";
+          if (m.startsWith("Shift")) return "shift";
+          return "cmd";
+        });
+        sendParallelJson({ type: "key_tap", key: srvKey, mods: mappedMods });
+      }
+      if (withActiveMods && rdpActiveMods.size > 0) {
+        rdpActiveMods.clear();
+        syncRdpModButtons();
+      }
+      return;
+    }
     if (!rdpSession || !rdpMod) return;
     const sc = RDP_SCANCODE_MAP[codeName];
     if (sc === undefined) return;
     const evs = [];
-    const modsToUse = withActiveMods ? Array.from(rdpActiveMods) : [];
     for (const m of modsToUse) {
       const msc = RDP_SCANCODE_MAP[m];
       if (msc !== undefined) evs.push(rdpMod.DeviceEvent.keyPressed(msc));
@@ -2617,7 +2788,7 @@
   }
 
   function injectUnicodeTextToRdp(text) {
-    if (!rdpSession || !rdpMod || !text) return;
+    if (!isRemoteConnected() || !text) return;
     const str = String(text);
     if (rdpActiveMods.size > 0 && str.length === 1) {
       const lower = str.toLowerCase();
@@ -2626,6 +2797,11 @@
         return;
       }
     }
+    if (rdpActiveEngine === "parallel") {
+      sendParallelJson({ type: "unicode_text", text: str });
+      return;
+    }
+    if (!rdpSession || !rdpMod) return;
     const chars = Array.from(str);
     const BATCH = 24;
     for (let i = 0; i < chars.length; i += BATCH) {
@@ -2649,7 +2825,7 @@
   }
 
   async function pasteLocalClipboardToRdp() {
-    if (!rdpSession || !rdpMod) return;
+    if (!isRemoteConnected()) return;
     let txt = "";
     try {
       if (hasAndroidBridge && typeof window.AndroidBridge.getClipboardText === "function") {
@@ -2660,6 +2836,15 @@
     } catch {
       // ignore
     }
+    if (rdpActiveEngine === "parallel") {
+      if (txt) {
+        sendParallelJson({ type: "unicode_text", text: txt });
+      } else {
+        sendParallelJson({ type: "combo", keys: ["ctrl", "v"] });
+      }
+      return;
+    }
+    if (!rdpSession || !rdpMod) return;
     if (txt) {
       try {
         const cd = new rdpMod.ClipboardData();
@@ -2704,9 +2889,14 @@
       btnRemoteSpk.classList.toggle("is-active", rdpSpkEnabled);
     }
     if (btnRemoteMic) {
-      btnRemoteMic.textContent = rdpMicEnabled ? "🎤 Mic" : "🚫 Mic";
-      btnRemoteMic.classList.toggle("is-active", rdpMicEnabled && !rdpServerMicOpen);
-      btnRemoteMic.classList.toggle("is-recording", rdpMicEnabled && rdpServerMicOpen);
+      if (rdpActiveEngine === "parallel") {
+        btnRemoteMic.textContent = "🎤 Mic ĐT";
+        btnRemoteMic.classList.remove("is-active", "is-recording");
+      } else {
+        btnRemoteMic.textContent = rdpMicEnabled ? "🎤 Mic" : "🚫 Mic";
+        btnRemoteMic.classList.toggle("is-active", rdpMicEnabled && !rdpServerMicOpen);
+        btnRemoteMic.classList.toggle("is-recording", rdpMicEnabled && rdpServerMicOpen);
+      }
     }
   }
   syncRdpAudioButtonsUI();
@@ -2960,20 +3150,258 @@
     }
   }
 
+  function resolveMacHttpBase() {
+    if (ws && ws.readyState === WebSocket.OPEN && ws.url) {
+      try {
+        const u = new URL(ws.url);
+        const proto = u.protocol === "wss:" ? "https:" : "http:";
+        return `${proto}//${u.host}`;
+      } catch {
+        // ignore
+      }
+    }
+    const cands = resolveCandidateHosts();
+    if (cands.length > 0) {
+      const clean = cands[0].replace(/^https?:\/\/|^wss?:\/\//, "").split("/")[0];
+      if (clean) return `http://${clean}`;
+    }
+    return "http://192.168.52.103:5050";
+  }
+
+  async function checkMacParallelAvailable() {
+    const macBase = resolveMacHttpBase();
+    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const t = ctrl ? setTimeout(() => ctrl.abort(), 580) : null;
+    try {
+      const res = await fetch(`${macBase}/rdp-mode-check`, {
+        cache: "no-store",
+        signal: ctrl ? ctrl.signal : undefined,
+      });
+      if (!res.ok) return { available: false, macBase };
+      const j = await res.json();
+      return {
+        available: Boolean(j && j.parallel_available),
+        macBase,
+        window: j ? j.window : null,
+      };
+    } catch {
+      return { available: false, macBase };
+    } finally {
+      if (t) clearTimeout(t);
+    }
+  }
+
+  function closeParallelRdpWs() {
+    parallelQueuedBuf = null;
+    if (rdpParallelWs) {
+      try {
+        rdpParallelWs.onopen = null;
+        rdpParallelWs.onmessage = null;
+        rdpParallelWs.onerror = null;
+        rdpParallelWs.onclose = null;
+        rdpParallelWs.close();
+      } catch {
+        // ignore
+      }
+      rdpParallelWs = null;
+    }
+  }
+
+  async function renderParallelJpegFrame(buf) {
+    if (!remoteCanvas || !buf || buf.byteLength <= 6) return;
+    if (parallelDecoding) {
+      parallelQueuedBuf = buf;
+      return;
+    }
+    parallelDecoding = true;
+    try {
+      let cur = buf;
+      while (cur) {
+        parallelQueuedBuf = null;
+        const jpegSlice = new Uint8Array(cur, 5);
+        const blob = new Blob([jpegSlice], { type: "image/jpeg" });
+        const bmp = await createImageBitmap(blob);
+        if (remoteCanvas.width !== bmp.width || remoteCanvas.height !== bmp.height) {
+          remoteCanvas.width = bmp.width;
+          remoteCanvas.height = bmp.height;
+          if (remoteStage) {
+            remoteStage.style.aspectRatio = `${bmp.width} / ${bmp.height}`;
+          }
+          updateOverlayCursorVisual();
+        }
+        const ctx2d = remoteCanvas.getContext("2d", { alpha: false });
+        if (ctx2d) {
+          ctx2d.drawImage(bmp, 0, 0);
+        }
+        bmp.close();
+        cur = parallelQueuedBuf;
+      }
+    } catch {
+      // ignore single frame error
+    } finally {
+      parallelDecoding = false;
+    }
+  }
+
+  function startParallelRdpSession(macBase) {
+    return new Promise((resolve, reject) => {
+      closeParallelRdpWs();
+      closeRdpAudioWs();
+      if (rdpSession) {
+        try {
+          rdpSession.shutdown();
+        } catch {
+          // ignore
+        }
+        rdpSession = null;
+      }
+
+      const wsUrl = `${macBase.replace(/^http/, "ws")}/rdp-parallel-ws`;
+      let settled = false;
+      const sock = new WebSocket(wsUrl);
+      sock.binaryType = "arraybuffer";
+      rdpParallelWs = sock;
+
+      const openTimer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          closeParallelRdpWs();
+          reject(new Error("Quá thời gian mở luồng Song song."));
+        }
+      }, 2200);
+
+      sock.onopen = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(openTimer);
+        rdpActiveEngine = "parallel";
+        cursorHiddenByServer = false;
+        cursorHotspotX = 2;
+        cursorHotspotY = 1;
+        if (remoteCursorImg) remoteCursorImg.classList.add("is-hidden");
+        if (remoteCursorSvg) remoteCursorSvg.classList.remove("is-hidden");
+        remoteCanvas.style.cursor = "none";
+        rdpConnecting = false;
+        setRdpStatus("", true);
+        if (remoteLoginOverlay) remoteLoginOverlay.classList.add("is-hidden");
+        setRemoteHudExpanded(false);
+        syncRdpConnectionUI();
+        pushKvmConfigToServer();
+        resolve(true);
+      };
+
+      sock.onmessage = (ev) => {
+        if (ev.data instanceof ArrayBuffer) {
+          if (ev.data.byteLength < 2) return;
+          const b0 = new Uint8Array(ev.data, 0, 1)[0];
+          if (b0 === 0x10) {
+            void renderParallelJpegFrame(ev.data);
+          } else if (b0 === 0x01) {
+            playRdpSpeakerPcm(ev.data);
+          }
+          return;
+        }
+        if (typeof ev.data === "string") {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === "spk_format") {
+              rdpSpkRate = Number(msg.rate) || 44100;
+              rdpSpkChannels = Number(msg.channels) || 2;
+              rdpNextPlayTime = 0;
+            } else if (msg.type === "parallel_ended") {
+              // MacBook vừa đóng cửa sổ Remote Desktop -> tự chuyển mượt sang Native RDP 2248x1080 trên điện thoại!
+              closeParallelRdpWs();
+              rdpActiveEngine = "none";
+              syncRdpConnectionUI();
+              if (!rdpManualDisconnect && kbLayout === "remote") {
+                const hasPass = Boolean(rdpPassInput && rdpPassInput.value);
+                if (hasPass) {
+                  void connectRdpSession();
+                  return;
+                }
+              }
+              if (kbLayout === "remote" && remoteLoginOverlay) {
+                setRdpStatus("MacBook đã đóng phiên Remote. Nhập mật khẩu để kết nối trực tiếp.", false);
+                remoteLoginOverlay.classList.remove("is-hidden");
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+      };
+
+      sock.onerror = () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(openTimer);
+          closeParallelRdpWs();
+          reject(new Error("Lỗi kết nối luồng Song song."));
+        }
+      };
+
+      sock.onclose = () => {
+        if (rdpParallelWs === sock) {
+          rdpParallelWs = null;
+          if (rdpActiveEngine === "parallel") {
+            rdpActiveEngine = "none";
+          }
+          syncRdpConnectionUI();
+          if (settled && !rdpManualDisconnect && kbLayout === "remote" && remoteLoginOverlay) {
+            setRdpStatus("Phiên Song song đã ngắt.", false);
+            remoteLoginOverlay.classList.remove("is-hidden");
+          }
+        }
+      };
+    });
+  }
+
   async function connectRdpSession() {
     if (rdpConnecting || !remoteCanvas) return;
+    rdpManualDisconnect = false;
     ensureRdpAudioContext();
+
+    rdpConnecting = true;
+    syncRdpConnectionUI();
+
+    // 1. Nếu không khóa cứng chế độ Độc quyền -> kiểm tra xem MacBook đang mở Microsoft Remote Desktop không.
+    //    Nếu có -> vào thẳng chế độ Song song (⚡ Song song) trong ~0.1s, cả 2 máy cùng chạy không bao giờ đá nhau!
+    if (!rdpPreferExclusive) {
+      setRdpStatus("Đang kiểm tra kết nối Song song...", true);
+      const parCheck = await checkMacParallelAvailable();
+      if (parCheck.available) {
+        try {
+          await startParallelRdpSession(parCheck.macBase);
+          return;
+        } catch {
+          // Nếu lỗi bất ngờ thì rơi xuống kết nối Native RDP trực tiếp
+        }
+      }
+    } else {
+      // Nếu người dùng chủ động bật "🎧 Mic ĐT" (Độc quyền) -> đóng cửa sổ phiên trên Mac trước để Mac không tự giật lại sau 13s
+      const macBase = resolveMacHttpBase();
+      try {
+        await fetch(`${macBase}/close-mac-rdp-session`, { method: "POST" });
+        await new Promise((r) => setTimeout(r, 340));
+      } catch {
+        // ignore
+      }
+    }
+
     const rawHost = (rdpHostInput ? rdpHostInput.value : "192.168.52.230").trim() || "192.168.52.230";
     const rawUser = (rdpUserInput ? rdpUserInput.value : "DESKTOP-4LTT2HE\\User").trim() || "DESKTOP-4LTT2HE\\User";
     const rawPass = rdpPassInput ? rdpPassInput.value : "";
 
     if (!rawPass) {
+      rdpConnecting = false;
+      syncRdpConnectionUI();
       if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
       setRdpStatus("Nhập mật khẩu Windows PC để kết nối.", false);
       if (rdpPassInput) rdpPassInput.focus();
       return;
     }
 
+    closeParallelRdpWs();
     if (rdpSession) {
       try {
         rdpSession.shutdown();
@@ -2983,8 +3411,9 @@
       rdpSession = null;
     }
 
-    rdpConnecting = true;
-    syncRdpConnectionUI();
+    if (remoteStage) {
+      remoteStage.style.aspectRatio = "2248 / 1080";
+    }
     setRdpStatus("Đang khởi tạo kết nối 2248×1080 (100%)...", true);
 
     try {
@@ -3028,7 +3457,6 @@
           builder.extension(new mod.Extension("enable_credssp", true));
           builder.extension(new mod.Extension("display_control", true));
           builder.extension(new mod.Extension("enable_server_pointer", true));
-          // Kích hoạt kênh tĩnh RDPSND để ghép kênh Loa Stereo + kết hợp DRDYNVC AUDIO_INPUT cho Microphone Remote Audio
           builder.extension(
             new mod.Extension("print_job_stream_callbacks", {
               onJobData: () => {},
@@ -3089,7 +3517,6 @@
         } catch (err) {
           closeRdpAudioWs();
           lastErr = err;
-          // Nếu sai mật khẩu thì dừng ngay không thử cổng kế tiếp
           if (err && typeof err.kind === "function" && (err.kind() === 1 || err.kind() === 2)) {
             break;
           }
@@ -3101,6 +3528,7 @@
       }
 
       rdpSession = connectedSession;
+      rdpActiveEngine = "native";
       try {
         localStorage.setItem(STORAGE_RDP_HOST, rawHost);
         localStorage.setItem(STORAGE_RDP_USER, rawUser);
@@ -3112,6 +3540,9 @@
       const ds = rdpSession.desktopSize();
       remoteCanvas.width = ds.width || RDP_TARGET_W;
       remoteCanvas.height = ds.height || RDP_TARGET_H;
+      if (remoteStage) {
+        remoteStage.style.aspectRatio = `${remoteCanvas.width} / ${remoteCanvas.height}`;
+      }
 
       rdpConnecting = false;
       setRdpStatus("", true);
@@ -3131,7 +3562,6 @@
         }
       }
 
-      // Chỉ gửi lệnh resize nếu độ phân giải ban đầu chưa khớp 2248x1080 (tránh DeactivateAll gây trễ màn hình)
       if (ds.width !== RDP_TARGET_W || ds.height !== RDP_TARGET_H) {
         setTimeout(() => {
           if (rdpSession) {
@@ -3150,30 +3580,43 @@
         }, 250);
       }
 
+      const handleNativeEnded = async (errObj) => {
+        rdpSession = null;
+        if (rdpActiveEngine === "native") rdpActiveEngine = "none";
+        closeRdpAudioWs();
+        syncRdpConnectionUI();
+        if (!rdpManualDisconnect && kbLayout === "remote") {
+          // Nếu người dùng vừa bật Microsoft Remote Desktop trên MacBook làm phiên Native nhường chỗ -> chuyển mượt sang Song song!
+          await new Promise((r) => setTimeout(r, 520));
+          const chk = await checkMacParallelAvailable();
+          if (chk.available) {
+            rdpPreferExclusive = false;
+            rdpConnecting = true;
+            syncRdpConnectionUI();
+            try {
+              await startParallelRdpSession(chk.macBase);
+              return;
+            } catch {
+              rdpConnecting = false;
+              syncRdpConnectionUI();
+            }
+          }
+        }
+        if (kbLayout === "remote" && remoteLoginOverlay) {
+          setRdpStatus(errObj ? formatIronRdpError(errObj) : "Phiên Remote PC đã ngắt.", false);
+          remoteLoginOverlay.classList.remove("is-hidden");
+        }
+      };
+
       rdpSession
         .run()
-        .then(() => {
-          rdpSession = null;
-          closeRdpAudioWs();
-          syncRdpConnectionUI();
-          if (kbLayout === "remote" && remoteLoginOverlay) {
-            setRdpStatus("Phiên Remote PC đã ngắt.", false);
-            remoteLoginOverlay.classList.remove("is-hidden");
-          }
-        })
-        .catch((runErr) => {
-          rdpSession = null;
-          closeRdpAudioWs();
-          syncRdpConnectionUI();
-          if (kbLayout === "remote" && remoteLoginOverlay) {
-            setRdpStatus(formatIronRdpError(runErr), false);
-            remoteLoginOverlay.classList.remove("is-hidden");
-          }
-        });
+        .then(() => handleNativeEnded(null))
+        .catch((runErr) => handleNativeEnded(runErr));
     } catch (err) {
       closeRdpAudioWs();
       rdpConnecting = false;
       rdpSession = null;
+      rdpActiveEngine = "none";
       syncRdpConnectionUI();
       if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
       setRdpStatus(formatIronRdpError(err), false);
@@ -3181,6 +3624,8 @@
   }
 
   function disconnectRdpSession() {
+    rdpManualDisconnect = true;
+    closeParallelRdpWs();
     closeRdpAudioWs();
     if (rdpSession) {
       try {
@@ -3190,20 +3635,30 @@
       }
       rdpSession = null;
     }
+    rdpActiveEngine = "none";
     rdpConnecting = false;
+    if (kvmActive) {
+      sendPayload({ type: "kvm_set", captured: false });
+    }
     kvmActive = false;
+    syncSmartKvmButtonsUI();
     updateOverlayCursorVisual();
     syncRdpConnectionUI();
     setRdpStatus("Đã ngắt kết nối.", false);
     if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
   }
 
-  // ── Xử lý Chuột Bluetooth xuyên màn hình từ MacBook (MacKvmBridge) ──
+  // ── Cơ chế Chuột Bluetooth Thông minh (Smart Toggle KVM — Không đẩy tràn mép) ──
+  function toggleSmartBluetoothMouse() {
+    triggerHaptic(10);
+    sendPayload({ type: "kvm_toggle" });
+  }
+
   handleKvmServerMessage = (msg) => {
     if (!msg) return;
-    if (msg.type === "kvm_released") {
+    if (msg.type === "kvm_released" || (msg.type === "kvm_state" && !msg.captured)) {
       kvmActive = false;
-      kvmReturnPush = 0;
+      syncSmartKvmButtonsUI();
       updateOverlayCursorVisual();
       if (rdpSession) {
         try {
@@ -3216,101 +3671,49 @@
     }
 
     if (kbLayout !== "remote") {
-      sendPayload({ type: "kvm_return" });
+      sendPayload({ type: "kvm_set", captured: false });
       return;
     }
 
     const cw = remoteCanvas ? remoteCanvas.width || RDP_TARGET_W : RDP_TARGET_W;
     const ch = remoteCanvas ? remoteCanvas.height || RDP_TARGET_H : RDP_TARGET_H;
 
-    if (msg.type === "kvm_enter") {
-      kvmActive = true;
-      kvmMacEdge = msg.mac_edge || "bottom";
-      kvmPhoneEdge = msg.phone_edge || "top";
-      kvmReturnPush = 0;
-      const r = Math.max(0.02, Math.min(0.98, Number(msg.ratio) || 0.5));
-      if (kvmPhoneEdge === "top") {
-        kvmX = Math.round(r * (cw - 1));
-        kvmY = 4;
-      } else if (kvmPhoneEdge === "bottom") {
-        kvmX = Math.round(r * (cw - 1));
-        kvmY = ch - 5;
-      } else if (kvmPhoneEdge === "left") {
-        kvmX = 4;
-        kvmY = Math.round(r * (ch - 1));
-      } else {
-        kvmX = cw - 5;
-        kvmY = Math.round(r * (ch - 1));
+    if (msg.type === "kvm_state" && msg.captured) {
+      if (!kvmActive) {
+        kvmActive = true;
+        if (kvmX <= 4 || kvmX >= cw - 4 || kvmY <= 4 || kvmY >= ch - 4) {
+          kvmX = Math.round(cw * 0.5);
+          kvmY = Math.round(ch * 0.5);
+        }
       }
+      syncSmartKvmButtonsUI();
       updateOverlayCursorVisual();
       rdpSendMouseMove(kvmX, kvmY);
       return;
     }
 
     if (msg.type === "kvm_mouse") {
-      if (!kvmActive) kvmActive = true;
+      if (!kvmActive) {
+        kvmActive = true;
+        syncSmartKvmButtonsUI();
+      }
       if (msg.ev === "move") {
-        const scale = 1.38;
+        const scale = 1.35;
         const dx = (Number(msg.dx) || 0) * scale;
         const dy = (Number(msg.dy) || 0) * scale;
-
-        let pushingOut = false;
-        if (kvmPhoneEdge === "top" && kvmY <= 2 && dy < 0) {
-          kvmReturnPush += -dy;
-          pushingOut = true;
-        } else if (kvmPhoneEdge === "bottom" && kvmY >= ch - 3 && dy > 0) {
-          kvmReturnPush += dy;
-          pushingOut = true;
-        } else if (kvmPhoneEdge === "left" && kvmX <= 2 && dx < 0) {
-          kvmReturnPush += -dx;
-          pushingOut = true;
-        } else if (kvmPhoneEdge === "right" && kvmX >= cw - 3 && dx > 0) {
-          kvmReturnPush += dx;
-          pushingOut = true;
-        }
-
-        if (pushingOut && kvmReturnPush >= 18) {
-          const exitRatio =
-            kvmPhoneEdge === "top" || kvmPhoneEdge === "bottom"
-              ? kvmX / Math.max(1, cw)
-              : kvmY / Math.max(1, ch);
-          kvmActive = false;
-          kvmReturnPush = 0;
-          updateOverlayCursorVisual();
-          if (rdpSession) {
-            try {
-              rdpSession.releaseAllInputs();
-            } catch {
-              // ignore
-            }
-          }
-          sendPayload({
-            type: "kvm_return",
-            mac_edge: kvmMacEdge,
-            ratio: +Math.max(0.02, Math.min(0.98, exitRatio)).toFixed(4),
-          });
-          return;
-        }
-
         kvmX = Math.max(0, Math.min(cw - 1, kvmX + dx));
         kvmY = Math.max(0, Math.min(ch - 1, kvmY + dy));
-        if (!pushingOut && kvmX > 6 && kvmX < cw - 7 && kvmY > 6 && kvmY < ch - 7) {
-          kvmReturnPush = 0;
-        }
         updateOverlayCursorVisual();
         rdpSendMouseMove(kvmX, kvmY);
-      } else if (msg.ev === "down" && rdpMod) {
-        applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseButtonPressed(Number(msg.btn) || 0)]);
-      } else if (msg.ev === "up" && rdpMod) {
-        applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseButtonReleased(Number(msg.btn) || 0)]);
-      } else if (msg.ev === "wheel" && rdpMod) {
+      } else if (msg.ev === "down") {
+        rdpSendMouseDown(kvmX, kvmY, Number(msg.btn) || 0, 1);
+      } else if (msg.ev === "up") {
+        rdpSendMouseUp(kvmX, kvmY, Number(msg.btn) || 0, 1);
+      } else if (msg.ev === "wheel") {
         const unit = msg.unit === "px" ? 0 : 1;
         const sy = Number(msg.sy) || 0;
         const sx = Number(msg.sx) || 0;
-        const evs = [];
-        if (sy !== 0) evs.push(rdpMod.DeviceEvent.wheelRotations(true, sy, unit));
-        if (sx !== 0) evs.push(rdpMod.DeviceEvent.wheelRotations(false, -sx, unit));
-        applyRdpDeviceEvents(evs);
+        rdpSendWheel(sx, sy, unit);
       }
     }
   };
@@ -3360,13 +3763,14 @@
         if (rdpHudExpanded) {
           setRemoteHudExpanded(false);
         }
-        if (!rdpSession) return;
+        if (!isRemoteConnected()) return;
         e.preventDefault();
 
         if (e.touches.length >= 2) {
           clearRdpLongTimer();
-          if (rTouchMode === "drag" && rdpMod) {
-            applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseButtonReleased(0)]);
+          if (rTouchMode === "drag") {
+            const releasePt = clientToRemoteCoords(rLastX, rLastY);
+            rdpSendMouseUp(releasePt.x, releasePt.y, 0, 1);
           }
           rTouchMode = "two";
           const t0 = e.touches[0];
@@ -3406,7 +3810,7 @@
     remoteViewport.addEventListener(
       "touchmove",
       (e) => {
-        if (!rdpSession) return;
+        if (!isRemoteConnected()) return;
         e.preventDefault();
 
         if (rTouchMode === "two" && e.touches.length >= 2) {
@@ -3433,21 +3837,27 @@
             rdpPanX += dMidX;
             rdpPanY += dMidY;
             applyRdpStageTransform();
-          } else if (rdpMod) {
+          } else {
+            const midPt = clientToRemoteCoords(midX, midY);
+            kvmX = midPt.x;
+            kvmY = midPt.y;
             rScrollAccY += dMidY * 1.65;
             rScrollAccX += dMidX * 1.35;
             const py = Math.trunc(rScrollAccY);
             const px = Math.trunc(rScrollAccX);
-            const evs = [];
+            let sdx = 0;
+            let sdy = 0;
             if (Math.abs(py) >= 2) {
               rScrollAccY -= py;
-              evs.push(rdpMod.DeviceEvent.wheelRotations(true, py, 0));
+              sdy = py;
             }
             if (Math.abs(px) >= 4) {
               rScrollAccX -= px;
-              evs.push(rdpMod.DeviceEvent.wheelRotations(false, -px, 0));
+              sdx = px;
             }
-            if (evs.length > 0) applyRdpDeviceEvents(evs);
+            if (sdx !== 0 || sdy !== 0) {
+              rdpSendWheel(sdx, sdy, 0);
+            }
           }
           return;
         }
@@ -3463,14 +3873,10 @@
           if (!rMoved && distFromStart > 9) {
             rMoved = true;
             clearRdpLongTimer();
-            if (rLongFired && rdpMod) {
-              // Ấn giữ + kéo lướt -> Bôi đen văn bản / Kéo thả cửa sổ trên Windows PC
+            if (rLongFired) {
               rTouchMode = "drag";
               const startPt = clientToRemoteCoords(rStartX, rStartY);
-              applyRdpDeviceEvents([
-                rdpMod.DeviceEvent.mouseMove(startPt.x, startPt.y),
-                rdpMod.DeviceEvent.mouseButtonPressed(0),
-              ]);
+              rdpSendMouseDown(startPt.x, startPt.y, 0, 1);
             }
           }
 
@@ -3494,16 +3900,15 @@
 
     const handleRdpTouchEnd = (e) => {
       clearRdpLongTimer();
-      if (!rdpSession) {
+      if (!isRemoteConnected()) {
         rTouchMode = "none";
         return;
       }
 
       if (rTouchMode === "drag") {
         if (e.touches.length === 0) {
-          if (rdpMod) {
-            applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseButtonReleased(0)]);
-          }
+          const pt = clientToRemoteCoords(rLastX, rLastY);
+          rdpSendMouseUp(pt.x, pt.y, 0, 1);
           rTouchMode = "none";
         }
         return;
@@ -3512,7 +3917,6 @@
       if (rTouchMode === "single" && e.touches.length === 0) {
         const pt = clientToRemoteCoords(rLastX, rLastY);
         if (rLongFired && !rMoved) {
-          // Ấn giữ tại chỗ -> Chuột phải chuẩn Microsoft Remote Desktop
           rdpSendMouseClick(pt.x, pt.y, 2, 1);
         } else if (!rMoved) {
           const now = performance.now();
@@ -3520,7 +3924,7 @@
             now - rLastTapAt < 320 &&
             Math.hypot(pt.x - rLastTapRx, pt.y - rLastTapRy) < 28
           ) {
-            rdpSendMouseClick(rLastTapRx, rLastTapRy, 0, 1);
+            rdpSendMouseClick(rLastTapRx, rLastTapRy, 0, 2);
             rLastTapAt = 0;
           } else {
             rdpSendMouseClick(pt.x, pt.y, 0, 1);
@@ -3538,43 +3942,40 @@
     remoteViewport.addEventListener("touchend", handleRdpTouchEnd, { passive: false });
     remoteViewport.addEventListener("touchcancel", handleRdpTouchEnd, { passive: false });
 
-    // Hỗ trợ cả chuột vật lý gắn trực tiếp vào điện thoại / trình duyệt
     remoteViewport.addEventListener("pointermove", (e) => {
-      if (e.pointerType !== "mouse" || !rdpSession) return;
+      if (e.pointerType !== "mouse" || !isRemoteConnected()) return;
       const pt = clientToRemoteCoords(e.clientX, e.clientY);
       rdpSendMouseMove(pt.x, pt.y);
     });
 
     remoteViewport.addEventListener("pointerdown", (e) => {
-      if (e.pointerType !== "mouse" || !rdpSession || !rdpMod) return;
+      if (e.pointerType !== "mouse" || !isRemoteConnected()) return;
       e.preventDefault();
       remoteCanvas.focus();
       const pt = clientToRemoteCoords(e.clientX, e.clientY);
-      applyRdpDeviceEvents([
-        rdpMod.DeviceEvent.mouseMove(pt.x, pt.y),
-        rdpMod.DeviceEvent.mouseButtonPressed(e.button),
-      ]);
+      rdpSendMouseDown(pt.x, pt.y, e.button, 1);
     });
 
     remoteViewport.addEventListener("pointerup", (e) => {
-      if (e.pointerType !== "mouse" || !rdpSession || !rdpMod) return;
+      if (e.pointerType !== "mouse" || !isRemoteConnected()) return;
       e.preventDefault();
-      applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseButtonReleased(e.button)]);
+      const pt = clientToRemoteCoords(e.clientX, e.clientY);
+      rdpSendMouseUp(pt.x, pt.y, e.button, 1);
     });
 
     remoteViewport.addEventListener(
       "wheel",
       (e) => {
-        if (!rdpSession || !rdpMod) return;
+        if (!isRemoteConnected()) return;
         e.preventDefault();
-        const evs = [];
-        if (e.deltaY !== 0) {
-          evs.push(rdpMod.DeviceEvent.wheelRotations(true, e.deltaY > 0 ? -1 : 1, 1));
+        const pt = clientToRemoteCoords(e.clientX, e.clientY);
+        kvmX = pt.x;
+        kvmY = pt.y;
+        const dy = e.deltaY !== 0 ? (e.deltaY > 0 ? -1 : 1) : 0;
+        const dx = e.deltaX !== 0 ? (e.deltaX > 0 ? 1 : -1) : 0;
+        if (dx !== 0 || dy !== 0) {
+          rdpSendWheel(dx, dy, 1);
         }
-        if (e.deltaX !== 0) {
-          evs.push(rdpMod.DeviceEvent.wheelRotations(false, e.deltaX > 0 ? -1 : 1, 1));
-        }
-        applyRdpDeviceEvents(evs);
       },
       { passive: false }
     );
@@ -3583,10 +3984,23 @@
   // ── Bàn phím vật lý / Bàn phím ảo điện thoại & Microphone Tiếng Việt ──
   if (remoteCanvas) {
     remoteCanvas.addEventListener("keydown", (e) => {
-      if (!rdpSession || !rdpMod || kbLayout !== "remote") return;
+      if (!isRemoteConnected() || kbLayout !== "remote") return;
       if (document.activeElement === rdpHostInput || document.activeElement === rdpUserInput || document.activeElement === rdpPassInput) {
         return;
       }
+      if (rdpActiveEngine === "parallel") {
+        if (CODE_TO_SERVER_KEY[e.code]) {
+          e.preventDefault();
+          const mods = [];
+          if (e.ctrlKey) mods.push("ctrl");
+          if (e.altKey) mods.push("alt");
+          if (e.shiftKey) mods.push("shift");
+          if (e.metaKey) mods.push("cmd");
+          sendParallelJson({ type: "key_tap", key: CODE_TO_SERVER_KEY[e.code], mods });
+        }
+        return;
+      }
+      if (!rdpMod) return;
       const sc = RDP_SCANCODE_MAP[e.code];
       if (sc !== undefined) {
         e.preventDefault();
@@ -3595,7 +4009,7 @@
     });
 
     remoteCanvas.addEventListener("keyup", (e) => {
-      if (!rdpSession || !rdpMod || kbLayout !== "remote") return;
+      if (!rdpSession || !rdpMod || rdpActiveEngine !== "native" || kbLayout !== "remote") return;
       const sc = RDP_SCANCODE_MAP[e.code];
       if (sc !== undefined) {
         e.preventDefault();
@@ -3704,8 +4118,44 @@
     syncRdpAudioButtonsUI();
   }
 
+  function switchCoexistMode(forceExclusive = null) {
+    triggerHaptic(10);
+    if (forceExclusive !== null) {
+      rdpPreferExclusive = Boolean(forceExclusive);
+    } else if (rdpActiveEngine === "parallel") {
+      rdpPreferExclusive = true;
+    } else if (rdpActiveEngine === "native") {
+      rdpPreferExclusive = false;
+    } else {
+      rdpPreferExclusive = !rdpPreferExclusive;
+    }
+    if (rdpPreferExclusive) {
+      rdpMicEnabled = true;
+    }
+    syncCoexistButtonUI();
+    closeParallelRdpWs();
+    closeRdpAudioWs();
+    if (rdpSession) {
+      try {
+        rdpSession.shutdown();
+      } catch {
+        // ignore
+      }
+      rdpSession = null;
+    }
+    rdpActiveEngine = "none";
+    rdpConnecting = false;
+    syncRdpConnectionUI();
+    void connectRdpSession();
+  }
+
   function toggleRemoteMicrophone() {
     triggerHaptic(10);
+    if (rdpActiveEngine === "parallel") {
+      // Đang ở chế độ Song song -> bấm Mic sẽ bật ngay chế độ Độc quyền để chuyển Microphone (Remote Audio) về điện thoại cho Antigravity!
+      switchCoexistMode(true);
+      return;
+    }
     rdpMicEnabled = !rdpMicEnabled;
     if (rdpMicEnabled) {
       if (rdpServerMicOpen) {
@@ -3721,6 +4171,27 @@
     btnRemoteSpk.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleRemoteSpeaker();
+    });
+  }
+
+  if (btnRemoteCoexist) {
+    btnRemoteCoexist.addEventListener("click", (e) => {
+      e.stopPropagation();
+      switchCoexistMode(null);
+    });
+  }
+
+  if (btnRemoteMousePill) {
+    btnRemoteMousePill.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleSmartBluetoothMouse();
+    });
+  }
+
+  if (btnRemoteMouse) {
+    btnRemoteMouse.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleSmartBluetoothMouse();
     });
   }
 
@@ -3767,22 +4238,6 @@
         setRemoteHudExpanded(false);
         openRemoteSoftKeyboard();
       }
-    });
-  }
-
-  if (btnRemoteEdge) {
-    btnRemoteEdge.addEventListener("click", (e) => {
-      e.stopPropagation();
-      triggerHaptic(8);
-      const idx = EDGE_CYCLE.indexOf(rdpEdgeMode);
-      rdpEdgeMode = EDGE_CYCLE[(idx + 1) % EDGE_CYCLE.length];
-      try {
-        localStorage.setItem(STORAGE_RDP_EDGE, rdpEdgeMode);
-      } catch {
-        // ignore
-      }
-      syncRemoteEdgeLabel();
-      pushKvmConfigToServer();
     });
   }
 
@@ -3869,7 +4324,7 @@
 
   if (btnRdpCloseCard) {
     btnRdpCloseCard.addEventListener("click", () => {
-      if (rdpSession && remoteLoginOverlay) {
+      if (isRemoteConnected() && remoteLoginOverlay) {
         remoteLoginOverlay.classList.add("is-hidden");
       }
     });
@@ -3879,12 +4334,24 @@
     setRemoteHudExpanded(false);
     pushKvmConfigToServer();
     syncRdpConnectionUI();
-    if (!rdpSession && !rdpConnecting) {
+    if (!isRemoteConnected() && !rdpConnecting) {
       const hasSavedPass = Boolean(rdpPassInput && rdpPassInput.value);
       if (hasSavedPass) {
         void connectRdpSession();
-      } else if (remoteLoginOverlay) {
-        remoteLoginOverlay.classList.remove("is-hidden");
+      } else {
+        void checkMacParallelAvailable().then((chk) => {
+          if (
+            chk.available &&
+            !rdpPreferExclusive &&
+            kbLayout === "remote" &&
+            !isRemoteConnected() &&
+            !rdpConnecting
+          ) {
+            void connectRdpSession();
+          } else if (remoteLoginOverlay) {
+            remoteLoginOverlay.classList.remove("is-hidden");
+          }
+        });
       }
     }
   };
@@ -3892,7 +4359,11 @@
   onLeaveRemoteLayout = () => {
     closeRemoteSoftKeyboard();
     setRemoteHudExpanded(false);
+    if (kvmActive) {
+      sendPayload({ type: "kvm_set", captured: false });
+    }
     kvmActive = false;
+    syncSmartKvmButtonsUI();
     updateOverlayCursorVisual();
     pushKvmConfigToServer();
   };
@@ -3918,7 +4389,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.1.4";
+  const BUNDLED_WEB_VERSION = "2.1.5";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();

@@ -1440,6 +1440,12 @@ body.is-lowercase .key-alpha .key-main {
   align-items: center;
 }
 
+.remote-hud-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
 .remote-hud-pill {
   height: 24px;
   padding: 0 10px;
@@ -1456,6 +1462,13 @@ body.is-lowercase .key-alpha .key-main {
   cursor: pointer;
 }
 
+.remote-hud-pill.is-active {
+  border-color: #38bdf8;
+  color: #38bdf8;
+  background: rgba(14, 30, 48, 0.92);
+}
+
+.remote-hud-pills.is-hidden,
 .remote-hud-pill.is-hidden,
 .remote-hud-bar.is-hidden,
 .remote-special-bar.is-hidden,

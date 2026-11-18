@@ -634,11 +634,14 @@
 
     <!-- Thanh công cụ nổi tối giản (mặc định thu gọn thành nút nhỏ sát mép trên) -->
     <div id="remote-hud" class="remote-hud">
-      <button type="button" id="remote-hud-pill" class="remote-hud-pill">
-        <span id="remote-status-dot" class="remote-dot"></span>
-        <span>🖥</span>
-        <span class="remote-caret">▾</span>
-      </button>
+      <div id="remote-hud-pills" class="remote-hud-pills">
+        <button type="button" id="remote-hud-pill" class="remote-hud-pill">
+          <span id="remote-status-dot" class="remote-dot"></span>
+          <span id="remote-pill-mode-ico">🖥</span>
+          <span class="remote-caret">▾</span>
+        </button>
+        <button type="button" id="btn-remote-mouse-pill" class="remote-hud-pill">🖱</button>
+      </div>
 
       <div id="remote-hud-bar" class="remote-hud-bar is-hidden">
         <div class="remote-mode-wrap">
@@ -661,10 +664,11 @@
           </div>
         </div>
 
+        <button type="button" id="btn-remote-coexist" class="remote-pill-btn is-active">⚡ Song song</button>
         <button type="button" id="btn-remote-spk" class="remote-pill-btn is-active">🔊 Loa</button>
         <button type="button" id="btn-remote-mic" class="remote-pill-btn is-active">🎤 Mic</button>
+        <button type="button" id="btn-remote-mouse" class="remote-pill-btn">🖱 Chuột</button>
         <button type="button" id="btn-remote-kb" class="remote-pill-btn">⌨ Phím</button>
-        <button type="button" id="btn-remote-edge" class="remote-pill-btn">✥ Mọi phía</button>
         <button type="button" id="btn-remote-zoom-reset" class="remote-pill-btn is-hidden">100%</button>
         <button type="button" id="btn-remote-cfg" class="remote-pill-btn">⚙</button>
         <button type="button" id="btn-remote-collapse" class="remote-pill-btn">▴</button>

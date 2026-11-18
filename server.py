@@ -1673,34 +1673,24 @@ class LiveLensCapturer:
 
 class MacKvmBridge:
     """
-    Cầu nối chuột Bluetooth xuyên màn hình (Universal Control / KVM) giữa MacBook và tab Remote PC trên điện thoại:
-    - Chỉ kích hoạt khi điện thoại đang mở tab `remote` (kvm_enabled = True).
-    - Khi đẩy chuột vượt qua mép màn hình MacBook (mọi phía hoặc mép chọn), khóa & giấu con trỏ trên Mac
-      (CGAssociateMouseAndMouseCursorPosition(False) + nuốt sự kiện chuột trên Mac) và truyền thẳng sang điện thoại.
-    - Khi đẩy chuột ngược qua mép đối diện trên điện thoại (hoặc bấm Ctrl+Option+Cmd trên Mac / thoát tab Remote),
-      nhả con trỏ về lại đúng vị trí mép tương ứng trên MacBook.
+    Cơ chế chuyển kênh Chuột Bluetooth thông minh (Smart KVM Switch — không dùng đẩy mép màn hình):
+    - Mặc định chuột luôn thuộc về MacBook 100%, chạm 4 mép màn hình Mac tự nhiên không bao giờ bị nhảy nhầm.
+    - Chỉ khi điện thoại đang mở tab `remote` (kvm_enabled = True), người dùng chuyển tức thì `Mac ⇄ Điện thoại` bằng:
+      1) Chạm 1 lần nút `🖱` ngay trên viên thuốc đỉnh màn hình điện thoại; HOẶC
+      2) Nháy đúp nút con lăn giữa (Middle-Click × 2) / bấm nút phụ cạnh hông chuột ngay trên tay cầm chuột; HOẶC
+      3) Nhấn `Ctrl + Option` trên bàn phím MacBook để gọi chuột về lại Mac ngay lập tức.
     """
-
-    OPPOSITE_EDGE = {
-        "bottom": "top",
-        "top": "bottom",
-        "right": "left",
-        "left": "right",
-    }
 
     def __init__(self) -> None:
         self.available: bool = False
         self.captured: bool = False
         self._kvm_enabled: bool = False
-        self._edge_mode: str = "any"
         self._active_ws: Optional[WebSocket] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._send_queue: Optional[asyncio.Queue] = None
-        self._mac_exit_edge: str = "bottom"
         self._saved_pos: Tuple[float, float] = (600.0, 400.0)
-        self._edge_push: float = 0.0
-        self._push_dir: str = ""
-        self._last_return_at: float = 0.0
+        self._last_mid_click_at: float = 0.0
+        self._swallow_other_up: bool = False
         self._bounds_cache: Tuple[float, float, float, float] = (0.0, 0.0, 1440.0, 900.0)
         self._bounds_at: float = 0.0
         self._quartz: Any = None
@@ -1760,10 +1750,10 @@ class MacKvmBridge:
             self._loop = loop
             self._send_queue = send_queue
             self._kvm_enabled = bool(enabled)
-            if edge_mode in ("any", "bottom", "right", "left", "top"):
-                self._edge_mode = edge_mode
             if not self._kvm_enabled and self.captured:
-                self._release_mac_cursor_locked(None, None)
+                self._set_captured_locked(False)
+            else:
+                self._enqueue_payload({"type": "kvm_state", "captured": self.captured})
 
     def detach_client(self, ws: WebSocket) -> None:
         with self._lock:
@@ -1773,91 +1763,57 @@ class MacKvmBridge:
                 self._loop = None
                 self._send_queue = None
                 if self.captured:
-                    self._release_mac_cursor_locked(None, None)
+                    self._set_captured_locked(False)
 
-    def _enter_phone_locked(
-        self,
-        mac_edge: str,
-        ratio: float,
-        min_x: float,
-        min_y: float,
-        max_x: float,
-        max_y: float,
-        cur_x: float,
-        cur_y: float,
-    ) -> None:
+    def _set_captured_locked(self, target: bool) -> None:
         q = self._quartz
-        if q is None or self.captured:
+        if target and (not self._kvm_enabled or self._active_ws is None):
+            target = False
+        if self.captured == target:
+            self._enqueue_payload({"type": "kvm_state", "captured": self.captured})
             return
-        self._saved_pos = (cur_x, cur_y)
-        self._mac_exit_edge = mac_edge
-        self._edge_push = 0.0
-        self._push_dir = ""
-        self.captured = True
-        try:
-            src = q.CGEventSourceCreate(q.kCGEventSourceStateCombinedSessionState)
-            if src is not None and hasattr(q, "CGEventSourceSetLocalEventsSuppressionInterval"):
-                q.CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0)
-            q.CGWarpMouseCursorPosition((max_x - 1.0, max_y - 1.0))
-            q.CGAssociateMouseAndMouseCursorPosition(False)
-        except Exception as exc:
-            logger.debug("KVM warp/disassociate error: %s", exc)
-        phone_edge = self.OPPOSITE_EDGE.get(mac_edge, "top")
-        self._enqueue_payload(
-            {
-                "type": "kvm_enter",
-                "mac_edge": mac_edge,
-                "phone_edge": phone_edge,
-                "ratio": round(ratio, 4),
-            }
-        )
 
-    def _release_mac_cursor_locked(
-        self, mac_edge: Optional[str], ratio: Optional[float]
-    ) -> None:
-        q = self._quartz
-        was_captured = self.captured
-        self.captured = False
-        self._edge_push = 0.0
-        self._push_dir = ""
-        self._last_return_at = time.monotonic()
-        if q is None:
-            return
-        try:
-            min_x, min_y, max_x, max_y = self._get_desktop_bounds()
-            w = max(1.0, max_x - min_x)
-            h = max(1.0, max_y - min_y)
-            edge = mac_edge if mac_edge in ("bottom", "top", "left", "right") else self._mac_exit_edge
-            r = max(0.02, min(0.98, float(ratio))) if ratio is not None else None
-            if r is not None:
-                if edge == "bottom":
-                    rx, ry = min_x + r * w, max_y - 6.0
-                elif edge == "top":
-                    rx, ry = min_x + r * w, min_y + 6.0
-                elif edge == "right":
-                    rx, ry = max_x - 6.0, min_y + r * h
+        self.captured = target
+        if q is not None:
+            try:
+                min_x, min_y, max_x, max_y = self._get_desktop_bounds()
+                src = q.CGEventSourceCreate(q.kCGEventSourceStateCombinedSessionState)
+                if src is not None and hasattr(q, "CGEventSourceSetLocalEventsSuppressionInterval"):
+                    q.CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0)
+                if target:
+                    try:
+                        loc = q.CGEventGetLocation(q.CGEventCreate(None))
+                        self._saved_pos = (float(loc.x), float(loc.y))
+                    except Exception:
+                        pass
+                    q.CGWarpMouseCursorPosition(
+                        (max_x - 1.0, min(max_y - 80.0, min_y + 220.0))
+                    )
+                    q.CGAssociateMouseAndMouseCursorPosition(False)
                 else:
-                    rx, ry = min_x + 6.0, min_y + r * h
-            else:
-                rx, ry = self._saved_pos
-                rx = max(min_x + 8.0, min(max_x - 8.0, rx))
-                ry = max(min_y + 8.0, min(max_y - 8.0, ry))
+                    q.CGAssociateMouseAndMouseCursorPosition(True)
+                    rx, ry = self._saved_pos
+                    rx = max(min_x + 12.0, min(max_x - 12.0, rx))
+                    ry = max(min_y + 12.0, min(max_y - 12.0, ry))
+                    q.CGWarpMouseCursorPosition((rx, ry))
+            except Exception as exc:
+                logger.debug("KVM switch error: %s", exc)
 
-            q.CGAssociateMouseAndMouseCursorPosition(True)
-            src = q.CGEventSourceCreate(q.kCGEventSourceStateCombinedSessionState)
-            if src is not None and hasattr(q, "CGEventSourceSetLocalEventsSuppressionInterval"):
-                q.CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0)
-            q.CGWarpMouseCursorPosition((rx, ry))
-        except Exception as exc:
-            logger.debug("KVM release error: %s", exc)
-        if was_captured:
-            self._enqueue_payload({"type": "kvm_released"})
+        self._enqueue_payload({"type": "kvm_state", "captured": self.captured})
+
+    def set_captured(self, target: bool) -> None:
+        with self._lock:
+            self._set_captured_locked(bool(target))
+
+    def toggle_captured(self) -> None:
+        with self._lock:
+            self._set_captured_locked(not self.captured)
 
     def release_to_mac(
         self, mac_edge: Optional[str] = None, ratio: Optional[float] = None
     ) -> None:
         with self._lock:
-            self._release_mac_cursor_locked(mac_edge, ratio)
+            self._set_captured_locked(False)
 
     def _start_tap_thread(self) -> None:
         def _runner() -> None:
@@ -1880,18 +1836,16 @@ class MacKvmBridge:
                         if event_type == q.kCGEventFlagsChanged:
                             if self.captured:
                                 flags = int(q.CGEventGetFlags(event))
-                                req = (
-                                    int(q.kCGEventFlagMaskControl)
-                                    | int(q.kCGEventFlagMaskAlternate)
-                                    | int(q.kCGEventFlagMaskCommand)
+                                req = int(q.kCGEventFlagMaskControl) | int(
+                                    q.kCGEventFlagMaskAlternate
                                 )
                                 if (flags & req) == req:
-                                    self.release_to_mac()
+                                    self.set_captured(False)
                             return event
 
                         if not self._kvm_enabled or self._active_ws is None:
                             if self.captured:
-                                self.release_to_mac()
+                                self.set_captured(False)
                             return event
 
                         user_tag = int(
@@ -1900,79 +1854,38 @@ class MacKvmBridge:
                         if user_tag == 0x4D4B4231:
                             return event
 
+                        # Kiểm tra thao tác đổi nhanh ngay trên chuột:
+                        # - Bấm nút phụ hông chuột (button >= 3) -> chuyển tức thì 1 chạm
+                        # - Nháy đúp nút con lăn giữa (button == 2, 2 lần trong 0.42s) -> chuyển tức thì
+                        if event_type == q.kCGEventOtherMouseDown:
+                            btn_num = int(
+                                q.CGEventGetIntegerValueField(
+                                    event, q.kCGMouseEventButtonNumber
+                                )
+                            )
+                            if btn_num >= 3:
+                                self._swallow_other_up = True
+                                self.toggle_captured()
+                                return None
+                            if btn_num == 2:
+                                now_m = time.monotonic()
+                                if now_m - self._last_mid_click_at < 0.42:
+                                    self._last_mid_click_at = 0.0
+                                    self._swallow_other_up = True
+                                    self.toggle_captured()
+                                    return None
+                                self._last_mid_click_at = now_m
+
+                        if event_type == q.kCGEventOtherMouseUp and self._swallow_other_up:
+                            self._swallow_other_up = False
+                            return None
+
+                        if not self.captured:
+                            return event
+
                         dx = float(q.CGEventGetIntegerValueField(event, q.kCGMouseEventDeltaX))
                         dy = float(q.CGEventGetIntegerValueField(event, q.kCGMouseEventDeltaY))
 
-                        if not self.captured:
-                            if event_type not in (
-                                q.kCGEventMouseMoved,
-                                q.kCGEventLeftMouseDragged,
-                            ):
-                                return event
-                            if time.monotonic() - self._last_return_at < 0.18:
-                                return event
-
-                            loc = q.CGEventGetLocation(event)
-                            lx, ly = float(loc.x), float(loc.y)
-                            min_x, min_y, max_x, max_y = self._get_desktop_bounds()
-                            w = max(1.0, max_x - min_x)
-                            h = max(1.0, max_y - min_y)
-
-                            mode = self._edge_mode
-                            allowed = (
-                                ("bottom", "right", "left", "top")
-                                if mode == "any"
-                                else (mode,)
-                            )
-
-                            cand = ""
-                            push = 0.0
-                            ratio = 0.5
-                            if "bottom" in allowed and ly >= max_y - 2.5 and dy > 0:
-                                cand = "bottom"
-                                push = dy
-                                ratio = (lx - min_x) / w
-                            elif "top" in allowed and ly <= min_y + 2.0 and dy < 0:
-                                cand = "top"
-                                push = -dy
-                                ratio = (lx - min_x) / w
-                            elif "right" in allowed and lx >= max_x - 2.5 and dx > 0:
-                                cand = "right"
-                                push = dx
-                                ratio = (ly - min_y) / h
-                            elif "left" in allowed and lx <= min_x + 2.0 and dx < 0:
-                                cand = "left"
-                                push = -dx
-                                ratio = (ly - min_y) / h
-
-                            if cand:
-                                with self._lock:
-                                    if self._push_dir == cand:
-                                        self._edge_push += push
-                                    else:
-                                        self._push_dir = cand
-                                        self._edge_push = push
-                                    if self._edge_push >= 24.0:
-                                        self._enter_phone_locked(
-                                            cand,
-                                            max(0.02, min(0.98, ratio)),
-                                            min_x,
-                                            min_y,
-                                            max_x,
-                                            max_y,
-                                            lx,
-                                            ly,
-                                        )
-                                        return None
-                            elif (
-                                min_x + 6.0 < lx < max_x - 6.0
-                                and min_y + 6.0 < ly < max_y - 6.0
-                            ):
-                                self._edge_push = 0.0
-                                self._push_dir = ""
-                            return event
-
-                        # Đang ở trên màn Remote PC của điện thoại -> nuốt sự kiện Mac & đẩy sang điện thoại
                         if event_type in (
                             q.kCGEventMouseMoved,
                             q.kCGEventLeftMouseDragged,
@@ -2329,9 +2242,12 @@ class _RdpAudioSession:
         self.server_buf = bytearray()
 
         self.cs_net_names: List[str] = []
+        self.io_chan_id: Optional[int] = None
         self.rdpsnd_chan_id: Optional[int] = None
         self.drdynvc_chan_id: Optional[int] = None
         self.mcs_initiator: Optional[int] = None
+        self.patched_client_info: bool = False
+        self.got_rdpsnd_wave: bool = False
 
         self.rdpsnd_vc_buf = bytearray()
         self.pending_legacy_wave: Optional[Tuple[int, int, bytes]] = None
@@ -2491,6 +2407,20 @@ class _RdpAudioSession:
                     chan_id = (pkt[10] << 8) | pkt[11]
                     if self.rdpsnd_chan_id is not None and chan_id == self.rdpsnd_chan_id:
                         continue
+                    if not self.patched_client_info and (
+                        self.io_chan_id is None or chan_id == self.io_chan_id
+                    ):
+                        sec_off = 15 if (pkt[13] & 0x80) != 0 else 14
+                        if len(pkt) >= sec_off + 12:
+                            sec_flags = struct.unpack_from("<H", pkt, sec_off)[0]
+                            if (sec_flags & 0x0040) != 0 and (sec_flags & 0x0080) == 0:
+                                old_flags = struct.unpack_from("<I", pkt, sec_off + 8)[0]
+                                if (old_flags & 0x00000011) != 0:
+                                    new_flags = (old_flags & ~0x00080000) | 0x00200000
+                                    mp = bytearray(pkt)
+                                    struct.pack_into("<I", mp, sec_off + 8, new_flags)
+                                    pkt = bytes(mp)
+                                    self.patched_client_info = True
             out_pkts.append(pkt)
         return out_pkts
 
@@ -2565,6 +2495,7 @@ class _RdpAudioSession:
                     and 1000 <= io_chan <= 1100
                     and block_len in (8 + n * 2 + expected_pad, 8 + n * 2)
                 ):
+                    self.io_chan_id = io_chan
                     for i in range(count):
                         cid = struct.unpack_from("<H", pkt, pos + 8 + i * 2)[0]
                         if self.cs_net_names[i] == "rdpsnd":
@@ -2587,6 +2518,7 @@ class _RdpAudioSession:
 
     def _push_speaker_pcm(self, pcm: bytes) -> None:
         if pcm:
+            self.got_rdpsnd_wave = True
             self.enqueue_audio_ws(b"\x01" + pcm)
 
     def _handle_rdpsnd_pkt(self, pkt: bytes) -> None:
@@ -2840,8 +2772,11 @@ async def rdp_audio_ws(ws: WebSocket) -> None:
         _RDP_AUDIO_SESSIONS[sid] = audio_sess
 
     audio_sess.audio_ws = ws
+    _notify_wasapi_demand_changed()
     if audio_sess.spk_format:
         await ws.send_text(json.dumps({"type": "spk_format", **audio_sess.spk_format}))
+    elif _PC_WASAPI_FMT:
+        await ws.send_text(json.dumps({"type": "spk_format", **_PC_WASAPI_FMT}))
     if audio_sess.audin_open and audio_sess.mic_spec:
         await ws.send_text(json.dumps({"type": "mic_start", **audio_sess.mic_spec}))
 
@@ -2878,6 +2813,7 @@ async def rdp_audio_ws(ws: WebSocket) -> None:
         tx_task.cancel()
         if audio_sess.audio_ws is ws:
             audio_sess.audio_ws = None
+        _notify_wasapi_demand_changed()
         try:
             await ws.close()
         except Exception:
@@ -2997,6 +2933,580 @@ async def rdp_cleanpath_ws(ws: WebSocket) -> None:
             pass
 
 
+# ============================================================================
+# CẦU NỐI ÂM THANH WASAPI LOOPBACK & CHẾ ĐỘ REMOTE PC SONG SONG (MAC + ĐIỆN THOẠI)
+# ============================================================================
+_PC_BRIDGE_WS: Optional[WebSocket] = None
+_PC_WASAPI_CLIENTS: Set[asyncio.Queue] = set()
+_PC_WASAPI_FMT: Dict[str, int] = {"rate": 44100, "channels": 2}
+_PC_WASAPI_ACTIVE_WANT: bool = False
+_RDP_PID_TCP_CACHE: Dict[int, Tuple[float, bool]] = {}
+_RDP_LAUNCHER_TITLES = {
+    "pcs",
+    "workspaces",
+    "devices",
+    "apps",
+    "microsoft remote desktop",
+    "windows app",
+    "preferences",
+    "settings",
+}
+
+
+async def _push_pc_bridge_cmd() -> None:
+    global _PC_WASAPI_ACTIVE_WANT
+    want = (len(_PC_WASAPI_CLIENTS) > 0) or any(
+        (s.audio_ws is not None and not s.got_rdpsnd_wave)
+        for s in list(_RDP_AUDIO_SESSIONS.values())
+    )
+    _PC_WASAPI_ACTIVE_WANT = want
+    ws = _PC_BRIDGE_WS
+    if ws is not None:
+        try:
+            await ws.send_text(
+                json.dumps({"cmd": "wasapi_start" if want else "wasapi_stop"})
+            )
+        except Exception:
+            pass
+
+
+def _notify_wasapi_demand_changed() -> None:
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_push_pc_bridge_cmd())
+    except Exception:
+        pass
+
+
+@app.websocket("/pc-bridge-ws")
+async def pc_bridge_ws(ws: WebSocket) -> None:
+    global _PC_BRIDGE_WS, _PC_WASAPI_FMT
+    await ws.accept()
+    _PC_BRIDGE_WS = ws
+    await _push_pc_bridge_cmd()
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            tdata = msg.get("text")
+            if tdata:
+                try:
+                    j = json.loads(tdata)
+                    if j.get("type") == "spk_format":
+                        _PC_WASAPI_FMT = {
+                            "rate": int(j.get("rate", 44100)),
+                            "channels": int(j.get("channels", 2)),
+                        }
+                        fmt_str = json.dumps({"type": "spk_format", **_PC_WASAPI_FMT})
+                        for q in list(_PC_WASAPI_CLIENTS):
+                            try:
+                                q.put_nowait(fmt_str)
+                            except Exception:
+                                pass
+                        for s in list(_RDP_AUDIO_SESSIONS.values()):
+                            if s.audio_ws is not None and not s.got_rdpsnd_wave:
+                                s.enqueue_audio_ws(fmt_str)
+                except Exception:
+                    pass
+                continue
+
+            bdata = msg.get("bytes")
+            if bdata and len(bdata) > 1 and bdata[0] == 0x01:
+                for q in list(_PC_WASAPI_CLIENTS):
+                    if q.qsize() > 60:
+                        try:
+                            q.get_nowait()
+                        except Exception:
+                            pass
+                    try:
+                        q.put_nowait(bdata)
+                    except Exception:
+                        pass
+                any_fallback = False
+                for s in list(_RDP_AUDIO_SESSIONS.values()):
+                    if s.audio_ws is not None and not s.got_rdpsnd_wave:
+                        any_fallback = True
+                        s.enqueue_audio_ws(bdata)
+                if not _PC_WASAPI_CLIENTS and not any_fallback and _PC_WASAPI_ACTIVE_WANT:
+                    await _push_pc_bridge_cmd()
+    except Exception:
+        pass
+    finally:
+        if _PC_BRIDGE_WS is ws:
+            _PC_BRIDGE_WS = None
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+def _pid_has_established_rdp_socket(pid: int) -> bool:
+    now = time.monotonic()
+    cached = _RDP_PID_TCP_CACHE.get(pid)
+    if cached is not None and (now - cached[0]) < 0.65:
+        return cached[1]
+    ok = False
+    for lsof_bin in ("/usr/sbin/lsof", "lsof"):
+        try:
+            out = subprocess.check_output(
+                [lsof_bin, "-Pan", "-p", str(pid), "-iTCP", "-sTCP:ESTABLISHED"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=0.5,
+            )
+            if ":3389" in out:
+                ok = True
+            break
+        except FileNotFoundError:
+            continue
+        except subprocess.CalledProcessError:
+            # lsof trả về mã 1 khi tiến trình không có kết nối TCP ESTABLISHED nào
+            ok = False
+            break
+        except Exception:
+            break
+    _RDP_PID_TCP_CACHE[pid] = (now, ok)
+    return ok
+
+
+def find_mac_rdp_window() -> Optional[Dict[str, Any]]:
+    if not IS_MACOS or lens_capturer._quartz is None or lens_capturer._objc is None:
+        return None
+    q = lens_capturer._quartz
+    try:
+        with lens_capturer._objc.autorelease_pool():
+            win_list = q.CGWindowListCopyWindowInfo(
+                q.kCGWindowListOptionAll, q.kCGNullWindowID
+            )
+            if not win_list:
+                return None
+
+            best_score: Optional[Tuple[int, int, float]] = None
+            best_win: Optional[Dict[str, Any]] = None
+
+            for w in win_list:
+                if int(w.get("kCGWindowLayer", -1)) != 0:
+                    continue
+                owner = str(w.get("kCGWindowOwnerName", "") or "")
+                low_owner = owner.lower()
+                if not (
+                    "microsoft remote desktop" in low_owner
+                    or "windows app" in low_owner
+                    or "com.microsoft.rdc" in low_owner
+                ):
+                    continue
+                alpha = float(w.get("kCGWindowAlpha", 1.0) or 0.0)
+                if alpha <= 0.05:
+                    continue
+                bounds = w.get("kCGWindowBounds")
+                if not bounds:
+                    continue
+                wx = float(bounds.get("X", 0.0))
+                wy = float(bounds.get("Y", 0.0))
+                ww = float(bounds.get("Width", 0.0))
+                wh = float(bounds.get("Height", 0.0))
+                if ww < 480.0 or wh < 320.0:
+                    continue
+                pid = int(w.get("kCGWindowOwnerPID", 0) or 0)
+                if pid <= 0 or not _pid_has_established_rdp_socket(pid):
+                    continue
+
+                w_name = str(w.get("kCGWindowName", "") or "").strip()
+                is_launcher = (
+                    (w_name.lower() in _RDP_LAUNCHER_TITLES) if w_name else False
+                )
+                on_screen = bool(w.get("kCGWindowIsOnscreen", False))
+                score = (
+                    0 if is_launcher else 1,
+                    1 if on_screen else 0,
+                    ww * wh,
+                )
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_win = {
+                        "win_id": int(w.get("kCGWindowNumber", 0)),
+                        "pid": pid,
+                        "owner": owner,
+                        "title": w_name,
+                        "win_x": wx,
+                        "win_y": wy,
+                        "win_w": ww,
+                        "win_h": wh,
+                    }
+
+            if best_win is None or best_win["win_id"] <= 0:
+                return None
+
+            wx = best_win["win_x"]
+            wy = best_win["win_y"]
+            ww = best_win["win_w"]
+            wh = best_win["win_h"]
+            mid_x = wx + ww * 0.5
+            mid_y = wy + wh * 0.5
+
+            main_id = q.CGMainDisplayID()
+            mb = q.CGDisplayBounds(main_id)
+            mon_x, mon_y = float(mb.origin.x), float(mb.origin.y)
+            mon_w, mon_h = float(mb.size.width), float(mb.size.height)
+            try:
+                err, active_ids, count = q.CGGetActiveDisplayList(8, None, None)
+                if err == 0 and count > 0:
+                    for did in active_ids[:count]:
+                        b = q.CGDisplayBounds(did)
+                        bx, by = float(b.origin.x), float(b.origin.y)
+                        bw, bh = float(b.size.width), float(b.size.height)
+                        if bx <= mid_x < bx + bw and by <= mid_y < by + bh:
+                            mon_x, mon_y, mon_w, mon_h = bx, by, bw, bh
+                            break
+            except Exception:
+                pass
+
+            is_fullscreen = (wh >= mon_h - 48.0 and wy <= mon_y + 48.0) or (
+                ww >= mon_w - 8.0 and wh >= mon_h - 80.0
+            )
+            titlebar_h = 0.0 if (is_fullscreen or wh <= 420.0) else 28.0
+            best_win["fullscreen"] = is_fullscreen
+            best_win["content_x"] = wx
+            best_win["content_y"] = wy + titlebar_h
+            best_win["content_w"] = ww
+            best_win["content_h"] = max(240.0, wh - titlebar_h)
+            return best_win
+    except Exception:
+        return None
+
+
+def _capture_mac_rdp_jpeg_packet(win_info: Dict[str, Any]) -> Optional[bytes]:
+    if (
+        lens_capturer._quartz is None
+        or lens_capturer._foundation is None
+        or lens_capturer._objc is None
+    ):
+        return None
+    q = lens_capturer._quartz
+    fd = lens_capturer._foundation
+    try:
+        with lens_capturer._objc.autorelease_pool():
+            win_id = int(win_info["win_id"])
+            cx = float(win_info["content_x"])
+            cy = float(win_info["content_y"])
+            cw = float(win_info["content_w"])
+            ch = float(win_info["content_h"])
+
+            incl_win = getattr(q, "kCGWindowListOptionIncludingWindow", 8)
+            ignore_framing = getattr(q, "kCGWindowImageBoundsIgnoreFraming", 1)
+            nominal_flag = getattr(q, "kCGWindowImageNominalResolution", 16)
+            img_opts = (nominal_flag | ignore_framing) if cw >= 1350.0 else ignore_framing
+
+            rect = q.CGRectMake(cx, cy, cw, ch)
+            cg_img = q.CGWindowListCreateImage(rect, incl_win, win_id, img_opts)
+            if (
+                cg_img is None
+                or int(q.CGImageGetWidth(cg_img)) < 64
+                or int(q.CGImageGetHeight(cg_img)) < 64
+            ):
+                cg_img = q.CGWindowListCreateImage(
+                    q.CGRectNull, incl_win, win_id, img_opts
+                )
+            if cg_img is None:
+                return None
+
+            img_w = int(q.CGImageGetWidth(cg_img))
+            img_h = int(q.CGImageGetHeight(cg_img))
+            if img_w < 32 or img_h < 32:
+                return None
+
+            mutable_data = fd.NSMutableData.data()
+            dest = q.CGImageDestinationCreateWithData(
+                mutable_data, "public.jpeg", 1, None
+            )
+            if dest is None:
+                return None
+            qual_key = getattr(
+                q,
+                "kCGImageDestinationLossyCompressionQuality",
+                "kCGImageDestinationLossyCompressionQuality",
+            )
+            q.CGImageDestinationAddImage(dest, cg_img, {qual_key: 0.76})
+            if not q.CGImageDestinationFinalize(dest):
+                return None
+            jpeg_bytes = bytes(mutable_data)
+            if not jpeg_bytes:
+                return None
+            return (
+                b"\x10"
+                + struct.pack(">HH", min(65535, img_w), min(65535, img_h))
+                + jpeg_bytes
+            )
+    except Exception:
+        return None
+
+
+def _activate_mac_pid_if_needed(pid: int) -> None:
+    if not IS_MACOS or pid <= 0:
+        return
+    try:
+        import AppKit  # type: ignore
+
+        ws_shared = AppKit.NSWorkspace.sharedWorkspace()
+        front = ws_shared.frontmostApplication()
+        if front is not None and int(front.processIdentifier()) == pid:
+            return
+        app_obj = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        if app_obj is not None:
+            app_obj.activateWithOptions_(2)
+            time.sleep(0.012)
+    except Exception:
+        pass
+
+
+def _dispatch_parallel_rdp_input(
+    win_info: Dict[str, Any], data: Dict[str, Any], state: Dict[str, Any]
+) -> None:
+    if not IS_MACOS or injector._quartz is None:
+        return
+    q = injector._quartz
+    mtype = str(data.get("type", ""))
+    pid = int(win_info.get("pid", 0))
+    cx = float(win_info["content_x"])
+    cy = float(win_info["content_y"])
+    cw = float(win_info["content_w"])
+    ch = float(win_info["content_h"])
+
+    if mtype in ("ptr_move", "ptr_down", "ptr_up", "ptr_wheel"):
+        rx = max(0.0, min(1.0, float(data.get("rx", 0.5))))
+        ry = max(0.0, min(1.0, float(data.get("ry", 0.5))))
+        sx = cx + rx * cw
+        sy = cy + ry * ch
+        prev_x = float(state.get("last_sx", sx))
+        prev_y = float(state.get("last_sy", sy))
+        dx = sx - prev_x
+        dy = sy - prev_y
+        state["last_sx"] = sx
+        state["last_sy"] = sy
+        injector._mouse_x = sx
+        injector._mouse_y = sy
+
+        if mtype == "ptr_down":
+            _activate_mac_pid_if_needed(pid)
+            btn_idx = int(data.get("btn", 0))
+            cnt = max(1, int(data.get("count", 1)))
+            state["held_btn"] = btn_idx
+            q.CGWarpMouseCursorPosition((sx, sy))
+            if btn_idx == 2:
+                ev_t, cg_b = q.kCGEventRightMouseDown, q.kCGMouseButtonRight
+            elif btn_idx == 1:
+                ev_t, cg_b = q.kCGEventOtherMouseDown, q.kCGMouseButtonCenter
+            else:
+                ev_t, cg_b = q.kCGEventLeftMouseDown, q.kCGMouseButtonLeft
+            ev = q.CGEventCreateMouseEvent(injector._event_source, ev_t, (sx, sy), cg_b)
+            q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, cnt)
+            q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
+            q.CGEventPost(q.kCGHIDEventTap, ev)
+        elif mtype == "ptr_up":
+            btn_idx = int(data.get("btn", 0))
+            cnt = max(1, int(data.get("count", 1)))
+            if state.get("held_btn") == btn_idx:
+                state["held_btn"] = -1
+            if btn_idx == 2:
+                ev_t, cg_b = q.kCGEventRightMouseUp, q.kCGMouseButtonRight
+            elif btn_idx == 1:
+                ev_t, cg_b = q.kCGEventOtherMouseUp, q.kCGMouseButtonCenter
+            else:
+                ev_t, cg_b = q.kCGEventLeftMouseUp, q.kCGMouseButtonLeft
+            ev = q.CGEventCreateMouseEvent(injector._event_source, ev_t, (sx, sy), cg_b)
+            q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, cnt)
+            q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
+            q.CGEventPost(q.kCGHIDEventTap, ev)
+        elif mtype == "ptr_move":
+            held = int(state.get("held_btn", -1))
+            q.CGWarpMouseCursorPosition((sx, sy))
+            if held == 0:
+                ev_t, cg_b = q.kCGEventLeftMouseDragged, q.kCGMouseButtonLeft
+            elif held == 2:
+                ev_t, cg_b = q.kCGEventRightMouseDragged, q.kCGMouseButtonRight
+            elif held == 1:
+                ev_t, cg_b = q.kCGEventOtherMouseDragged, q.kCGMouseButtonCenter
+            else:
+                ev_t, cg_b = q.kCGEventMouseMoved, q.kCGMouseButtonLeft
+            ev = q.CGEventCreateMouseEvent(injector._event_source, ev_t, (sx, sy), cg_b)
+            if held >= 0:
+                q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, 1)
+            q.CGEventSetIntegerValueField(ev, q.kCGMouseEventDeltaX, int(round(dx)))
+            q.CGEventSetIntegerValueField(ev, q.kCGMouseEventDeltaY, int(round(dy)))
+            q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
+            q.CGEventPost(q.kCGHIDEventTap, ev)
+        elif mtype == "ptr_wheel":
+            _activate_mac_pid_if_needed(pid)
+            q.CGWarpMouseCursorPosition((sx, sy))
+            wx_d = int(round(float(data.get("dx", 0.0))))
+            wy_d = int(round(float(data.get("dy", 0.0))))
+            ev = q.CGEventCreateScrollWheelEvent(
+                injector._event_source, q.kCGScrollEventUnitPixel, 2, wy_d, wx_d
+            )
+            q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
+            q.CGEventPost(q.kCGHIDEventTap, ev)
+        return
+
+    if mtype == "key_tap":
+        _activate_mac_pid_if_needed(pid)
+        key = str(data.get("key", ""))
+        raw_mods = data.get("mods")
+        t_mods = [str(m) for m in raw_mods] if isinstance(raw_mods, list) else None
+        injector.press_key(key, t_mods)
+    elif mtype == "combo":
+        _activate_mac_pid_if_needed(pid)
+        keys = data.get("keys")
+        if isinstance(keys, list):
+            injector.press_combo([str(k) for k in keys])
+    elif mtype == "unicode_text":
+        _activate_mac_pid_if_needed(pid)
+        txt = str(data.get("text", ""))
+        if txt:
+            injector._quartz_post_unicode(txt)
+
+
+@app.get("/rdp-mode-check")
+async def rdp_mode_check() -> dict:
+    win = await asyncio.to_thread(find_mac_rdp_window)
+    return {
+        "ok": True,
+        "parallel_available": win is not None,
+        "pc_bridge_connected": _PC_BRIDGE_WS is not None,
+        "window": win,
+    }
+
+
+@app.post("/close-mac-rdp-session")
+@app.get("/close-mac-rdp-session")
+async def close_mac_rdp_session() -> dict:
+    if not IS_MACOS:
+        return {"ok": False}
+    script = '''
+    tell application "System Events"
+        repeat with procName in {"Microsoft Remote Desktop", "Windows App"}
+            if exists process procName then
+                tell process procName
+                    repeat with w in (every window)
+                        try
+                            set wName to (name of w as string)
+                            if wName is not in {"PCs", "Workspaces", "Devices", "Apps", "Microsoft Remote Desktop", "Windows App"} then
+                                click (first button of w whose subrole is "AXCloseButton")
+                            end if
+                        end try
+                    end repeat
+                end tell
+            end if
+        end repeat
+    end tell
+    '''
+    try:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["osascript", "-e", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.5,
+        )
+    except Exception:
+        pass
+    _RDP_PID_TCP_CACHE.clear()
+    return {"ok": True}
+
+
+@app.websocket("/rdp-parallel-ws")
+async def rdp_parallel_ws(ws: WebSocket) -> None:
+    await ws.accept()
+    audio_q: asyncio.Queue = asyncio.Queue()
+    _PC_WASAPI_CLIENTS.add(audio_q)
+    await _push_pc_bridge_cmd()
+
+    if _PC_WASAPI_FMT:
+        try:
+            await ws.send_text(json.dumps({"type": "spk_format", **_PC_WASAPI_FMT}))
+        except Exception:
+            pass
+
+    running = True
+    cur_win: Dict[str, Any] = {}
+    input_state: Dict[str, Any] = {"held_btn": -1}
+
+    async def _audio_sender() -> None:
+        try:
+            while running:
+                item = await audio_q.get()
+                if item is None:
+                    break
+                if isinstance(item, bytes):
+                    await ws.send_bytes(item)
+                elif isinstance(item, str):
+                    await ws.send_text(item)
+        except Exception:
+            pass
+
+    async def _video_sender() -> None:
+        nonlocal cur_win
+        missing_since: Optional[float] = None
+        last_win_refresh = 0.0
+        try:
+            while running:
+                now = time.monotonic()
+                if not cur_win or (now - last_win_refresh) >= 0.45:
+                    last_win_refresh = now
+                    found = await asyncio.to_thread(find_mac_rdp_window)
+                    if found is not None:
+                        cur_win = found
+                        missing_since = None
+                    else:
+                        if missing_since is None:
+                            missing_since = now
+                        elif (now - missing_since) >= 1.3:
+                            await ws.send_text('{"type":"parallel_ended"}')
+                            break
+                        await asyncio.sleep(0.15)
+                        continue
+
+                pkt = await asyncio.to_thread(_capture_mac_rdp_jpeg_packet, cur_win)
+                if pkt is not None:
+                    await ws.send_bytes(pkt)
+                    await asyncio.sleep(0.042)
+                else:
+                    cur_win = {}
+                    await asyncio.sleep(0.1)
+        except Exception:
+            pass
+
+    a_task = asyncio.create_task(_audio_sender())
+    v_task = asyncio.create_task(_video_sender())
+    try:
+        while True:
+            raw_msg = await ws.receive_text()
+            try:
+                data = json.loads(raw_msg)
+            except Exception:
+                continue
+            if cur_win:
+                await asyncio.to_thread(
+                    _dispatch_parallel_rdp_input, cur_win, data, input_state
+                )
+    except Exception:
+        pass
+    finally:
+        running = False
+        _PC_WASAPI_CLIENTS.discard(audio_q)
+        try:
+            audio_q.put_nowait(None)
+        except Exception:
+            pass
+        a_task.cancel()
+        v_task.cancel()
+        await _push_pc_bridge_cmd()
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
 @app.get("/apk")
 async def download_apk() -> FileResponse:
     apk_path = BASE_DIR / "releases" / "app-release.apk"
@@ -3017,7 +3527,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.1.4",
+        "version": "2.1.5",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
@@ -3260,15 +3770,13 @@ async def keyboard_ws(ws: WebSocket) -> None:
                 )
             elif msg_type == "kvm_config":
                 kvm_on = bool(data.get("enabled", False))
-                edge_m = str(data.get("edge", "any"))
-                kvm_bridge.attach_client(ws, cur_loop, kvm_queue, kvm_on, edge_m)
+                kvm_bridge.attach_client(ws, cur_loop, kvm_queue, kvm_on)
+            elif msg_type == "kvm_toggle":
+                kvm_bridge.toggle_captured()
+            elif msg_type == "kvm_set":
+                kvm_bridge.set_captured(bool(data.get("captured", False)))
             elif msg_type == "kvm_return":
-                r_edge = data.get("mac_edge")
-                r_ratio = data.get("ratio")
-                kvm_bridge.release_to_mac(
-                    str(r_edge) if r_edge is not None else None,
-                    float(r_ratio) if r_ratio is not None else None,
-                )
+                kvm_bridge.set_captured(False)
             elif msg_type == "lens_config":
                 if "enabled" in data:
                     lens_cfg["enabled"] = bool(data["enabled"])
