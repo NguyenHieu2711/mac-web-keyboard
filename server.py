@@ -2276,7 +2276,7 @@ def start_desktop_and_folder_grid_manager() -> None:
                 '  set out to ""\n'
                 "  repeat with itm in (get items of desktop)\n"
                 "    set pos to desktop position of itm\n"
-                '    set out to out & (name of itm) & "\\t" & (item 1 of pos) & "\\t" & (item 2 of pos) & "\\n"\n'
+                "    set out to out & (name of itm) & tab & (item 1 of pos) & tab & (item 2 of pos) & linefeed\n"
                 "  end repeat\n"
                 "  return out\n"
                 "end tell"
