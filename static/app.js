@@ -224,13 +224,13 @@
       el.classList.toggle("is-active", padSplitHorizontal);
     });
     padSplitLabels.forEach((el) => {
-      el.textContent = padSplitHorizontal ? "◫ 60:40" : "⬒ Dọc";
+      el.textContent = padSplitHorizontal ? "↔ Ngang" : "↕ Dọc";
     });
     vnBtns.forEach((el) => {
       el.classList.toggle("is-active", vnEnabled);
     });
     vnLabels.forEach((el) => {
-      el.textContent = vnEnabled ? "🇻🇳 VN" : "🇬🇧 EN";
+      el.textContent = vnEnabled ? "V" : "E";
     });
     modeItems.forEach((item) => {
       item.classList.toggle("is-selected", item.dataset.selectLayout === kbLayout);

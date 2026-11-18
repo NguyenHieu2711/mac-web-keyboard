@@ -1113,6 +1113,12 @@ body.is-lowercase .key-alpha .key-main {
   background: #13233a;
 }
 
+.key-vn-toggle .key-main {
+  font-size: 14.5px !important;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
 .key-vn-toggle.is-active {
   border-color: #22c55e;
   background: #10261c;
