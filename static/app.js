@@ -1430,17 +1430,14 @@
     });
   }
 
-  // Đường cong gia tốc Sigmoid 3 vùng chuẩn libinput / Apple Magic Trackpad:
-  // - Vùng chậm (< 0.18 px/ms): ghìm đằm ~0.65x-1.0x + tích lũy sub-pixel để ngắm trúng nút/thẻ nhỏ không trượt lố
-  // - Vùng vừa (0.20 - 0.55 px/ms): tăng mượt chữ S dễ đoán điểm dừng
-  // - Vùng vẩy nhanh (> 0.65 px/ms): bung gia tốc cao để 1 cú gạt đi hết màn hình lớn
-  // - Phanh bất đối xứng (Asymmetric Braking): khi ngón tay giảm tốc để dừng vào thẻ nhỏ, cắt gia tốc ngay lập tức
-  function computeSigmoidGain(smoothedVelPxMs) {
+  // Đường cong gia tốc lũy thừa liên tục chuẩn Apple Magic Trackpad (Direct 1:1 Power Ballistics):
+  // - Nhích nhẹ tức thời (không có vùng chết gây lì tay), tỉ lệ ~0.8x-1.0x để bám sát từng ký tự/nút nhỏ
+  // - Vẩy nhanh tăng mượt tự nhiên theo hàm mũ 0.85 không bị gãy khúc đột ngột
+  function computeMacTrackpadGain(smoothedVelPxMs) {
     const speedNorm = trackpadSpeed / 1.6;
-    const minPrecisionGain = 0.62 * Math.sqrt(speedNorm);
-    const maxFlickGain = 6.2 * speedNorm;
-    const sigmoid = 1 / (1 + Math.exp(-7.4 * (smoothedVelPxMs - 0.5)));
-    return minPrecisionGain + (maxFlickGain - minPrecisionGain) * sigmoid;
+    const minGain = 0.76 * Math.sqrt(speedNorm);
+    const dynamicGain = 2.95 * speedNorm * Math.pow(Math.max(0, smoothedVelPxMs), 0.85);
+    return Math.min(6.4 * speedNorm, minGain + dynamicGain);
   }
 
   function bindTrackpadSurface(surface) {
@@ -1451,15 +1448,48 @@
     let tpSmoothedVel = 0;
     let tpMaxTouches = 0;
     let tpTotalMoved = 0;
-    let tpAnchorDx = 0;
-    let tpAnchorDy = 0;
-    let tpMoveUnlocked = false;
     let tpRemX = 0;
     let tpRemY = 0;
     let tpScrollRemX = 0;
     let tpScrollRemY = 0;
     let tpLastTapAt = 0;
-    let tpIsTapDragging = false;
+    let tpPendingDoubleTapCandidate = false;
+    let tpDragActive = false;
+    let tpLongPressTimer = null;
+    let tpDragReleaseTimer = null;
+
+    function cancelLongPressTimer() {
+      if (tpLongPressTimer !== null) {
+        clearTimeout(tpLongPressTimer);
+        tpLongPressTimer = null;
+      }
+    }
+
+    function engageDragLock(hapticMs = 18) {
+      if (tpDragActive) return;
+      cancelLongPressTimer();
+      if (tpDragReleaseTimer !== null) {
+        clearTimeout(tpDragReleaseTimer);
+        tpDragReleaseTimer = null;
+      }
+      tpDragActive = true;
+      tpPendingDoubleTapCandidate = false;
+      surface.classList.add("is-dragging");
+      triggerHaptic(hapticMs);
+      sendPayload({ type: "mouse_down", button: "left", drag: true });
+    }
+
+    function releaseDragLockImmediate() {
+      cancelLongPressTimer();
+      if (tpDragReleaseTimer !== null) {
+        clearTimeout(tpDragReleaseTimer);
+        tpDragReleaseTimer = null;
+      }
+      if (!tpDragActive) return;
+      tpDragActive = false;
+      surface.classList.remove("is-dragging");
+      sendPayload({ type: "mouse_up", button: "left" });
+    }
 
     surface.addEventListener(
       "touchstart",
@@ -1474,26 +1504,7 @@
         ensureAutoFullscreenOnce();
 
         const now = performance.now();
-        if (tpTouches.size === 0) {
-          tpGestureStartAt = now;
-          tpPrevMoveAt = now;
-          tpSmoothedVel = 0;
-          tpMaxTouches = 0;
-          tpTotalMoved = 0;
-          tpAnchorDx = 0;
-          tpAnchorDy = 0;
-          tpMoveUnlocked = false;
-          tpRemX = 0;
-          tpRemY = 0;
-          tpScrollRemX = 0;
-          tpScrollRemY = 0;
-          if (now - tpLastTapAt < 260 && e.touches.length === 1) {
-            tpIsTapDragging = true;
-            tpMoveUnlocked = true;
-            sendPayload({ type: "mouse_down", button: "left" });
-            triggerHaptic(8);
-          }
-        }
+        const isFirstFingerDown = tpTouches.size === 0;
 
         for (let i = 0; i < e.changedTouches.length; i += 1) {
           const t = e.changedTouches[i];
@@ -1504,6 +1515,53 @@
         }
         tpMaxTouches = Math.max(tpMaxTouches, tpTouches.size);
         surface.classList.add("is-touching");
+
+        // Nếu đang trong nhịp nối kéo 320ms (hết mặt Trackpad nhấc tay đặt lại kéo tiếp như MacBook): giữ nguyên bôi đen!
+        if (tpDragReleaseTimer !== null) {
+          clearTimeout(tpDragReleaseTimer);
+          tpDragReleaseTimer = null;
+          if (tpTouches.size === 1) {
+            tpGestureStartAt = now;
+            tpPrevMoveAt = now;
+            tpTotalMoved = 0;
+            return;
+          }
+        }
+
+        // Chạm 3 ngón -> kích hoạt Three-Finger Drag chuẩn MacBook ngay lập tức
+        if (tpTouches.size >= 3) {
+          cancelLongPressTimer();
+          engageDragLock(14);
+          return;
+        }
+
+        // Chạm >= 2 ngón (Cuộn trang / Chuột phải) -> hủy chờ ấn giữ 1 ngón
+        if (tpTouches.size >= 2) {
+          cancelLongPressTimer();
+          tpPendingDoubleTapCandidate = false;
+          return;
+        }
+
+        if (isFirstFingerDown) {
+          tpGestureStartAt = now;
+          tpPrevMoveAt = now;
+          tpSmoothedVel = 0;
+          tpTotalMoved = 0;
+          tpRemX = 0;
+          tpRemY = 0;
+          tpScrollRemX = 0;
+          tpScrollRemY = 0;
+          tpPendingDoubleTapCandidate = now - tpLastTapAt < 270;
+
+          // Cơ chế Force-Touch mô phỏng trên điện thoại: Ấn giữ yên ~230ms rồi kéo lướt -> Bôi đen / Kéo thả!
+          cancelLongPressTimer();
+          tpLongPressTimer = setTimeout(() => {
+            tpLongPressTimer = null;
+            if (tpTouches.size === 1 && tpTotalMoved < 5.5 && !tpDragActive) {
+              engageDragLock(18);
+            }
+          }, 230);
+        }
       },
       { passive: false }
     );
@@ -1541,8 +1599,19 @@
         const stepDist = Math.hypot(dx, dy);
         tpTotalMoved += stepDist;
 
-        if (tpTouches.size >= 2) {
-          tpMoveUnlocked = true;
+        // Nếu ngón tay bắt đầu lướt đi trước 230ms:
+        // - Nếu là nhịp chạm thứ 2 (Double-Tap & Drag) -> vào chế độ kéo bôi đen ngay!
+        // - Nếu là nhịp chạm đơn bình thường -> hủy timer ấn giữ để di chuột 1:1 mượt tức thì
+        if (tpTotalMoved >= 4.2 && !tpDragActive && tpTouches.size === 1) {
+          cancelLongPressTimer();
+          if (tpPendingDoubleTapCandidate) {
+            engageDragLock(12);
+          }
+        }
+
+        // Chạm đúng 2 ngón và không ở chế độ Kéo -> Cuộn trang 2 ngón
+        if (tpTouches.size === 2 && !tpDragActive) {
+          cancelLongPressTimer();
           tpScrollRemX += -dx * 0.85;
           tpScrollRemY += -dy * 0.85;
           const sendSx = Math.trunc(tpScrollRemX);
@@ -1559,29 +1628,23 @@
           return;
         }
 
-        // Khóa chống tọt trượt khi chạm bấm (Tap-Anchor Deadzone 2.8px):
-        // Giữ yên tâm chuột khi thịt đầu ngón tay bè ra lúc chạm Click vào thẻ nhỏ
-        if (!tpMoveUnlocked) {
-          tpAnchorDx += dx;
-          tpAnchorDy += dy;
-          if (Math.hypot(tpAnchorDx, tpAnchorDy) < 2.8 && now - tpGestureStartAt < 160) {
-            return;
-          }
-          tpMoveUnlocked = true;
+        // Lọc nhiễu vi mô < 0.35px khi đang giữ ngón tay chờ Long-Press
+        if (!tpDragActive && tpLongPressTimer !== null && tpTotalMoved < 1.6) {
+          return;
         }
 
         const vInst = stepDist / dt;
         if (vInst < tpSmoothedVel) {
           tpSmoothedVel = tpSmoothedVel * 0.25 + vInst * 0.75;
         } else {
-          tpSmoothedVel = tpSmoothedVel * 0.6 + vInst * 0.4;
+          tpSmoothedVel = tpSmoothedVel * 0.58 + vInst * 0.42;
         }
 
-        const gain = computeSigmoidGain(tpSmoothedVel);
+        const gain = computeMacTrackpadGain(tpSmoothedVel);
         tpRemX += dx * gain;
         tpRemY += dy * gain;
 
-        if (Math.hypot(tpRemX, tpRemY) >= 0.25) {
+        if (Math.hypot(tpRemX, tpRemY) >= 0.2) {
           const outX = Math.round(tpRemX * 100) / 100;
           const outY = Math.round(tpRemY * 100) / 100;
           tpRemX -= outX;
@@ -1605,20 +1668,35 @@
       }
 
       if (tpTouches.size === 0) {
+        cancelLongPressTimer();
         surface.classList.remove("is-touching");
         const duration = performance.now() - tpGestureStartAt;
 
-        if (tpIsTapDragging) {
-          tpIsTapDragging = false;
-          sendPayload({ type: "mouse_up", button: "left" });
-          if (tpTotalMoved < 6 && duration < 240) {
-            sendPayload({ type: "mouse_click", button: "left", count: 2 });
+        if (tpDragActive) {
+          // Nếu người dùng chạm nhẹ 1 cái để thả ngay -> nhả chuột trái lập tức
+          if (tpTotalMoved < 4.5 && duration < 190) {
+            releaseDragLockImmediate();
             tpLastTapAt = 0;
+            return;
           }
+          // Mở cửa sổ 300ms chuẩn MacBook để nếu đụng mép Trackpad có thể đặt ngón lại kéo nối tiếp vùng bôi đen!
+          tpDragReleaseTimer = setTimeout(() => {
+            tpDragReleaseTimer = null;
+            releaseDragLockImmediate();
+          }, 300);
           return;
         }
 
-        if (tpTotalMoved < 9 && duration < 270) {
+        if (tpPendingDoubleTapCandidate && tpTotalMoved < 7 && duration < 250) {
+          tpPendingDoubleTapCandidate = false;
+          tpLastTapAt = 0;
+          triggerHaptic(10);
+          sendPayload({ type: "mouse_click", button: "left", count: 2 });
+          return;
+        }
+
+        tpPendingDoubleTapCandidate = false;
+        if (tpTotalMoved < 8 && duration < 260) {
           triggerHaptic(8);
           if (tpMaxTouches >= 2) {
             sendPayload({ type: "mouse_click", button: "right", count: 1 });

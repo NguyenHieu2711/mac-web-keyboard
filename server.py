@@ -1267,9 +1267,10 @@ class KeyboardInjector:
                 )
             else:
                 main_id = q.CGMainDisplayID()
-                min_x, min_y = 0.0, 0.0
-                max_x = float(q.CGDisplayPixelsWide(main_id))
-                max_y = float(q.CGDisplayPixelsHigh(main_id))
+                mb = q.CGDisplayBounds(main_id)
+                min_x, min_y = float(mb.origin.x), float(mb.origin.y)
+                max_x = min_x + float(mb.size.width)
+                max_y = min_y + float(mb.size.height)
         except Exception:
             main_id = q.CGMainDisplayID()
             min_x, min_y = 0.0, 0.0
@@ -1279,24 +1280,31 @@ class KeyboardInjector:
         self._mouse_x = max(min_x, min(max_x - 1.0, self._mouse_x + dx))
         self._mouse_y = max(min_y, min(max_y - 1.0, self._mouse_y + dy))
 
+        is_drag = False
         if "left" in self._mouse_buttons_down:
             ev_type = q.kCGEventLeftMouseDragged
             btn = q.kCGMouseButtonLeft
+            is_drag = True
         elif "right" in self._mouse_buttons_down:
             ev_type = q.kCGEventRightMouseDragged
             btn = q.kCGMouseButtonRight
+            is_drag = True
         else:
             ev_type = q.kCGEventMouseMoved
             btn = q.kCGMouseButtonLeft
 
         ev = q.CGEventCreateMouseEvent(
-            None, ev_type, (self._mouse_x, self._mouse_y), btn
+            self._event_source, ev_type, (self._mouse_x, self._mouse_y), btn
         )
+        if self.held_modifiers:
+            q.CGEventSetFlags(ev, self._compute_quartz_flags())
+        if is_drag:
+            q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, 1)
         q.CGEventSetIntegerValueField(ev, q.kCGMouseEventDeltaX, int(round(dx)))
         q.CGEventSetIntegerValueField(ev, q.kCGMouseEventDeltaY, int(round(dy)))
         q.CGEventPost(q.kCGHIDEventTap, ev)
 
-    def mouse_down(self, button: str = "left") -> None:
+    def mouse_down(self, button: str = "left", is_drag_start: bool = False) -> None:
         self.last_activity_at = time.monotonic()
         self._focused_cache_at = 0.0
         self._commit_telex_word_to_preview()
@@ -1321,7 +1329,9 @@ class KeyboardInjector:
             ev_type = q.kCGEventLeftMouseDown
             btn = q.kCGMouseButtonLeft
             now = time.monotonic()
-            if now - self._last_left_click_at < 0.32:
+            if is_drag_start:
+                self._left_click_count = 1
+            elif now - self._last_left_click_at < 0.32:
                 self._left_click_count += 1
             else:
                 self._left_click_count = 1
@@ -1329,8 +1339,10 @@ class KeyboardInjector:
             click_state = self._left_click_count
 
         ev = q.CGEventCreateMouseEvent(
-            None, ev_type, (self._mouse_x, self._mouse_y), btn
+            self._event_source, ev_type, (self._mouse_x, self._mouse_y), btn
         )
+        if self.held_modifiers:
+            q.CGEventSetFlags(ev, self._compute_quartz_flags())
         q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, click_state)
         q.CGEventPost(q.kCGHIDEventTap, ev)
 
@@ -1358,8 +1370,10 @@ class KeyboardInjector:
             click_state = max(1, self._left_click_count)
 
         ev = q.CGEventCreateMouseEvent(
-            None, ev_type, (self._mouse_x, self._mouse_y), btn
+            self._event_source, ev_type, (self._mouse_x, self._mouse_y), btn
         )
+        if self.held_modifiers:
+            q.CGEventSetFlags(ev, self._compute_quartz_flags())
         q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, click_state)
         q.CGEventPost(q.kCGHIDEventTap, ev)
 
@@ -1398,14 +1412,18 @@ class KeyboardInjector:
             click_state = max(1, count)
 
         ev_d = q.CGEventCreateMouseEvent(
-            None, down_type, (self._mouse_x, self._mouse_y), btn
+            self._event_source, down_type, (self._mouse_x, self._mouse_y), btn
         )
+        if self.held_modifiers:
+            q.CGEventSetFlags(ev_d, self._compute_quartz_flags())
         q.CGEventSetIntegerValueField(ev_d, q.kCGMouseEventClickState, click_state)
         q.CGEventPost(q.kCGHIDEventTap, ev_d)
 
         ev_u = q.CGEventCreateMouseEvent(
-            None, up_type, (self._mouse_x, self._mouse_y), btn
+            self._event_source, up_type, (self._mouse_x, self._mouse_y), btn
         )
+        if self.held_modifiers:
+            q.CGEventSetFlags(ev_u, self._compute_quartz_flags())
         q.CGEventSetIntegerValueField(ev_u, q.kCGMouseEventClickState, click_state)
         q.CGEventPost(q.kCGHIDEventTap, ev_u)
 
@@ -1699,7 +1717,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.0.2",
+        "version": "2.0.5",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
@@ -1895,7 +1913,8 @@ async def keyboard_ws(ws: WebSocket) -> None:
                 injector.mouse_click(btn, cnt)
             elif msg_type == "mouse_down":
                 btn = str(data.get("button", "left"))
-                injector.mouse_down(btn)
+                is_drag = bool(data.get("drag", False))
+                injector.mouse_down(btn, is_drag_start=is_drag)
             elif msg_type == "mouse_up":
                 btn = str(data.get("button", "left"))
                 injector.mouse_up(btn)

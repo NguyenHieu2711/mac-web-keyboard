@@ -549,6 +549,12 @@ body[data-pad-view="text"] .simple-text-ribbon {
   box-shadow: inset 0 0 28px rgba(56, 189, 248, 0.14);
 }
 
+.trackpad-surface.is-dragging,
+.kb-ribbon-lens.is-dragging {
+  border-color: var(--accent-amber) !important;
+  box-shadow: inset 0 0 28px rgba(251, 146, 60, 0.2) !important;
+}
+
 .trackpad-hint {
   text-align: center;
   pointer-events: none;
