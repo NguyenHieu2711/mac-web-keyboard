@@ -865,6 +865,10 @@ class WinSnapAssistController(Foundation.NSObject):
             )
 
     def checkAfterDrop_(self, timer) -> None:
+        if getattr(self, "dgrid", None) is not None:
+            front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            if front and front.bundleIdentifier() == "com.apple.finder":
+                self.dgrid.snap_desktop_now()
         if time.monotonic() < self.suppress_until:
             return
         # Trước tiên kiểm tra xem có phải vừa kéo cạnh giữa của cặp Split hiện có không
@@ -1241,11 +1245,318 @@ class WinSnapAssistController(Foundation.NSObject):
                 self.show_snap_assist_picker("left", (sx, sy, rx - sx, sh), rem)
 
 
+class DesktopSlotPreviewView(AppKit.NSView):
+    def drawRect_(self, rect):
+        b = self.bounds()
+        p = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            Foundation.NSInsetRect(b, 1.5, 1.5), 10.0, 10.0
+        )
+        AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
+            0.35, 0.68, 1.0, 0.22
+        ).setFill()
+        AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
+            0.55, 0.82, 1.0, 0.78
+        ).setStroke()
+        p.setLineWidth_(1.8)
+        p.fill()
+        p.stroke()
+
+
+class DesktopGridController(Foundation.NSObject):
+    """
+    Quản lý lưới icon Desktop kiểu Windows chạy trực tiếp trên Main RunLoop:
+    - Hiển thị khung mờ dự đoán ô lưới (Ghost Preview Box) ngay khi đang kéo icon trên Desktop.
+    - Ngay khoảnh khắc nhả chuột (LeftMouseUp), hút icon vào đúng tâm ô lưới (51 + c*68, 71 + r*84)
+      và tự động hoán đổi nếu thả đè lên icon khác.
+    """
+
+    ORIGIN_X = 51
+    STEP_X = 68
+    MAX_COL = 20
+    ORIGIN_Y = 71
+    STEP_Y = 84
+    MAX_ROW = 10
+
+    def init(self):
+        self = objc.super(DesktopGridController, self).init()
+        if self is None:
+            return None
+        self.last_cells: Dict[str, Tuple[int, int]] = {}
+        self.last_px: Dict[str, Tuple[int, int]] = {}
+        self.preview_panel: Optional[AppKit.NSPanel] = None
+        self.dragging_desktop = False
+        self.drag_start_pt: Optional[Tuple[float, float]] = None
+
+        self.read_script = Foundation.NSAppleScript.alloc().initWithSource_(
+            'tell application "Finder"\n'
+            "  try\n"
+            "    if arrangement of icon view options of window of desktop is not not arranged then\n"
+            "      set arrangement of icon view options of window of desktop to not arranged\n"
+            "    end if\n"
+            "    repeat with w in Finder windows\n"
+            "      if current view of w is icon view and arrangement of icon view options of w is not arranged then\n"
+            "        set arrangement of icon view options of w to snap to grid\n"
+            "      end if\n"
+            "    end repeat\n"
+            "  end try\n"
+            "  return {name, desktop position} of items of desktop\n"
+            "end tell"
+        )
+
+        # Khởi tạo vị trí ban đầu
+        self.snap_desktop_now()
+
+        AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            AppKit.NSEventMaskLeftMouseDown, self._on_mouse_down
+        )
+        AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            AppKit.NSEventMaskLeftMouseDragged, self._on_mouse_dragged
+        )
+        AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            AppKit.NSEventMaskLeftMouseUp, self._on_mouse_up
+        )
+        return self
+
+    def to_cell(self, x: float, y: float) -> Tuple[int, int]:
+        c = max(
+            0,
+            min(
+                self.MAX_COL,
+                int(round((x - self.ORIGIN_X) / float(self.STEP_X))),
+            ),
+        )
+        r = max(
+            0,
+            min(
+                self.MAX_ROW,
+                int(round((y - self.ORIGIN_Y) / float(self.STEP_Y))),
+            ),
+        )
+        return (c, r)
+
+    def to_px(self, c: int, r: int) -> Tuple[int, int]:
+        return (self.ORIGIN_X + c * self.STEP_X, self.ORIGIN_Y + r * self.STEP_Y)
+
+    def _is_clicking_desktop(self, qx: float, qy: float) -> bool:
+        front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        if not front or front.bundleIdentifier() != "com.apple.finder":
+            return False
+        # Kiểm tra xem tại (qx, qy) có cửa sổ Finder nào đang che không
+        wins = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly
+            | Quartz.kCGWindowListExcludeDesktopElements,
+            Quartz.kCGNullWindowID,
+        )
+        if wins:
+            for info in wins:
+                if info.get("kCGWindowLayer", 0) != 0:
+                    continue
+                b = info.get("kCGWindowBounds", {})
+                wx = float(b.get("X", 0))
+                wy = float(b.get("Y", 0))
+                ww = float(b.get("Width", 0))
+                wh = float(b.get("Height", 0))
+                if wx <= qx <= wx + ww and wy <= qy <= wy + wh:
+                    return False
+        return True
+
+    def _mouse_quartz_pos(self) -> Tuple[float, float]:
+        loc = AppKit.NSEvent.mouseLocation()
+        scr = AppKit.NSScreen.mainScreen()
+        total_h = float(scr.frame().size.height) if scr else 982.0
+        return (float(loc.x), total_h - float(loc.y))
+
+    def _on_mouse_down(self, event) -> None:
+        qx, qy = self._mouse_quartz_pos()
+        if self._is_clicking_desktop(qx, qy):
+            self.drag_start_pt = (qx, qy)
+            self.dragging_desktop = True
+            self.hit_icon_on_down = any(
+                abs(qx - ix) <= 42 and abs(qy - iy) <= 52
+                for _, (ix, iy) in self.last_px.items()
+            )
+        else:
+            self.dragging_desktop = False
+            self.hit_icon_on_down = False
+            self.drag_start_pt = None
+
+    def _on_mouse_dragged(self, event) -> None:
+        if not self.dragging_desktop or not self.drag_start_pt:
+            return
+        qx, qy = self._mouse_quartz_pos()
+        if (
+            abs(qx - self.drag_start_pt[0]) < 6.0
+            and abs(qy - self.drag_start_pt[1]) < 6.0
+        ):
+            return
+        if self.hit_icon_on_down:
+            c, r = self.to_cell(qx, qy)
+            gx, gy = self.to_px(c, r)
+            self._show_preview_at(gx, gy)
+
+    def _on_mouse_up(self, event) -> None:
+        was_drag = self.dragging_desktop
+        self.dragging_desktop = False
+        self.drag_start_pt = None
+        self._hide_preview()
+        if was_drag:
+            Foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                0.03, self, "snapTimer:", None, False
+            )
+
+    def snapTimer_(self, timer) -> None:
+        self.snap_desktop_now()
+
+    def _show_preview_at(self, gx: int, gy: int) -> None:
+        w, h = 62.0, 74.0
+        cocoa_r = quartz_to_cocoa_rect(gx - w / 2.0, gy - h / 2.0 + 6.0, w, h)
+        if self.preview_panel is None:
+            panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+                cocoa_r,
+                AppKit.NSWindowStyleMaskBorderless
+                | AppKit.NSWindowStyleMaskNonactivatingPanel,
+                AppKit.NSBackingStoreBuffered,
+                False,
+            )
+            panel.setLevel_(AppKit.NSFloatingWindowLevel)
+            panel.setOpaque_(False)
+            panel.setBackgroundColor_(AppKit.NSColor.clearColor())
+            panel.setHasShadow_(False)
+            panel.setIgnoresMouseEvents_(True)
+            v = DesktopSlotPreviewView.alloc().initWithFrame_(
+                Foundation.NSMakeRect(0, 0, w, h)
+            )
+            panel.setContentView_(v)
+            panel.orderFrontRegardless()
+            self.preview_panel = panel
+        else:
+            self.preview_panel.setFrame_display_(cocoa_r, True)
+            self.preview_panel.orderFrontRegardless()
+
+    def _hide_preview(self) -> None:
+        if self.preview_panel is not None:
+            self.preview_panel.orderOut_(None)
+
+    def snap_desktop_now(self) -> None:
+        res, err = self.read_script.executeAndReturnError_(None)
+        if err or not res or res.numberOfItems() < 2:
+            return
+        names_desc = res.descriptorAtIndex_(1)
+        pos_desc = res.descriptorAtIndex_(2)
+        n = names_desc.numberOfItems()
+        if n == 0:
+            return
+
+        current_items: List[Tuple[str, int, int]] = []
+        for i in range(1, n + 1):
+            nm = names_desc.descriptorAtIndex_(i).stringValue()
+            pt = pos_desc.descriptorAtIndex_(i)
+            if nm and pt and pt.numberOfItems() >= 2:
+                x = int(pt.descriptorAtIndex_(1).int32Value())
+                y = int(pt.descriptorAtIndex_(2).int32Value())
+                current_items.append((nm, x, y))
+
+        stationary: List[Tuple[str, int, int, Tuple[int, int]]] = []
+        moved: List[Tuple[str, int, int]] = []
+        occupied: Dict[Tuple[int, int], str] = {}
+
+        for nm, x, y in current_items:
+            c, r = self.to_cell(x, y)
+            gx, gy = self.to_px(c, r)
+            if (
+                nm in self.last_px
+                and self.last_px[nm] == (x, y)
+                and (x, y) == (gx, gy)
+                and (c, r) not in occupied
+            ):
+                stationary.append((nm, x, y, (c, r)))
+                occupied[(c, r)] = nm
+            else:
+                moved.append((nm, x, y))
+
+        if not moved:
+            return
+
+        new_cells: Dict[str, Tuple[int, int]] = {
+            nm: cell for nm, _, _, cell in stationary
+        }
+
+        for nm, x, y in moved:
+            tc, tr = self.to_cell(x, y)
+            target = (tc, tr)
+            prev_cell = self.last_cells.get(nm)
+            if target not in occupied:
+                occupied[target] = nm
+                new_cells[nm] = target
+            elif target in occupied and occupied[target] in self.last_cells:
+                other_nm = occupied[target]
+                if (
+                    prev_cell is not None
+                    and prev_cell not in occupied
+                    and other_nm != nm
+                ):
+                    occupied[target] = nm
+                    new_cells[nm] = target
+                    occupied[prev_cell] = other_nm
+                    new_cells[other_nm] = prev_cell
+                else:
+                    free_c = self._nearest_free(tc, tr, set(occupied.keys()), x, y)
+                    occupied[free_c] = nm
+                    new_cells[nm] = free_c
+            else:
+                free_c = self._nearest_free(tc, tr, set(occupied.keys()), x, y)
+                occupied[free_c] = nm
+                new_cells[nm] = free_c
+
+        cmds: List[str] = []
+        cur_map = {nm: (x, y) for nm, x, y in current_items}
+        for nm, cell in new_cells.items():
+            gx, gy = self.to_px(cell[0], cell[1])
+            self.last_cells[nm] = cell
+            self.last_px[nm] = (gx, gy)
+            if cur_map.get(nm) != (gx, gy):
+                safe_nm = nm.replace("\\", "\\\\").replace('"', '\\"')
+                cmds.append(
+                    f'set desktop position of item "{safe_nm}" of desktop to {{{gx}, {gy}}}'
+                )
+
+        if cmds:
+            src = (
+                'tell application "Finder"\n  try\n    '
+                + "\n    ".join(cmds)
+                + "\n  end try\nend tell"
+            )
+            ws = Foundation.NSAppleScript.alloc().initWithSource_(src)
+            ws.executeAndReturnError_(None)
+
+    def _nearest_free(
+        self, target_c: int, target_r: int, occupied: set, px: int, py: int
+    ) -> Tuple[int, int]:
+        if (target_c, target_r) not in occupied:
+            return (target_c, target_r)
+        best_cell = (target_c, target_r)
+        best_dist = 1e18
+        for c in range(self.MAX_COL + 1):
+            for r in range(self.MAX_ROW + 1):
+                if (c, r) in occupied:
+                    continue
+                gx, gy = self.to_px(c, r)
+                d = (gx - px) ** 2 + (gy - py) ** 2 + (
+                    abs(c - target_c) + abs(r - target_r)
+                ) * 400
+                if d < best_dist:
+                    best_dist = d
+                    best_cell = (c, r)
+        return best_cell
+
+
 def main() -> None:
     app = AppKit.NSApplication.sharedApplication()
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    dgrid = DesktopGridController.alloc().init()
     ctrl = WinSnapAssistController.alloc().init()
-    _ = ctrl
+    ctrl.dgrid = dgrid
+    _ = (ctrl, dgrid)
     app.run()
 
 
