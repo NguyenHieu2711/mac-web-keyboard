@@ -39,6 +39,9 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewAssetLoader
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -59,6 +62,8 @@ class MainActivity : AppCompatActivity() {
     private var activeUpdateApkFile: File? = null
     private var pendingInstallApkFile: File? = null
     private var mandatoryUpdateDialog: AlertDialog? = null
+    private var downloadPollJob: Job? = null
+    private var installTriggeredForId: Long = -1L
     private var lastBackPressedAt: Long = 0L
 
     private val downloadCompleteReceiver = object : BroadcastReceiver() {
@@ -68,33 +73,47 @@ class MainActivity : AppCompatActivity() {
             if (completedId == -1L || completedId != activeDownloadId) return
 
             val dm = getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager ?: return
-            val query = DownloadManager.Query().setFilterById(completedId)
-            dm.query(query)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val statusIdx = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
-                    if (statusIdx >= 0 && cursor.getInt(statusIdx) == DownloadManager.STATUS_SUCCESSFUL) {
-                        mandatoryUpdateDialog?.dismiss()
-                        mandatoryUpdateDialog = null
-                        activeUpdateApkFile?.let { apkFile ->
-                            if (apkFile.exists()) {
-                                promptInstallApk(apkFile)
+            handleDownloadStatusCheck(dm, completedId)
+        }
+    }
+
+    private fun handleDownloadStatusCheck(dm: DownloadManager, downloadId: Long): Boolean {
+        if (downloadId == -1L || installTriggeredForId == downloadId) return true
+        val query = DownloadManager.Query().setFilterById(downloadId)
+        dm.query(query)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val statusIdx = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                if (statusIdx >= 0) {
+                    when (cursor.getInt(statusIdx)) {
+                        DownloadManager.STATUS_SUCCESSFUL -> {
+                            installTriggeredForId = downloadId
+                            downloadPollJob?.cancel()
+                            mandatoryUpdateDialog?.dismiss()
+                            mandatoryUpdateDialog = null
+                            activeUpdateApkFile?.let { apkFile ->
+                                if (apkFile.exists()) {
+                                    promptInstallApk(apkFile)
+                                }
                             }
+                            return true
                         }
-                    } else {
-                        mandatoryUpdateDialog?.dismiss()
-                        mandatoryUpdateDialog = null
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Tải bản cập nhật thất bại, đang thử lại...",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                        lifecycleScope.launch {
-                            checkForUpdatesFromGitHub(manualCheck = false)
+                        DownloadManager.STATUS_FAILED -> {
+                            installTriggeredForId = downloadId
+                            downloadPollJob?.cancel()
+                            mandatoryUpdateDialog?.dismiss()
+                            mandatoryUpdateDialog = null
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Tải bản cập nhật thất bại, vui lòng bấm thử lại.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            return true
                         }
                     }
                 }
             }
         }
+        return false
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -154,14 +173,8 @@ class MainActivity : AppCompatActivity() {
                     view: WebView,
                     request: WebResourceRequest
                 ): WebResourceResponse? {
-                    val reqUrl = request.url
-                    if (reqUrl.host == "appassets.androidplatform.net") {
-                        val relPath = reqUrl.path?.removePrefix("/assets/") ?: ""
-                        if (relPath in listOf("index.html", "style.css", "app.js", "manifest.json")) {
-                            fetchLiveAssetFromServer(relPath)?.let { return it }
-                        }
-                    }
-                    return assetLoader.shouldInterceptRequest(reqUrl)
+                    // Luôn nạp đúng giao diện đóng gói bên trong APK hiện tại (0ms, không bao giờ bị server cũ ghi đè version)
+                    return assetLoader.shouldInterceptRequest(request.url)
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -169,6 +182,13 @@ class MainActivity : AppCompatActivity() {
                     if (getSavedServerHost().isBlank()) {
                         showServerConfigDialog(isFirstLaunch = true)
                     }
+                }
+            }
+
+            setDownloadListener { url, _, _, _, _ ->
+                if (url.endsWith(".apk", ignoreCase = true) || url.contains("app-release.apk")) {
+                    showDownloadingLockDialog("mới")
+                    startApkDownload("latest", url)
                 }
             }
         }
@@ -567,7 +587,19 @@ class MainActivity : AppCompatActivity() {
                 )
 
             val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            installTriggeredForId = -1L
             activeDownloadId = dm.enqueue(request)
+
+            // Polling dự phòng mỗi 600ms để bật trình cài đặt ngay lập tức trên Samsung One UI
+            downloadPollJob?.cancel()
+            downloadPollJob = lifecycleScope.launch {
+                while (isActive && activeDownloadId != -1L) {
+                    delay(600L)
+                    if (handleDownloadStatusCheck(dm, activeDownloadId)) {
+                        break
+                    }
+                }
+            }
         } catch (e: Exception) {
             Toast.makeText(
                 this,
@@ -627,6 +659,18 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun vibrate(ms: Long) {
             triggerNativeVibration(ms)
+        }
+
+        @JavascriptInterface
+        fun getAppVersion(): String = BuildConfig.VERSION_NAME
+
+        @JavascriptInterface
+        fun startNativeUpdate() {
+            runOnUiThread {
+                lifecycleScope.launch {
+                    checkForUpdatesFromGitHub(manualCheck = true)
+                }
+            }
         }
 
         @JavascriptInterface

@@ -1381,9 +1381,12 @@
   });
 
   // ============================================================================
-  // 8. KIỂM TRA BẮT BUỘC CẬP NHẬT NGAY KHI BẤM MỞ APP (MANDATORY UPDATE GATE)
+  // 8. KIỂM TRA CẬP NHẬT ĐỒNG BỘ VỚI PHIÊN BẢN APK THẬT (TRÁNH LẶP VÔ TẬN)
   // ============================================================================
-  const CURRENT_APP_VERSION = "1.9.0";
+  const CURRENT_APP_VERSION =
+    hasAndroidBridge && typeof window.AndroidBridge.getAppVersion === "function"
+      ? String(window.AndroidBridge.getAppVersion() || "1.9.1")
+      : "1.9.1";
   const updateModal = document.getElementById("mandatory-update-modal");
   const updateTitle = document.getElementById("update-title");
   const updateDesc = document.getElementById("update-desc");
@@ -1406,37 +1409,9 @@
   }
 
   async function checkMandatoryUpdateGate() {
-    if (!hasAndroidBridge) return;
-    try {
-      const resp = await fetch(
-        `https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json?t=${Date.now()}`,
-        { cache: "no-store" }
-      );
-      if (!resp.ok) return;
-      const data = await resp.json();
-      const tag = String(data.tag_name || "").trim();
-      const apkUrl = String(data.apk_url || "").trim();
-      if (tag && isNewerVer(tag, CURRENT_APP_VERSION) && updateModal) {
-        if (updateTitle) {
-          updateTitle.textContent = `Có bản cập nhật mới (${tag})`;
-        }
-        if (updateDesc) {
-          updateDesc.textContent = `Phiên bản ${tag} đã sẵn sàng (bản hiện tại: v${CURRENT_APP_VERSION}). Bạn bắt buộc phải cập nhật ngay để tiếp tục sử dụng ứng dụng.`;
-        }
-        updateModal.classList.remove("is-hidden");
-        if (btnDoUpdate) {
-          btnDoUpdate.onclick = () => {
-            btnDoUpdate.textContent = "Đang tải bản cập nhật...";
-            btnDoUpdate.disabled = true;
-            if (apkUrl) {
-              window.location.href = apkUrl;
-            }
-          };
-        }
-      }
-    } catch {
-      // ignore
-    }
+    // Trên APK Android: MainActivity.kt đã xử lý trọn gói bằng DownloadManager + PackageInstaller gốc
+    if (hasAndroidBridge) return;
+    if (updateModal) updateModal.classList.add("is-hidden");
   }
 
   document.addEventListener("visibilitychange", () => {
