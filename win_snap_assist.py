@@ -865,10 +865,6 @@ class WinSnapAssistController(Foundation.NSObject):
             )
 
     def checkAfterDrop_(self, timer) -> None:
-        if getattr(self, "dgrid", None) is not None:
-            front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
-            if front and front.bundleIdentifier() == "com.apple.finder":
-                self.dgrid.snap_desktop_now()
         if time.monotonic() < self.suppress_until:
             return
         # Trước tiên kiểm tra xem có phải vừa kéo cạnh giữa của cặp Split hiện có không
@@ -1553,10 +1549,8 @@ class DesktopGridController(Foundation.NSObject):
 def main() -> None:
     app = AppKit.NSApplication.sharedApplication()
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
-    dgrid = DesktopGridController.alloc().init()
     ctrl = WinSnapAssistController.alloc().init()
-    ctrl.dgrid = dgrid
-    _ = (ctrl, dgrid)
+    _ = ctrl
     app.run()
 
 
