@@ -2303,6 +2303,12 @@ def start_desktop_and_folder_grid_manager() -> None:
                             Quartz.kCGEventLeftMouseDragged,
                         )
                     )
+                    secs_up = float(
+                        Quartz.CGEventSourceSecondsSinceLastEventType(
+                            Quartz.kCGEventSourceStateCombinedSessionState,
+                            Quartz.kCGEventLeftMouseUp,
+                        )
+                    )
                     now = time.monotonic()
 
                     if is_down or secs_drag < 0.18:
@@ -2312,13 +2318,9 @@ def start_desktop_and_folder_grid_manager() -> None:
                         pending_snap_at = now + 0.06
 
                     if not is_down and pending_snap_at is None:
-                        front_app = (
-                            AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
-                        )
                         if (
-                            front_app
-                            and front_app.bundleIdentifier() == "com.apple.finder"
-                            and now - last_finder_check >= 0.85
+                            min(secs_drag, secs_up) < 3.5
+                            and now - last_finder_check >= 0.65
                         ):
                             last_finder_check = now
                             pending_snap_at = now
