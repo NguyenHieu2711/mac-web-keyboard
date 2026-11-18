@@ -347,8 +347,47 @@ body.is-lens-off .js-lens-toggle {
 }
 
 .simple-text-view .is-hidden,
-.lens-hud-right .is-hidden {
+.lens-hud-right .is-hidden,
+.lens-perm-bar.is-hidden {
   display: none !important;
+}
+
+.lens-perm-bar {
+  position: absolute;
+  bottom: 7px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+body[data-pad-view="text"] .lens-perm-bar,
+body.is-lens-off .lens-perm-bar {
+  display: none !important;
+}
+
+.lens-perm-btn {
+  height: 25px;
+  padding: 0 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(251, 146, 60, 0.55);
+  background: rgba(20, 14, 10, 0.88);
+  color: #fdba74;
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.lens-perm-refresh {
+  border-color: rgba(56, 189, 248, 0.55);
+  background: rgba(11, 20, 34, 0.88);
+  color: #7dd3fc;
 }
 
 body[data-pad-view="lens"] .text-only-ctrl {

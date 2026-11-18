@@ -51,11 +51,15 @@
   const simplePadTextEl = document.querySelector(".simple-text-pad .js-simple-text");
   const simpleRibbonTextEl = document.querySelector(".simple-text-ribbon .js-simple-text");
   const simpleBadges = Array.from(document.querySelectorAll(".js-simple-badge"));
+  const screenPermBars = Array.from(document.querySelectorAll(".js-screen-perm-bar"));
+  const openScreenPermBtns = Array.from(document.querySelectorAll(".js-open-screen-perm"));
+  const respawnServerBtns = Array.from(document.querySelectorAll(".js-respawn-server"));
 
   // Mặc định 1.22 (~0.8x): thu nhỏ nội dung vừa phải để nhìn rộng bao quát quanh trung tâm con chuột
   let lensFovScale = 1.22;
   let lensEnabled = true;
   let padViewMode = "lens";
+  let screenRecordingOk = true;
   let simpleTextBuffer = "";
   let badgeHideTimer = null;
 
@@ -180,6 +184,10 @@
     document.body.classList.toggle("is-lens-off", !lensEnabled);
     padViewBtns.forEach((btn) => {
       btn.classList.toggle("is-active", btn.dataset.padView === padViewMode);
+    });
+    const showPermWarning = !screenRecordingOk && padViewMode === "lens" && lensEnabled;
+    screenPermBars.forEach((bar) => {
+      bar.classList.toggle("is-hidden", !showPermWarning);
     });
     const zoomRatio = (1 / lensFovScale).toFixed(1) + "x";
     fovLabels.forEach((el) => {
@@ -423,6 +431,8 @@
       const tp = document.getElementById("trackpad-surface");
       if (tp) tp.classList.remove("has-stream");
       if (kbRibbonLens) kbRibbonLens.classList.remove("has-stream");
+      screenRecordingOk = true;
+      syncLensControlsUI();
     }
   }
 
@@ -607,6 +617,9 @@
           const msg = JSON.parse(ev.data);
           if (msg && msg.type === "typed_preview") {
             renderSimpleText(msg.text || "", msg.badge || "");
+          } else if (msg && msg.type === "state" && typeof msg.screen_ok === "boolean") {
+            screenRecordingOk = msg.screen_ok;
+            syncLensControlsUI();
           }
         } catch {
           // ignore
@@ -808,8 +821,6 @@
     }
     if (st.heldCount === 0) {
       const heldDuration = performance.now() - (st._downAt || 0);
-      // Luôn nhả phím modifier vật lý trên Mac khi nhấc ngón tay để không bao giờ kẹt phím trên MacBook;
-      // nếu là chạm đơn (< 850ms chưa bấm kèm phím khác) thì bật trạng thái sticky để gửi kèm phím kế tiếp.
       sendPayload({ type: "up", key: mod });
       if (!st.chordUsedWhileHeld && heldDuration < 850) {
         st.sticky = true;
@@ -1262,6 +1273,20 @@
     });
   });
 
+  openScreenPermBtns.forEach((btn) => {
+    bindHudTap(btn, () => {
+      triggerHaptic(12);
+      sendPayload({ type: "open_screen_perm" });
+    });
+  });
+
+  respawnServerBtns.forEach((btn) => {
+    bindHudTap(btn, () => {
+      triggerHaptic(12);
+      sendPayload({ type: "respawn_server" });
+    });
+  });
+
   fovOutBtns.forEach((btn) => {
     bindHudTap(btn, () => {
       updateLensFov(0.18, false);
@@ -1318,7 +1343,7 @@
     surface.addEventListener(
       "touchstart",
       (e) => {
-        if (e.target.closest(".lens-hud-right, .lens-hud-left")) {
+        if (e.target.closest(".lens-hud-right, .lens-hud-left, .lens-perm-bar")) {
           return;
         }
         e.preventDefault();

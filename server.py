@@ -1524,7 +1524,7 @@ async def health() -> dict:
     py_app = real_py.split("/Python.app/")[0] + "/Python.app" if "/Python.app/" in real_py else real_py
     return {
         "ok": True,
-        "version": "1.9.5",
+        "version": "1.9.6",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
@@ -1586,13 +1586,14 @@ async def keyboard_ws(ws: WebSocket) -> None:
     await ws.accept()
     client_host = ws.client.host if ws.client else "unknown"
     trusted = check_macos_accessibility(prompt=True)
-    check_macos_screen_recording(prompt=True)
+    screen_ok = check_macos_screen_recording(prompt=True)
     if injector.vn_enabled:
         ensure_macos_abc_input_source()
     logger.info(
-        "Đã kết nối điện thoại từ: %s (Accessibility=%s, Lens=%s, Layout=%s, VN=%s)",
+        "Đã kết nối điện thoại từ: %s (Accessibility=%s, ScreenRec=%s, Lens=%s, Layout=%s, VN=%s)",
         client_host,
         trusted,
+        screen_ok,
         lens_capturer.available,
         injector.kb_layout,
         injector.vn_enabled,
@@ -1606,6 +1607,7 @@ async def keyboard_ws(ws: WebSocket) -> None:
                 "layout": injector.kb_layout,
                 "trusted": trusted,
                 "lens": lens_capturer.available,
+                "screen_ok": screen_ok,
             }
         )
     )
@@ -1702,6 +1704,10 @@ async def keyboard_ws(ws: WebSocket) -> None:
             elif msg_type == "clear_preview":
                 injector.clear_live_preview()
                 await ws.send_text(json.dumps(injector.get_live_preview_snapshot(), ensure_ascii=False))
+            elif msg_type == "open_screen_perm":
+                await open_screen_perm()
+            elif msg_type == "respawn_server":
+                threading.Timer(0.15, _trigger_clean_respawn).start()
             elif msg_type == "mouse_move":
                 dx = float(data.get("dx", 0.0))
                 dy = float(data.get("dy", 0.0))
