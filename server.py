@@ -553,7 +553,7 @@ class KeyboardInjector:
 
                 self._quartz = Quartz
                 self._event_source = Quartz.CGEventSourceCreate(
-                    Quartz.kCGEventSourceStatePrivate
+                    Quartz.kCGEventSourceStateHIDSystemState
                 )
                 self._use_quartz = True
                 ensure_macos_abc_input_source()
@@ -607,14 +607,16 @@ class KeyboardInjector:
         if extra_mods:
             mods.update(extra_mods)
         flags = 0
+        # Bao gồm cả cờ mức cao (CGEventFlags) và cờ phần cứng thiết bị (NX_DEVICEL*KEYMASK trong IOLLEvent.h)
+        # để WindowServer / SymbolicHotKeys (như Cmd+Shift+3, Cmd+Shift+4, Cmd+Space, Cmd+Tab) nhận diện 100% như bàn phím Mac thật.
         if "cmd" in mods:
-            flags |= q.kCGEventFlagMaskCommand
+            flags |= q.kCGEventFlagMaskCommand | 0x00000008
         if "shift" in mods:
-            flags |= q.kCGEventFlagMaskShift
+            flags |= q.kCGEventFlagMaskShift | 0x00000002
         if "alt" in mods:
-            flags |= q.kCGEventFlagMaskAlternate
+            flags |= q.kCGEventFlagMaskAlternate | 0x00000020
         if "ctrl" in mods:
-            flags |= q.kCGEventFlagMaskControl
+            flags |= q.kCGEventFlagMaskControl | 0x00000001
         if self.caps_locked:
             flags |= q.kCGEventFlagMaskAlphaShift
         return flags
@@ -642,6 +644,7 @@ class KeyboardInjector:
             | q.kCGEventFlagMaskAlternate
             | q.kCGEventFlagMaskControl
             | q.kCGEventFlagMaskAlphaShift
+            | 0x0000002B
         )
         q.CGEventSetFlags(ev, (existing & ~mod_mask) | flags)
         q.CGEventPost(q.kCGHIDEventTap, ev)
@@ -766,16 +769,20 @@ class KeyboardInjector:
             return
         # Tạm nhả Ctrl vật lý, bắn tổ hợp đích (Cmd/Alt), rồi khôi phục Ctrl nếu vẫn đang giữ
         self._quartz_post_vk(MAC_VK_MAP["ctrl"], False, override_mods=set())
-        for m in target_mods:
+        active_set: Set[str] = set()
+        for m in sorted(target_mods):
             if m in MAC_VK_MAP:
-                self._quartz_post_vk(MAC_VK_MAP[m], True, override_mods=target_mods)
-        time.sleep(0.002)
+                active_set.add(m)
+                self._quartz_post_vk(MAC_VK_MAP[m], True, override_mods=active_set)
+        time.sleep(0.008)
         self._quartz_post_vk(vk, True, override_mods=target_mods)
+        time.sleep(0.008)
         self._quartz_post_vk(vk, False, override_mods=target_mods)
-        time.sleep(0.002)
-        for m in target_mods:
+        time.sleep(0.006)
+        for m in reversed(sorted(target_mods)):
             if m in MAC_VK_MAP and m not in self.held_modifiers:
-                self._quartz_post_vk(MAC_VK_MAP[m], False, override_mods=set())
+                active_set.discard(m)
+                self._quartz_post_vk(MAC_VK_MAP[m], False, override_mods=active_set)
         if "ctrl" in self.held_modifiers:
             self._quartz_post_vk(
                 MAC_VK_MAP["ctrl"], True, override_mods=self.held_modifiers
@@ -800,8 +807,31 @@ class KeyboardInjector:
         if self.telex.word:
             self.preview_committed = (self.preview_committed + self.telex.word)[-260:]
 
-    def press_key(self, raw_key: str) -> None:
+    def press_key(
+        self, raw_key: str, transient_mods: Optional[List[str]] = None
+    ) -> None:
         self.last_activity_at = time.monotonic()
+        added_mods: List[str] = []
+        if transient_mods:
+            for tm in transient_mods:
+                m_norm, _ = self.normalize_key(str(tm))
+                if (
+                    m_norm in ("cmd", "shift", "alt", "ctrl")
+                    and m_norm not in self.held_modifiers
+                ):
+                    added_mods.append(m_norm)
+                    self.key_down(m_norm)
+            if added_mods:
+                time.sleep(0.006)
+        try:
+            self._press_key_inner(raw_key)
+        finally:
+            if added_mods:
+                time.sleep(0.006)
+                for m_norm in reversed(added_mods):
+                    self.key_up(m_norm)
+
+    def _press_key_inner(self, raw_key: str) -> None:
         norm, auto_shift = self.normalize_key(raw_key)
         if not norm:
             return
@@ -907,11 +937,16 @@ class KeyboardInjector:
         if self._use_quartz and norm in MAC_VK_MAP:
             vk = MAC_VK_MAP[norm]
             need_temp_shift = auto_shift and "shift" not in self.held_modifiers
+            has_any_mod = bool(self.held_modifiers or need_temp_shift)
             if need_temp_shift:
                 self._quartz_post_vk(MAC_VK_MAP["shift"], True, extra_mods)
+                time.sleep(0.004)
             self._quartz_post_vk(vk, True, extra_mods)
+            if has_any_mod:
+                time.sleep(0.008)
             self._quartz_post_vk(vk, False, extra_mods)
             if need_temp_shift:
+                time.sleep(0.004)
                 self._quartz_post_vk(MAC_VK_MAP["shift"], False)
             return
 
@@ -1489,7 +1524,7 @@ async def health() -> dict:
     py_app = real_py.split("/Python.app/")[0] + "/Python.app" if "/Python.app/" in real_py else real_py
     return {
         "ok": True,
-        "version": "1.9.4",
+        "version": "1.9.5",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
@@ -1649,7 +1684,9 @@ async def keyboard_ws(ws: WebSocket) -> None:
 
             if msg_type == "press":
                 key = str(data.get("key", ""))
-                injector.press_key(key)
+                raw_mods = data.get("mods")
+                t_mods = [str(m) for m in raw_mods] if isinstance(raw_mods, list) else None
+                injector.press_key(key, t_mods)
                 await ws.send_text(json.dumps(injector.get_live_preview_snapshot(), ensure_ascii=False))
             elif msg_type == "down":
                 key = str(data.get("key", ""))

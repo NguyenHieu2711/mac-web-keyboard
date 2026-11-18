@@ -334,7 +334,12 @@
 
         if (symKey) {
           markModifiersUsedInChord();
-          sendPayload({ type: "press", key: symKey });
+          const activeMods = MOD_NAMES.filter((m) => isModActive(m));
+          sendPayload(
+            activeMods.length > 0
+              ? { type: "press", key: symKey, mods: activeMods }
+              : { type: "press", key: symKey }
+          );
           applyOfflinePreviewKey(symKey);
           consumeStickyModifiersAfterKey();
         }
@@ -761,7 +766,6 @@
     for (const mod of MOD_NAMES) {
       if (modState[mod].sticky && modState[mod].heldCount === 0) {
         modState[mod].sticky = false;
-        sendPayload({ type: "up", key: mod });
         changed = true;
       }
     }
@@ -804,11 +808,13 @@
     }
     if (st.heldCount === 0) {
       const heldDuration = performance.now() - (st._downAt || 0);
-      if (!st.chordUsedWhileHeld && heldDuration < 280) {
+      // Luôn nhả phím modifier vật lý trên Mac khi nhấc ngón tay để không bao giờ kẹt phím trên MacBook;
+      // nếu là chạm đơn (< 850ms chưa bấm kèm phím khác) thì bật trạng thái sticky để gửi kèm phím kế tiếp.
+      sendPayload({ type: "up", key: mod });
+      if (!st.chordUsedWhileHeld && heldDuration < 850) {
         st.sticky = true;
       } else {
         st.sticky = false;
-        sendPayload({ type: "up", key: mod });
       }
     }
     syncModifierVisuals();
@@ -958,7 +964,12 @@
       const rawKey = btn.dataset.key || "";
       if (!rawKey) return;
       markModifiersUsedInChord();
-      sendPayload({ type: "press", key: rawKey });
+      const activeMods = MOD_NAMES.filter((m) => isModActive(m));
+      sendPayload(
+        activeMods.length > 0
+          ? { type: "press", key: rawKey, mods: activeMods }
+          : { type: "press", key: rawKey }
+      );
       applyOfflinePreviewKey(rawKey, btn.dataset.shift || "");
       consumeStickyModifiersAfterKey();
     }
@@ -1059,7 +1070,12 @@
 
   function fireArrowDirection(dir) {
     markModifiersUsedInChord();
-    sendPayload({ type: "press", key: dir });
+    const activeMods = MOD_NAMES.filter((m) => isModActive(m));
+    sendPayload(
+      activeMods.length > 0
+        ? { type: "press", key: dir, mods: activeMods }
+        : { type: "press", key: dir }
+    );
     applyOfflinePreviewKey(dir);
     consumeStickyModifiersAfterKey();
   }
