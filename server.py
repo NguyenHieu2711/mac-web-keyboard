@@ -2309,6 +2309,12 @@ def start_desktop_and_folder_grid_manager() -> None:
                             Quartz.kCGEventLeftMouseUp,
                         )
                     )
+                    secs_move = float(
+                        Quartz.CGEventSourceSecondsSinceLastEventType(
+                            Quartz.kCGEventSourceStateCombinedSessionState,
+                            Quartz.kCGEventMouseMoved,
+                        )
+                    )
                     now = time.monotonic()
 
                     if is_down or secs_drag < 0.18:
@@ -2319,7 +2325,7 @@ def start_desktop_and_folder_grid_manager() -> None:
 
                     if not is_down and pending_snap_at is None:
                         if (
-                            min(secs_drag, secs_up) < 3.5
+                            min(secs_drag, secs_up, secs_move) < 4.0
                             and now - last_finder_check >= 0.65
                         ):
                             last_finder_check = now
