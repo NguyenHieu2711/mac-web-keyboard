@@ -2264,7 +2264,7 @@ def start_desktop_and_folder_grid_manager() -> None:
                             best_cell = (c, r)
                 return best_cell
 
-            read_script = Foundation.NSAppleScript.alloc().initWithSource_(
+            read_osa = (
                 'tell application "Finder"\n'
                 "  try\n"
                 "    repeat with w in Finder windows\n"
@@ -2273,7 +2273,12 @@ def start_desktop_and_folder_grid_manager() -> None:
                 "      end if\n"
                 "    end repeat\n"
                 "  end try\n"
-                "  return {name, desktop position} of items of desktop\n"
+                '  set out to ""\n'
+                "  repeat with itm in (get items of desktop)\n"
+                "    set pos to desktop position of itm\n"
+                '    set out to out & (name of itm) & "\\t" & (item 1 of pos) & "\\t" & (item 2 of pos) & "\\n"\n'
+                "  end repeat\n"
+                "  return out\n"
                 "end tell"
             )
 
@@ -2304,7 +2309,7 @@ def start_desktop_and_folder_grid_manager() -> None:
                         was_dragging = True
                     elif was_dragging and not is_down and secs_drag >= 0.18:
                         was_dragging = False
-                        pending_snap_at = now + 0.08
+                        pending_snap_at = now + 0.06
 
                     if not is_down and pending_snap_at is None:
                         front_app = (
@@ -2323,7 +2328,7 @@ def start_desktop_and_folder_grid_manager() -> None:
                             mt = desktop_path.stat().st_mtime
                             if mt != last_mtime:
                                 last_mtime = mt
-                                pending_snap_at = now + 0.25
+                                pending_snap_at = now + 0.2
                         except Exception:
                             pass
 
@@ -2331,23 +2336,28 @@ def start_desktop_and_folder_grid_manager() -> None:
                         continue
                     pending_snap_at = None
 
-                    res, err = read_script.executeAndReturnError_(None)
-                    if err or not res or res.numberOfItems() < 2:
-                        continue
-                    names_desc = res.descriptorAtIndex_(1)
-                    pos_desc = res.descriptorAtIndex_(2)
-                    n = names_desc.numberOfItems()
-                    if n == 0:
+                    try:
+                        raw_out = subprocess.check_output(
+                            ["osascript", "-e", read_osa],
+                            stderr=subprocess.DEVNULL,
+                            text=True,
+                            timeout=2.5,
+                        )
+                    except Exception:
                         continue
 
                     current_items: List[Tuple[str, int, int]] = []
-                    for i in range(1, n + 1):
-                        nm = names_desc.descriptorAtIndex_(i).stringValue()
-                        pt = pos_desc.descriptorAtIndex_(i)
-                        if nm and pt and pt.numberOfItems() >= 2:
-                            x = int(pt.descriptorAtIndex_(1).int32Value())
-                            y = int(pt.descriptorAtIndex_(2).int32Value())
-                            current_items.append((nm, x, y))
+                    for line in raw_out.splitlines():
+                        parts = line.split("\t")
+                        if len(parts) == 3:
+                            try:
+                                current_items.append(
+                                    (parts[0], int(parts[1]), int(parts[2]))
+                                )
+                            except ValueError:
+                                pass
+                    if not current_items:
+                        continue
 
                     stationary: List[Tuple[str, int, int, Tuple[int, int]]] = []
                     moved: List[Tuple[str, int, int]] = []
@@ -2424,8 +2434,13 @@ def start_desktop_and_folder_grid_manager() -> None:
                             + "\n    ".join(cmds)
                             + "\n  end try\nend tell"
                         )
-                        ws = Foundation.NSAppleScript.alloc().initWithSource_(src)
-                        ws.executeAndReturnError_(None)
+                        subprocess.run(
+                            ["osascript", "-e", src],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=2.5,
+                            check=False,
+                        )
         except Exception as exc:
             logger.debug("Desktop grid manager stopped: %s", exc)
 
