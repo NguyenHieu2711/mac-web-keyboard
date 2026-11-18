@@ -2156,6 +2156,59 @@ def start_notification_auto_dismisser(max_seconds: float = 4.0) -> None:
     t.start()
 
 
+def start_clipboard_retina_normalizer(poll_sec: float = 0.25) -> None:
+    """
+    Chuẩn hóa ảnh chụp màn hình Retina (144 DPI @2x) trong Clipboard của macOS về tỷ lệ 1:1 pixel (72 DPI)
+    để khi bấm Command+V trong Zalo, Antigravity, Chrome/Electron không bị giảm 50% độ phân giải (mờ).
+    """
+    if not IS_MACOS:
+        return
+
+    def _worker() -> None:
+        try:
+            import AppKit  # type: ignore
+            import objc  # type: ignore
+
+            pb = AppKit.NSPasteboard.generalPasteboard()
+            last_count = int(pb.changeCount())
+            while True:
+                time.sleep(poll_sec)
+                with objc.autorelease_pool():
+                    cur_count = int(pb.changeCount())
+                    if cur_count == last_count:
+                        continue
+                    last_count = cur_count
+                    types = pb.types()
+                    if not types or "public.png" not in types:
+                        continue
+                    # Chỉ chuẩn hóa khi là ảnh chụp trực tiếp trong RAM (không phải copy file từ Finder)
+                    if "public.file-url" in types or "NSFilenamesPboardType" in types:
+                        continue
+                    data = pb.dataForType_("public.png")
+                    if not data:
+                        continue
+                    rep = AppKit.NSBitmapImageRep.imageRepWithData_(data)
+                    if not rep:
+                        continue
+                    pw, ph = int(rep.pixelsWide()), int(rep.pixelsHigh())
+                    sw, sh = float(rep.size().width), float(rep.size().height)
+                    if pw > sw + 1.0 or ph > sh + 1.0:
+                        rep.setSize_((float(pw), float(ph)))
+                        new_png = rep.representationUsingType_properties_(
+                            AppKit.NSBitmapImageFileTypePNG, {}
+                        )
+                        if new_png:
+                            pb.clearContents()
+                            pb.setData_forType_(new_png, "public.png")
+                            pb.setData_forType_(new_png, "Apple PNG pasteboard type")
+                            last_count = int(pb.changeCount())
+        except Exception as exc:
+            logger.debug("Clipboard retina normalizer stopped: %s", exc)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+
 def start_git_auto_updater(check_every_sec: float = 45.0) -> None:
     """Tự động kiểm tra GitHub định kỳ; nếu có bản server.py mới trên origin/main thì tự git pull và khởi động lại ngầm."""
     import os
@@ -2199,6 +2252,7 @@ if __name__ == "__main__":
     check_macos_accessibility()
     check_macos_screen_recording(prompt=True)
     start_notification_auto_dismisser(max_seconds=4.0)
+    start_clipboard_retina_normalizer(poll_sec=0.25)
     start_git_auto_updater(check_every_sec=45.0)
     banner_ips = detect_network_ips()
     print("\n" + "=" * 62)
