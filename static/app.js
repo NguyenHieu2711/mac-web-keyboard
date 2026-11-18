@@ -1433,19 +1433,21 @@
     });
   }
 
-  // Đường cong gia tốc lũy thừa liên tục chuẩn Apple Magic Trackpad (Direct 1:1 Power Ballistics):
-  // - Nhích nhẹ tức thời (không có vùng chết gây lì tay), tỉ lệ ~0.8x-1.0x để bám sát từng ký tự/nút nhỏ
-  // - Vẩy nhanh tăng mượt tự nhiên theo hàm mũ 0.85 không bị gãy khúc đột ngột
+  // Đường cong gia tốc lũy thừa chuẩn Apple Magic Trackpad (đã hạ thêm ~16% tốc độ con trỏ cho đằm tay hơn)
   function computeMacTrackpadGain(smoothedVelPxMs) {
     const speedNorm = trackpadSpeed / 1.6;
-    const minGain = 0.76 * Math.sqrt(speedNorm);
-    const dynamicGain = 2.95 * speedNorm * Math.pow(Math.max(0, smoothedVelPxMs), 0.85);
-    return Math.min(6.4 * speedNorm, minGain + dynamicGain);
+    const minGain = 0.64 * Math.sqrt(speedNorm);
+    const dynamicGain = 2.42 * speedNorm * Math.pow(Math.max(0, smoothedVelPxMs), 0.85);
+    return Math.min(5.2 * speedNorm, minGain + dynamicGain);
   }
 
-  // Bộ điều khiển cuộn đồng nhất 100% cho CẢ Cuộn 2 ngón trên Trackpad VÀ Thanh cuộn dọc bên phải:
-  // - Giảm thêm 20% tốc độ (0.27x - 0.46x) để kiểm soát từng dòng mượt mà
-  // - Khi vuốt 2 ngón trên Trackpad, con chạy trên thanh cuộn bên phải cũng tự sáng & trượt đồng bộ theo
+  // ============================================================================
+  // CƠ CHẾ CUỘN GIA TỐC THÔNG MINH 3 TẦNG (CHUẨN macOS NSScrollView + Logitech SmartShift):
+  // 1. Kéo chậm (< 0.28 px/ms): khóa phẳng 0.22x siêu đằm để đọc từng dòng, nhấc tay đứng im 100% không trôi.
+  // 2. Vuốt nhanh (> 0.28 px/ms): tăng gia tốc lũy thừa theo vận tốc thực (lên tới 2.9x) để vọt nhanh.
+  // 3. Bánh đà quán tính hàm mũ 0.9968^dt + Cộng bồi vận tốc khi gạt liên tiếp cùng chiều (Velocity Stacking)
+  //    để 2 cú hất nhẹ lên thẳng đầu trang dài; chạm nhẹ 1 ngón phanh đứng khựng ngay (không click nhầm link).
+  // ============================================================================
   const sharedScrollStripEl = document.getElementById("pad-scroll-strip");
   const sharedScrollThumbEl = sharedScrollStripEl
     ? sharedScrollStripEl.querySelector(".js-scroll-thumb")
@@ -1454,12 +1456,22 @@
   let sharedScrollRemX = 0;
   let sharedScrollRemY = 0;
   let sharedScrollInertiaRaf = null;
+  let activeCoastingVelY = 0;
+  let savedCoastingVelY = 0;
+  let savedCoastingAt = 0;
 
-  function stopUnifiedScrollInertia() {
+  function stopUnifiedScrollInertia(recordForStacking = true) {
+    const wasCoasting = Math.abs(activeCoastingVelY) > 0.14;
+    if (recordForStacking && wasCoasting) {
+      savedCoastingVelY = activeCoastingVelY;
+      savedCoastingAt = performance.now();
+    }
+    activeCoastingVelY = 0;
     if (sharedScrollInertiaRaf !== null) {
       cancelAnimationFrame(sharedScrollInertiaRaf);
       sharedScrollInertiaRaf = null;
     }
+    return wasCoasting;
   }
 
   function setSharedThumbOffset(px) {
@@ -1483,13 +1495,23 @@
     sharedScrollRemY = 0;
   }
 
-  function emitUnifiedScroll(dx, dy) {
+  function computeSmartScrollGain(velPxMs) {
+    const absV = Math.abs(velPxMs);
+    if (absV <= 0.28) {
+      return 0.22;
+    }
+    const excess = absV - 0.28;
+    return Math.min(2.9, 0.22 + 1.68 * Math.pow(excess, 1.32));
+  }
+
+  function emitUnifiedScroll(dx, dy, dtMs = 10) {
     if (Math.abs(dx) < 0.08 && Math.abs(dy) < 0.08) return;
-    const gainX = Math.min(0.46, 0.27 + Math.abs(dx) * 0.006);
-    const gainY = Math.min(0.46, 0.27 + Math.abs(dy) * 0.006);
+    const safeDt = Math.max(4, Math.min(60, dtMs));
+    const gainX = computeSmartScrollGain(dx / safeDt);
+    const gainY = computeSmartScrollGain(dy / safeDt);
     sharedScrollRemX += -dx * gainX;
     sharedScrollRemY += -dy * gainY;
-    if (Math.abs(sharedScrollRemX) < 1.8 && Math.abs(sharedScrollRemY) < 1.8) return;
+    if (Math.abs(sharedScrollRemX) < 1.2 && Math.abs(sharedScrollRemY) < 1.2) return;
     const sendX = Math.trunc(sharedScrollRemX);
     const sendY = Math.trunc(sharedScrollRemY);
     if (sendX !== 0 || sendY !== 0) {
@@ -1503,19 +1525,54 @@
     }
   }
 
-  function startUnifiedScrollInertia(velPxMs) {
-    stopUnifiedScrollInertia();
-    if (Math.abs(velPxMs) <= 1.15) return;
-    let vFrame = velPxMs * 2.1;
+  function startUnifiedScrollInertia(fingerVelPxMs) {
+    stopUnifiedScrollInertia(false);
+    // Kéo chậm đọc từng dòng (<= 0.48 px/ms) -> dừng im tại chỗ, không trôi quán tính
+    if (Math.abs(fingerVelPxMs) <= 0.48) {
+      savedCoastingVelY = 0;
+      return;
+    }
+
+    const now = performance.now();
+    const gainAtRelease = computeSmartScrollGain(fingerVelPxMs);
+    // Vận tốc cuộn đầu ra (px/ms)
+    let launchVel = -fingerVelPxMs * gainAtRelease;
+
+    // Nếu gạt bồi liên tiếp cùng chiều trong vòng 420ms khi bánh đà đang quay -> cộng dồn vận tốc để phóng vút lên đầu/cuối trang!
+    if (
+      savedCoastingVelY !== 0 &&
+      now - savedCoastingAt < 420 &&
+      Math.sign(savedCoastingVelY) === Math.sign(launchVel)
+    ) {
+      const stackedMag = Math.min(
+        7.5,
+        Math.abs(savedCoastingVelY) * 0.78 + Math.abs(launchVel) * 1.35
+      );
+      launchVel = Math.sign(launchVel) * stackedMag;
+    } else {
+      launchVel = Math.sign(launchVel) * Math.min(4.2, Math.abs(launchVel));
+    }
+    savedCoastingVelY = 0;
+    activeCoastingVelY = launchVel;
+
+    let lastFrameAt = now;
     let inertiaRem = 0;
+
     const stepInertia = () => {
-      vFrame *= 0.78;
-      if (Math.abs(vFrame) < 0.5) {
+      const curAt = performance.now();
+      const dt = Math.max(4, Math.min(48, curAt - lastFrameAt));
+      lastFrameAt = curAt;
+
+      // Hàm suy giảm mũ chuẩn UIScrollView / NSScrollView (0.9968 ^ dt_ms)
+      activeCoastingVelY *= Math.pow(0.9968, dt);
+      if (Math.abs(activeCoastingVelY) < 0.055) {
+        activeCoastingVelY = 0;
         sharedScrollInertiaRaf = null;
         return;
       }
-      inertiaRem += -vFrame * 0.36;
-      if (Math.abs(inertiaRem) >= 1.8) {
+
+      inertiaRem += activeCoastingVelY * dt;
+      if (Math.abs(inertiaRem) >= 1.1) {
         const sendY = Math.trunc(inertiaRem);
         if (sendY !== 0) {
           inertiaRem -= sendY;
@@ -1543,6 +1600,7 @@
     let tpRemY = 0;
     let tpTwoFingerScrollVelY = 0;
     let tpWasTwoFingerScrolling = false;
+    let tpBrakedCoasting = false;
     let tpLastTapAt = 0;
     let tpPendingDoubleTapCandidate = false;
     let tpDragActive = false;
@@ -1629,7 +1687,9 @@
         // Chạm >= 2 ngón (Cuộn trang / Chuột phải) -> hủy chờ ấn giữ 1 ngón & phanh quán tính cuộn cũ
         if (tpTouches.size >= 2) {
           cancelLongPressTimer();
-          stopUnifiedScrollInertia();
+          if (stopUnifiedScrollInertia(true)) {
+            tpBrakedCoasting = true;
+          }
           resetUnifiedScrollState();
           tpTwoFingerScrollVelY = 0;
           tpPendingDoubleTapCandidate = false;
@@ -1637,7 +1697,7 @@
         }
 
         if (isFirstFingerDown) {
-          stopUnifiedScrollInertia();
+          tpBrakedCoasting = stopUnifiedScrollInertia(true);
           tpGestureStartAt = now;
           tpPrevMoveAt = now;
           tpSmoothedVel = 0;
@@ -1647,7 +1707,7 @@
           tpTwoFingerScrollVelY = 0;
           tpWasTwoFingerScrolling = false;
           resetUnifiedScrollState();
-          tpPendingDoubleTapCandidate = now - tpLastTapAt < 270;
+          tpPendingDoubleTapCandidate = !tpBrakedCoasting && now - tpLastTapAt < 270;
 
           // Cơ chế Force-Touch mô phỏng trên điện thoại: Ấn giữ yên ~230ms rồi kéo lướt -> Bôi đen / Kéo thả!
           cancelLongPressTimer();
@@ -1709,10 +1769,15 @@
         if (tpTouches.size === 2 && !tpDragActive) {
           cancelLongPressTimer();
           tpWasTwoFingerScrolling = true;
-          tpTwoFingerScrollVelY = tpTwoFingerScrollVelY * 0.5 + (dy / dt) * 0.5;
+          const vNow = dy / dt;
+          if (Math.abs(vNow) < Math.abs(tpTwoFingerScrollVelY)) {
+            tpTwoFingerScrollVelY = tpTwoFingerScrollVelY * 0.3 + vNow * 0.7;
+          } else {
+            tpTwoFingerScrollVelY = tpTwoFingerScrollVelY * 0.55 + vNow * 0.45;
+          }
           setSharedScrollVisual(true);
           setSharedThumbOffset(sharedThumbOffset + dy * 0.42);
-          emitUnifiedScroll(dx, dy);
+          emitUnifiedScroll(dx, dy, dt);
           return;
         }
 
@@ -1761,7 +1826,11 @@
         if (tpWasTwoFingerScrolling) {
           tpWasTwoFingerScrolling = false;
           setSharedScrollVisual(false);
-          startUnifiedScrollInertia(tpTwoFingerScrollVelY);
+          if (performance.now() - tpPrevMoveAt > 65) {
+            savedCoastingVelY = 0;
+          } else {
+            startUnifiedScrollInertia(tpTwoFingerScrollVelY);
+          }
         }
         const duration = performance.now() - tpGestureStartAt;
 
@@ -1789,6 +1858,12 @@
         }
 
         tpPendingDoubleTapCandidate = false;
+        // Nếu cú chạm vừa rồi chỉ để phanh dừng trang đang trôi nhanh -> tuyệt đối không Click nhầm vào link dưới trỏ chuột!
+        if (tpBrakedCoasting && tpTotalMoved < 8) {
+          tpBrakedCoasting = false;
+          return;
+        }
+        tpBrakedCoasting = false;
         if (tpTotalMoved < 8 && duration < 260) {
           triggerHaptic(8);
           if (tpMaxTouches >= 2) {
@@ -1817,6 +1892,7 @@
     let prevAt = 0;
     let totalMoved = 0;
     let velocityPxMs = 0;
+    let stripBrakedCoasting = false;
 
     stripEl.addEventListener(
       "touchstart",
@@ -1825,7 +1901,7 @@
         if (!t) return;
         e.preventDefault();
         e.stopPropagation();
-        stopUnifiedScrollInertia();
+        stripBrakedCoasting = stopUnifiedScrollInertia(true);
         resetUnifiedScrollState();
         closeModeMenu();
         closeSymbolPopup();
@@ -1858,9 +1934,14 @@
             prevY = t.clientY;
             prevAt = now;
             totalMoved += Math.abs(dy);
-            velocityPxMs = velocityPxMs * 0.5 + (dy / dt) * 0.5;
+            const vNow = dy / dt;
+            if (Math.abs(vNow) < Math.abs(velocityPxMs)) {
+              velocityPxMs = velocityPxMs * 0.3 + vNow * 0.7;
+            } else {
+              velocityPxMs = velocityPxMs * 0.55 + vNow * 0.45;
+            }
             setSharedThumbOffset(sharedThumbOffset + dy * 0.42);
-            emitUnifiedScroll(0, dy);
+            emitUnifiedScroll(0, dy, dt);
             break;
           }
         }
@@ -1880,6 +1961,10 @@
 
           const duration = performance.now() - startAt;
           if (totalMoved < 6 && duration < 240) {
+            if (stripBrakedCoasting) {
+              stripBrakedCoasting = false;
+              return;
+            }
             const rect = stripEl.getBoundingClientRect();
             const relY = rect.height > 0 ? (t.clientY - rect.top) / rect.height : 0.5;
             if (relY < 0.3) {
@@ -1891,7 +1976,13 @@
             }
             return;
           }
+          stripBrakedCoasting = false;
 
+          // Nếu ngón tay đã giữ dừng yên trước khi nhấc lên (> 65ms không rê tiếp) -> hủy trôi đà
+          if (performance.now() - prevAt > 65) {
+            savedCoastingVelY = 0;
+            return;
+          }
           startUnifiedScrollInertia(velocityPxMs);
           break;
         }
@@ -2032,7 +2123,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.0.9";
+  const BUNDLED_WEB_VERSION = "2.1.0";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();

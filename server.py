@@ -1436,13 +1436,21 @@ class KeyboardInjector:
                 pass
             return
         q = self._quartz
+        iy = int(round(dy))
+        ix = int(round(dx))
+        if iy == 0 and ix == 0:
+            return
         ev = q.CGEventCreateScrollWheelEvent(
-            None,
+            self._event_source,
             q.kCGScrollEventUnitPixel,
             2,
-            int(round(dy)),
-            int(round(dx)),
+            iy,
+            ix,
         )
+        # kCGScrollWheelEventIsContinuous = 88: đánh dấu cuộn mượt từng pixel chuẩn Trackpad (tắt nhảy nấc 3 dòng của chuột cơ)
+        q.CGEventSetIntegerValueField(ev, 88, 1)
+        if self.held_modifiers:
+            q.CGEventSetFlags(ev, self._compute_quartz_flags())
         q.CGEventPost(q.kCGHIDEventTap, ev)
 
 
@@ -1717,7 +1725,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.0.5",
+        "version": "2.1.0",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
