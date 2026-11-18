@@ -1990,4 +1990,117 @@
 
   syncModifierVisuals();
   connectWebSocket();
+
+  // ============================================================================
+  // 8. CẬP NHẬT THÔNG MINH TRỰC TIẾP KHI ĐANG DÙNG APP (LIVE OTA HOT-UPDATE)
+  //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
+  //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
+  // ============================================================================
+  const BUNDLED_WEB_VERSION = "2.0.6";
+  const LIVE_MANIFEST_URL =
+    "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
+  let lastUserTouchAt = performance.now();
+  let liveUpdateTriggered = false;
+  let pendingUpdateApplyTimer = null;
+
+  const markUserActive = () => {
+    lastUserTouchAt = performance.now();
+  };
+  window.addEventListener("touchstart", markUserActive, { passive: true, capture: true });
+  window.addEventListener("touchmove", markUserActive, { passive: true, capture: true });
+  window.addEventListener("touchend", markUserActive, { passive: true, capture: true });
+  window.addEventListener("mousedown", markUserActive, { passive: true, capture: true });
+
+  function compareVer(a, b) {
+    const cleanA = String(a || "")
+      .trim()
+      .replace(/^[vV]/, "")
+      .split("-")[0];
+    const cleanB = String(b || "")
+      .trim()
+      .replace(/^[vV]/, "")
+      .split("-")[0];
+    if (!cleanA || cleanA === cleanB) return 0;
+    const pa = cleanA.split(".").map((n) => parseInt(n, 10) || 0);
+    const pb = cleanB.split(".").map((n) => parseInt(n, 10) || 0);
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i += 1) {
+      const va = pa[i] || 0;
+      const vb = pb[i] || 0;
+      if (va > vb) return 1;
+      if (va < vb) return -1;
+    }
+    return 0;
+  }
+
+  function getRunningWebVersion() {
+    let best = BUNDLED_WEB_VERSION;
+    if (hasAndroidBridge && typeof window.AndroidBridge.getAppVersion === "function") {
+      try {
+        const bridgeVer = String(window.AndroidBridge.getAppVersion() || "").trim();
+        if (bridgeVer && compareVer(bridgeVer, best) > 0) {
+          best = bridgeVer;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return best;
+  }
+
+  function triggerWhenIdle() {
+    if (liveUpdateTriggered) return;
+    const idleMs = performance.now() - lastUserTouchAt;
+    if (document.visibilityState !== "visible" || activePointers.size > 0 || idleMs < 2000) {
+      if (pendingUpdateApplyTimer === null) {
+        pendingUpdateApplyTimer = setTimeout(() => {
+          pendingUpdateApplyTimer = null;
+          triggerWhenIdle();
+        }, 1200);
+      }
+      return;
+    }
+    liveUpdateTriggered = true;
+    releaseAllActiveTouches();
+    if (hasAndroidBridge && typeof window.AndroidBridge.startNativeUpdate === "function") {
+      try {
+        window.AndroidBridge.startNativeUpdate();
+        return;
+      } catch {
+        // fallback reload
+      }
+    }
+    window.location.reload();
+  }
+
+  async function pollLiveUpdateManifest() {
+    if (liveUpdateTriggered || document.visibilityState !== "visible") return;
+    try {
+      const res = await fetch(`${LIVE_MANIFEST_URL}?t=${Date.now()}`, {
+        method: "GET",
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || typeof data !== "object") return;
+      const curVer = getRunningWebVersion();
+      const remoteWeb = String(data.web_version || "").trim();
+      const remoteTag = String(data.tag_name || "").trim();
+      if (
+        (remoteWeb && compareVer(remoteWeb, curVer) > 0) ||
+        (remoteTag && compareVer(remoteTag, curVer) > 0)
+      ) {
+        triggerWhenIdle();
+      }
+    } catch {
+      // ignore offline / transient network errors
+    }
+  }
+
+  setTimeout(() => {
+    void pollLiveUpdateManifest();
+  }, 4000);
+  setInterval(() => {
+    void pollLiveUpdateManifest();
+  }, 22000);
 })();
