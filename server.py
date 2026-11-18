@@ -1524,7 +1524,7 @@ async def health() -> dict:
     py_app = real_py.split("/Python.app/")[0] + "/Python.app" if "/Python.app/" in real_py else real_py
     return {
         "ok": True,
-        "version": "1.9.6",
+        "version": "1.9.7",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,

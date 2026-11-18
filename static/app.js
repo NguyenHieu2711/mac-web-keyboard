@@ -453,33 +453,19 @@
 
     ctx.save();
 
-    // Vòng khoanh vùng trung tâm con chuột (Focus Reticle)
-    const radius = (isRibbon ? 12 : 19) * dpr;
+    // Chỉ phủ một quầng sáng nhỏ dịu nhẹ ngay mũi con trỏ (bỏ hoàn toàn vòng tròn to)
+    const glowR = (isRibbon ? 5.0 : 6.5) * dpr;
+    const grad = ctx.createRadialGradient(px, py, 0, px, py, glowR);
+    grad.addColorStop(0, "rgba(56, 189, 248, 0.32)");
+    grad.addColorStop(0.55, "rgba(56, 189, 248, 0.11)");
+    grad.addColorStop(1, "rgba(56, 189, 248, 0)");
     ctx.beginPath();
-    ctx.arc(px, py, radius, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(56, 189, 248, 0.12)";
+    ctx.arc(px, py, glowR, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
     ctx.fill();
-    ctx.lineWidth = 1.45 * dpr;
-    ctx.strokeStyle = "rgba(56, 189, 248, 0.88)";
-    ctx.stroke();
 
-    // 4 vạch chia ngắm tâm con chuột
-    const tIn = radius - 3 * dpr;
-    const tOut = radius + 3.5 * dpr;
-    ctx.beginPath();
-    ctx.moveTo(px - tOut, py);
-    ctx.lineTo(px - tIn, py);
-    ctx.moveTo(px + tIn, py);
-    ctx.lineTo(px + tOut, py);
-    ctx.moveTo(px, py - tOut);
-    ctx.lineTo(px, py - tIn);
-    ctx.moveTo(px, py + tIn);
-    ctx.lineTo(px, py + tOut);
-    ctx.lineWidth = 1.2 * dpr;
-    ctx.stroke();
-
-    // Mũi tên con trỏ chuột sắc nét tại đúng điểm (px, py)
-    const s = (isRibbon ? 0.82 : 1.05) * dpr;
+    // Mũi tên con trỏ chuột kích thước vừa gọn, sắc nét tại đúng điểm (px, py)
+    const s = (isRibbon ? 0.62 : 0.72) * dpr;
     ctx.translate(px, py);
     ctx.beginPath();
     ctx.moveTo(0, 0);
@@ -492,8 +478,8 @@
     ctx.closePath();
 
     ctx.lineJoin = "round";
-    ctx.lineWidth = 2.0 * s;
-    ctx.strokeStyle = "rgba(9, 12, 18, 0.94)";
+    ctx.lineWidth = 1.8 * s;
+    ctx.strokeStyle = "rgba(9, 12, 18, 0.92)";
     ctx.stroke();
     ctx.fillStyle = "#ffffff";
     ctx.fill();
