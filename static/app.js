@@ -2279,13 +2279,15 @@
   let rdpPanY = 0;
 
   let kvmActive = false;
+  let localPointerVisible = false;
+  let localPointerHideTimer = null;
   let kvmX = RDP_TARGET_W / 2;
   let kvmY = RDP_TARGET_H / 2;
   let kvmMacEdge = "bottom";
   let kvmPhoneEdge = "top";
   let kvmReturnPush = 0;
-  let cursorHotspotX = 0;
-  let cursorHotspotY = 0;
+  let cursorHotspotX = 2;
+  let cursorHotspotY = 1;
   let cursorHiddenByServer = false;
 
   let webSpeechRec = null;
@@ -2387,17 +2389,41 @@
     }
   }
 
+  function showLocalRemoteCursor(rx, ry, autoHideMs = 1500) {
+    kvmX = rx;
+    kvmY = ry;
+    localPointerVisible = true;
+    if (localPointerHideTimer !== null) {
+      clearTimeout(localPointerHideTimer);
+      localPointerHideTimer = null;
+    }
+    if (autoHideMs > 0) {
+      localPointerHideTimer = setTimeout(() => {
+        localPointerHideTimer = null;
+        localPointerVisible = false;
+        updateOverlayCursorVisual();
+      }, autoHideMs);
+    }
+    updateOverlayCursorVisual();
+  }
+
   function updateOverlayCursorVisual() {
     if (!remoteKvmCursor || !remoteCanvas) return;
-    if (!kvmActive || cursorHiddenByServer) {
+    if ((!kvmActive && !localPointerVisible) || cursorHiddenByServer) {
       remoteKvmCursor.classList.add("is-hidden");
       return;
     }
     const cw = remoteCanvas.offsetWidth || RDP_TARGET_W;
     const ch = remoteCanvas.offsetHeight || RDP_TARGET_H;
-    const px = (kvmX / (remoteCanvas.width || RDP_TARGET_W)) * cw - cursorHotspotX;
-    const py = (kvmY / (remoteCanvas.height || RDP_TARGET_H)) * ch - cursorHotspotY;
-    remoteKvmCursor.style.transform = `translate3d(${px.toFixed(1)}px, ${py.toFixed(1)}px, 0)`;
+    const stageScale = cw / (remoteCanvas.width || RDP_TARGET_W);
+    const cursorScale = Math.max(0.36, Math.min(1.0, stageScale * 1.18));
+    const px =
+      (kvmX / (remoteCanvas.width || RDP_TARGET_W)) * cw -
+      cursorHotspotX * cursorScale;
+    const py =
+      (kvmY / (remoteCanvas.height || RDP_TARGET_H)) * ch -
+      cursorHotspotY * cursorScale;
+    remoteKvmCursor.style.transform = `translate3d(${px.toFixed(1)}px, ${py.toFixed(1)}px, 0) scale(${cursorScale.toFixed(3)})`;
     remoteKvmCursor.classList.remove("is-hidden");
   }
 
@@ -2423,21 +2449,36 @@
     return rdpModPromise;
   }
 
-  async function probeHttpHealth(httpUrl, timeoutMs = 850) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const res = await fetch(httpUrl, {
-        method: "GET",
-        cache: "no-store",
-        signal: ctrl.signal,
-      });
-      return res.ok;
-    } catch {
-      return false;
-    } finally {
-      clearTimeout(timer);
-    }
+  function probeWsOpen(wsUrl, timeoutMs = 950) {
+    return new Promise((resolve) => {
+      let done = false;
+      let sock = null;
+      const t0 = performance.now();
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        try {
+          if (sock) {
+            sock.onopen = null;
+            sock.onerror = null;
+            sock.onclose = null;
+            sock.close();
+          }
+        } catch {
+          // ignore
+        }
+        resolve({ wsUrl, ok, rtt: performance.now() - t0 });
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      try {
+        sock = new WebSocket(wsUrl);
+        sock.onopen = () => finish(true);
+        sock.onerror = () => finish(false);
+      } catch {
+        finish(false);
+      }
+    });
   }
 
   async function buildRdpProxyCandidates(pcHost) {
@@ -2447,39 +2488,37 @@
       .split(":")[0]
       .trim();
 
-    const rawCandidates = [];
+    const rawUrls = [];
+    // Nếu đang có kênh WebSocket bàn phím mở sẵn tới MacBook -> đưa lên ưu tiên số 1
+    if (ws && ws.readyState === WebSocket.OPEN && ws.url) {
+      rawUrls.push(ws.url.replace(/\/ws(\?.*)?$/, "/rdp-ws"));
+    }
     if (pcIp) {
-      rawCandidates.push({
-        wsUrl: `ws://${pcIp}:5051`,
-        healthUrl: `http://${pcIp}:5051/health`,
-      });
+      rawUrls.push(`ws://${pcIp}:5051`);
     }
     for (const h of resolveCandidateHosts()) {
       const cleanH = h.replace(/^https?:\/\/|^wss?:\/\//, "").split("/")[0];
-      if (!cleanH) continue;
-      rawCandidates.push({
-        wsUrl: `ws://${cleanH}/rdp-ws`,
-        healthUrl: `http://${cleanH}/health`,
-      });
+      if (cleanH) rawUrls.push(`ws://${cleanH}/rdp-ws`);
     }
 
-    const seen = new Set();
-    const unique = rawCandidates.filter((c) => {
-      if (seen.has(c.wsUrl)) return false;
-      seen.add(c.wsUrl);
-      return true;
-    });
+    const uniqueUrls = Array.from(new Set(rawUrls));
+    if (uniqueUrls.length === 0) return [];
 
-    const checks = await Promise.all(
-      unique.map(async (c) => ({
-        wsUrl: c.wsUrl,
-        ok: await probeHttpHealth(c.healthUrl, 850),
-      }))
-    );
-
-    const alive = checks.filter((c) => c.ok).map((c) => c.wsUrl);
-    const rest = checks.filter((c) => !c.ok).map((c) => c.wsUrl);
-    return [...alive, ...rest];
+    // Đua mở WebSocket thật song song: cổng nào mở ngay trong vài mili-giây sẽ thắng tức thì,
+    // loại bỏ hoàn toàn cổng bị tường lửa giữ gói tin (tránh treo chờ 2-3 phút của TCP SYN retry)
+    try {
+      const fastest = await Promise.any(
+        uniqueUrls.map(
+          (u) =>
+            new Promise((res, rej) => {
+              probeWsOpen(u, 1100).then((r) => (r.ok ? res(r.wsUrl) : rej()));
+            })
+        )
+      );
+      return [fastest];
+    } catch {
+      return uniqueUrls.slice(0, 1);
+    }
   }
 
   function formatIronRdpError(err) {
@@ -2516,10 +2555,13 @@
     }
   }
 
-  function rdpSendMouseMove(rx, ry) {
+  function rdpSendMouseMove(rx, ry, autoHideMs = 0) {
     if (!rdpSession || !rdpMod) return;
     const cx = Math.max(0, Math.min((remoteCanvas.width || RDP_TARGET_W) - 1, Math.round(rx)));
     const cy = Math.max(0, Math.min((remoteCanvas.height || RDP_TARGET_H) - 1, Math.round(ry)));
+    if (!kvmActive) {
+      showLocalRemoteCursor(cx, cy, autoHideMs);
+    }
     applyRdpDeviceEvents([rdpMod.DeviceEvent.mouseMove(cx, cy)]);
   }
 
@@ -2527,6 +2569,9 @@
     if (!rdpSession || !rdpMod) return;
     const cx = Math.max(0, Math.min((remoteCanvas.width || RDP_TARGET_W) - 1, Math.round(rx)));
     const cy = Math.max(0, Math.min((remoteCanvas.height || RDP_TARGET_H) - 1, Math.round(ry)));
+    if (!kvmActive) {
+      showLocalRemoteCursor(cx, cy, 1400);
+    }
     const evs = [rdpMod.DeviceEvent.mouseMove(cx, cy)];
     for (let i = 0; i < count; i += 1) {
       evs.push(rdpMod.DeviceEvent.mouseButtonPressed(button));
@@ -2706,9 +2751,9 @@
 
           builder.setCursorStyleCallbackContext(remoteCanvas);
           builder.setCursorStyleCallback(function (kind, data, hx, hy) {
+            remoteCanvas.style.cursor = "none";
             if (kind === "hidden" || kind === "none") {
               cursorHiddenByServer = true;
-              remoteCanvas.style.cursor = "none";
             } else if (kind === "url" && typeof data === "string" && data.startsWith("data:")) {
               cursorHiddenByServer = false;
               cursorHotspotX = Number(hx) || 0;
@@ -2718,14 +2763,12 @@
                 remoteCursorImg.classList.remove("is-hidden");
               }
               if (remoteCursorSvg) remoteCursorSvg.classList.add("is-hidden");
-              remoteCanvas.style.cursor = `url(${data}) ${cursorHotspotX} ${cursorHotspotY}, default`;
             } else {
               cursorHiddenByServer = false;
               cursorHotspotX = 2;
               cursorHotspotY = 1;
               if (remoteCursorImg) remoteCursorImg.classList.add("is-hidden");
               if (remoteCursorSvg) remoteCursorSvg.classList.remove("is-hidden");
-              remoteCanvas.style.cursor = "default";
             }
             updateOverlayCursorVisual();
           });
@@ -2765,22 +2808,24 @@
       syncRdpConnectionUI();
       pushKvmConfigToServer();
 
-      // Ép chính xác 2248x1080 @ 100% scaling qua kênh DisplayControl của Windows RDP
-      setTimeout(() => {
-        if (rdpSession) {
-          try {
-            rdpSession.resize(
-              RDP_TARGET_W,
-              RDP_TARGET_H,
-              RDP_SCALE_FACTOR,
-              RDP_TARGET_W,
-              RDP_TARGET_H
-            );
-          } catch {
-            // ignore
+      // Chỉ gửi lệnh resize nếu độ phân giải ban đầu chưa khớp 2248x1080 (tránh DeactivateAll gây trễ màn hình)
+      if (ds.width !== RDP_TARGET_W || ds.height !== RDP_TARGET_H) {
+        setTimeout(() => {
+          if (rdpSession) {
+            try {
+              rdpSession.resize(
+                RDP_TARGET_W,
+                RDP_TARGET_H,
+                RDP_SCALE_FACTOR,
+                RDP_TARGET_W,
+                RDP_TARGET_H
+              );
+            } catch {
+              // ignore
+            }
           }
-        }
-      }, 450);
+        }, 250);
+      }
 
       rdpSession
         .run()
@@ -3103,7 +3148,7 @@
 
           if (rTouchMode === "drag") {
             const pt = clientToRemoteCoords(t.clientX, t.clientY);
-            rdpSendMouseMove(pt.x, pt.y);
+            rdpSendMouseMove(pt.x, pt.y, 1400);
           } else if (rMoved) {
             if (rdpZoom > 1.03) {
               rdpPanX += dx;
@@ -3111,7 +3156,7 @@
               applyRdpStageTransform();
             } else {
               const pt = clientToRemoteCoords(t.clientX, t.clientY);
-              rdpSendMouseMove(pt.x, pt.y);
+              rdpSendMouseMove(pt.x, pt.y, 1400);
             }
           }
         }
@@ -3565,6 +3610,11 @@
 
   if (kbLayout === "remote") {
     onEnterRemoteLayout();
+  } else {
+    // Nạp sẵn bộ giải mã WASM dưới nền để khi chuyển sang tab Remote PC sẽ kết nối tức thì (~0.3s)
+    setTimeout(() => {
+      void ensureIronRdpLoaded().catch(() => {});
+    }, 900);
   }
 
   // ============================================================================
@@ -3572,7 +3622,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.1.2";
+  const BUNDLED_WEB_VERSION = "2.1.3";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();

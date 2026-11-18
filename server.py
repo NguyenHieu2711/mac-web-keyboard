@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -2233,6 +2234,12 @@ injector = KeyboardInjector()
 lens_capturer = LiveLensCapturer(injector)
 kvm_bridge = MacKvmBridge()
 app = FastAPI(title="Mac Web Virtual Keyboard", docs_url=None, redoc_url=None)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
@@ -2396,7 +2403,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.1.1",
+        "version": "2.1.3",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
