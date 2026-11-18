@@ -1380,47 +1380,6 @@
     e.preventDefault();
   });
 
-  // ============================================================================
-  // 8. KIỂM TRA CẬP NHẬT ĐỒNG BỘ VỚI PHIÊN BẢN APK THẬT (TRÁNH LẶP VÔ TẬN)
-  // ============================================================================
-  const CURRENT_APP_VERSION =
-    hasAndroidBridge && typeof window.AndroidBridge.getAppVersion === "function"
-      ? String(window.AndroidBridge.getAppVersion() || "1.9.1")
-      : "1.9.1";
-  const updateModal = document.getElementById("mandatory-update-modal");
-  const updateTitle = document.getElementById("update-title");
-  const updateDesc = document.getElementById("update-desc");
-  const btnDoUpdate = document.getElementById("btn-do-update");
-
-  function isNewerVer(remoteTag, currentVer) {
-    const cleanR = String(remoteTag || "").trim().replace(/^[vV]/, "").split("-")[0];
-    const cleanC = String(currentVer || "").trim().replace(/^[vV]/, "").split("-")[0];
-    if (!cleanR || cleanR === cleanC) return false;
-    const rParts = cleanR.split(".").map((n) => parseInt(n, 10) || 0);
-    const cParts = cleanC.split(".").map((n) => parseInt(n, 10) || 0);
-    const len = Math.max(rParts.length, cParts.length);
-    for (let i = 0; i < len; i += 1) {
-      const rv = rParts[i] || 0;
-      const cv = cParts[i] || 0;
-      if (rv > cv) return true;
-      if (rv < cv) return false;
-    }
-    return false;
-  }
-
-  async function checkMandatoryUpdateGate() {
-    // Trên APK Android: MainActivity.kt đã xử lý trọn gói bằng DownloadManager + PackageInstaller gốc
-    if (hasAndroidBridge) return;
-    if (updateModal) updateModal.classList.add("is-hidden");
-  }
-
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") {
-      void checkMandatoryUpdateGate();
-    }
-  });
-
   syncModifierVisuals();
   connectWebSocket();
-  void checkMandatoryUpdateGate();
 })();
