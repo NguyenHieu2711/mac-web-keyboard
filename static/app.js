@@ -223,8 +223,11 @@
     padSplitBtns.forEach((el) => {
       el.classList.toggle("is-active", padSplitHorizontal);
     });
+    const splitSvg = padSplitHorizontal
+      ? '<svg class="split-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="M4 12h16M8.5 7.5L4 12l4.5 4.5M15.5 7.5L20 12l-4.5 4.5"/></svg><span>Ngang</span>'
+      : '<svg class="split-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="M12 4v16M7.5 8.5L12 4l4.5 4.5M7.5 15.5L12 20l4.5-4.5"/></svg><span>Dọc</span>';
     padSplitLabels.forEach((el) => {
-      el.textContent = padSplitHorizontal ? "↔ Ngang" : "↕ Dọc";
+      el.innerHTML = splitSvg;
     });
     vnBtns.forEach((el) => {
       el.classList.toggle("is-active", vnEnabled);
@@ -1996,7 +1999,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.0.6";
+  const BUNDLED_WEB_VERSION = "2.0.7";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();

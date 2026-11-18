@@ -824,8 +824,12 @@ body[data-layout="pad"][data-pad-split="horizontal"] .pad-topbar {
 }
 
 body[data-layout="pad"][data-pad-split="horizontal"] .pad-topbar .key-main {
-  font-size: 11px;
+  font-size: 12.5px;
   white-space: nowrap;
+}
+
+body[data-layout="pad"][data-pad-split="horizontal"] .pad-topbar .key-util .key-main {
+  font-size: 15px;
 }
 
 body[data-layout="pad"][data-pad-split="horizontal"] .sym-popup {
@@ -1136,6 +1140,21 @@ body.is-lowercase .key-alpha .key-main {
 
 .key-vn-toggle:not(.is-active) .key-main {
   color: #94a3b8;
+}
+
+.key-split-toggle .key-main {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 13px !important;
+  font-weight: 700;
+}
+
+.split-ico {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
 }
 
 .key-split-toggle.is-active {
