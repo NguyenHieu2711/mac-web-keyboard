@@ -14,7 +14,12 @@ import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.net.Uri
+import android.util.Base64
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -81,6 +86,9 @@ class MainActivity : AppCompatActivity() {
     private var lastBackPressedAt: Long = 0L
     private var pendingWebPermissionRequest: PermissionRequest? = null
     private var pendingVoiceLang: String? = null
+    private var pendingPcmMicSpec: Triple<Int, Int, Int>? = null
+    @Volatile private var pcmMicRunning: Boolean = false
+    private var pcmMicThread: Thread? = null
 
     private val audioPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -94,6 +102,16 @@ class MainActivity : AppCompatActivity() {
                 webReq.deny()
             }
         }
+        val pcmSpec = pendingPcmMicSpec
+        pendingPcmMicSpec = null
+        if (pcmSpec != null) {
+            if (granted) {
+                startNativePcmMicStream(pcmSpec.first, pcmSpec.second, pcmSpec.third)
+            } else {
+                webView.evaluateJavascript("window.__onRemoteMicCaptureState && window.__onRemoteMicCaptureState(false);", null)
+                Toast.makeText(this, "Cần cấp quyền Microphone để dùng Mic trên Remote PC.", Toast.LENGTH_SHORT).show()
+            }
+        }
         val lang = pendingVoiceLang
         pendingVoiceLang = null
         if (lang != null) {
@@ -104,6 +122,100 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Cần cấp quyền Microphone để đọc giọng nói.", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startNativePcmMicStream(sampleRate: Int, channels: Int, framesPerPacket: Int) {
+        stopNativePcmMicStream()
+        val safeRate = if (sampleRate in 8000..48000) sampleRate else 44100
+        val safeChannels = if (channels >= 2) 2 else 1
+        val chanCfg = if (safeChannels == 2) AudioFormat.CHANNEL_IN_STEREO else AudioFormat.CHANNEL_IN_MONO
+        val bytesPerFrame = safeChannels * 2
+        val packetBytes = (framesPerPacket.coerceIn(240, 2400)) * bytesPerFrame
+        val minBuf = AudioRecord.getMinBufferSize(safeRate, chanCfg, AudioFormat.ENCODING_PCM_16BIT)
+            .coerceAtLeast(packetBytes * 4)
+
+        pcmMicRunning = true
+        pcmMicThread = Thread {
+            var recorder: AudioRecord? = null
+            try {
+                recorder = AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    safeRate,
+                    chanCfg,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    minBuf
+                )
+                if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+                    recorder.release()
+                    recorder = AudioRecord(
+                        MediaRecorder.AudioSource.MIC,
+                        safeRate,
+                        chanCfg,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                        minBuf
+                    )
+                }
+                if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+                    pcmMicRunning = false
+                    runOnUiThread {
+                        webView.evaluateJavascript("window.__onRemoteMicCaptureState && window.__onRemoteMicCaptureState(false);", null)
+                    }
+                    return@Thread
+                }
+
+                recorder.startRecording()
+                runOnUiThread {
+                    webView.evaluateJavascript("window.__onRemoteMicCaptureState && window.__onRemoteMicCaptureState(true);", null)
+                }
+
+                val buf = ByteArray(packetBytes)
+                while (pcmMicRunning) {
+                    var totalRead = 0
+                    while (pcmMicRunning && totalRead < packetBytes) {
+                        val r = recorder.read(buf, totalRead, packetBytes - totalRead)
+                        if (r <= 0) break
+                        totalRead += r
+                    }
+                    if (totalRead > 0 && pcmMicRunning) {
+                        val b64 = Base64.encodeToString(buf, 0, totalRead, Base64.NO_WRAP)
+                        webView.post {
+                            if (pcmMicRunning) {
+                                webView.evaluateJavascript("window.__onNativeMicPcm && window.__onNativeMicPcm('$b64');", null)
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            } finally {
+                try {
+                    recorder?.stop()
+                } catch (_: Exception) {
+                }
+                try {
+                    recorder?.release()
+                } catch (_: Exception) {
+                }
+                runOnUiThread {
+                    webView.evaluateJavascript("window.__onRemoteMicCaptureState && window.__onRemoteMicCaptureState(false);", null)
+                }
+            }
+        }.apply {
+            name = "RemotePcMicThread"
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun stopNativePcmMicStream() {
+        pcmMicRunning = false
+        pcmMicThread?.let { t ->
+            try {
+                t.join(250)
+            } catch (_: Exception) {
+            }
+        }
+        pcmMicThread = null
     }
 
     private val voiceResultLauncher = registerForActivityResult(
@@ -193,7 +305,8 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Giữ màn hình luôn sáng khi dùng làm bàn phím rời cho MacBook
+        // Giữ màn hình luôn sáng khi dùng làm bàn phím rời cho MacBook & dùng phím cứng chỉnh âm lượng Loa Remote PC
+        volumeControlStream = AudioManager.STREAM_MUSIC
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes = window.attributes.apply {
@@ -350,6 +463,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        stopNativePcmMicStream()
         try {
             unregisterReceiver(downloadCompleteReceiver)
         } catch (_: Exception) {
@@ -1015,6 +1129,43 @@ class MainActivity : AppCompatActivity() {
                     launchNativeSpeechRecognizer(lang)
                 } else {
                     pendingVoiceLang = lang.ifBlank { "vi-VN" }
+                    audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun startPcmMicCapture(sampleRate: Int, channels: Int, framesPerPacket: Int) {
+            runOnUiThread {
+                if (ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    startNativePcmMicStream(sampleRate, channels, framesPerPacket)
+                } else {
+                    pendingPcmMicSpec = Triple(sampleRate, channels, framesPerPacket)
+                    audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun stopPcmMicCapture() {
+            stopNativePcmMicStream()
+        }
+
+        @JavascriptInterface
+        fun hasNativePcmMic(): Boolean = true
+
+        @JavascriptInterface
+        fun ensureMicPermission() {
+            runOnUiThread {
+                if (ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.RECORD_AUDIO
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
                     audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
                 }
             }

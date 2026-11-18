@@ -316,6 +316,15 @@ class SimpleWebSocketConnection {
     }
   }
 
+  sendText(str) {
+    if (!this.open || this.socket.destroyed) return;
+    try {
+      this.socket.write(encodeWsFrame(Buffer.from(String(str), 'utf-8'), 0x01));
+    } catch (_) {
+      this.close();
+    }
+  }
+
   close() {
     if (!this.open) return;
     this.open = false;
@@ -412,9 +421,592 @@ class SimpleWebSocketConnection {
   }
 }
 
-function handleRdpWebSocket(wsConn) {
+// ── RDP Audio Bridge (MS-RDPSND Loa Stereo + MS-RDPEAI Microphone "Remote Audio") ──
+const audioSessions = new Map();
+
+function getOrCreateAudioSession(sid) {
+  if (!sid) return null;
+  let sess = audioSessions.get(sid);
+  if (!sess) {
+    sess = new RdpAudioSession(sid);
+    audioSessions.set(sid, sess);
+  }
+  return sess;
+}
+
+function encodeDvcId(id, cbId) {
+  if (cbId === 0) return Buffer.from([id & 0xff]);
+  if (cbId === 1) {
+    const b = Buffer.allocUnsafe(2);
+    b.writeUInt16LE(id & 0xffff, 0);
+    return b;
+  }
+  const b = Buffer.allocUnsafe(4);
+  b.writeUInt32LE(id >>> 0, 0);
+  return b;
+}
+
+function decodeDvcId(buf, offset, cbId) {
+  if (cbId === 0) return { id: buf[offset], bytes: 1 };
+  if (cbId === 1) return { id: buf.readUInt16LE(offset), bytes: 2 };
+  return { id: buf.readUInt32LE(offset), bytes: 4 };
+}
+
+class RdpAudioSession {
+  constructor(sid) {
+    this.sid = sid;
+    this.tlsSocket = null;
+    this.audioWs = null;
+    this.clientStreamBuf = Buffer.alloc(0);
+    this.serverStreamBuf = Buffer.alloc(0);
+
+    this.csNetNames = [];
+    this.rdpsndChanId = null;
+    this.drdynvcChanId = null;
+    this.mcsInitiator = null;
+
+    this.rdpsndVcBuf = Buffer.alloc(0);
+    this.pendingLegacyWave = null;
+    this.spkFormat = null;
+
+    this.drdynvcVcBuf = Buffer.alloc(0);
+    this.drdynvcRawPkts = [];
+    this.audinDvcId = null;
+    this.audinCbId = 0;
+    this.audinFragBuf = Buffer.alloc(0);
+    this.audinExpectedLen = 0;
+    this.audinOpen = false;
+    this.micSpec = null;
+  }
+
+  attachTls(tlsSocket) {
+    this.tlsSocket = tlsSocket;
+  }
+
+  attachAudioWs(wsConn) {
+    this.audioWs = wsConn;
+    if (this.spkFormat) {
+      wsConn.sendText(JSON.stringify({ type: 'spk_format', ...this.spkFormat }));
+    }
+    if (this.audinOpen && this.micSpec) {
+      wsConn.sendText(JSON.stringify({ type: 'mic_start', ...this.micSpec }));
+    }
+    wsConn.onBinaryMessage = (data) => {
+      if (!data || data.length < 2) return;
+      if (data[0] === 0x02) {
+        this.forwardMicPcmToServer(data.subarray(1));
+      }
+    };
+    wsConn.onClose = () => {
+      if (this.audioWs === wsConn) this.audioWs = null;
+    };
+  }
+
+  destroy() {
+    if (this.audioWs) {
+      const a = this.audioWs;
+      this.audioWs = null;
+      try { a.close(); } catch (_) {}
+    }
+    audioSessions.delete(this.sid);
+  }
+
+  sendToTlsVc(channelId, vcPayload) {
+    if (!this.tlsSocket || this.tlsSocket.destroyed || this.mcsInitiator === null || !channelId) {
+      return;
+    }
+    const CHUNK_MAX = 1600;
+    const totalLen = vcPayload.length;
+    let offset = 0;
+    while (offset < totalLen || (totalLen === 0 && offset === 0)) {
+      const end = Math.min(totalLen, offset + CHUNK_MAX);
+      const chunk = vcPayload.subarray(offset, end);
+      let flags = 0;
+      if (offset === 0) flags |= 0x01;
+      if (end >= totalLen) flags |= 0x02;
+
+      const vcPdu = Buffer.allocUnsafe(8 + chunk.length);
+      vcPdu.writeUInt32LE(totalLen, 0);
+      vcPdu.writeUInt32LE(flags, 4);
+      chunk.copy(vcPdu, 8);
+
+      const perLen = vcPdu.length < 0x80
+        ? Buffer.from([vcPdu.length])
+        : Buffer.from([0x80 | (vcPdu.length >> 8), vcPdu.length & 0xff]);
+
+      const mcsHdr = Buffer.allocUnsafe(6);
+      mcsHdr[0] = 0x64; // SendDataRequest
+      mcsHdr.writeUInt16BE(this.mcsInitiator, 1);
+      mcsHdr.writeUInt16BE(channelId, 3);
+      mcsHdr[5] = 0x70;
+
+      const tpktLen = 4 + 3 + mcsHdr.length + perLen.length + vcPdu.length;
+      const pkt = Buffer.concat([
+        Buffer.from([0x03, 0x00, (tpktLen >> 8) & 0xff, tpktLen & 0xff, 0x02, 0xf0, 0x80]),
+        mcsHdr,
+        perLen,
+        vcPdu,
+      ]);
+      try {
+        this.tlsSocket.write(pkt);
+      } catch (_) {}
+
+      offset = end;
+      if (totalLen === 0) break;
+    }
+  }
+
+  sendAudinDvcData(payload) {
+    if (this.audinDvcId === null || !this.drdynvcChanId) return;
+    const idBuf = encodeDvcId(this.audinDvcId, this.audinCbId);
+    const MAX_FIRST = 1580;
+    if (payload.length <= MAX_FIRST) {
+      const hdr = Buffer.from([(0x03 << 4) | (this.audinCbId & 0x03)]);
+      this.sendToTlsVc(this.drdynvcChanId, Buffer.concat([hdr, idBuf, payload]));
+      return;
+    }
+    const lenBuf = Buffer.allocUnsafe(2);
+    lenBuf.writeUInt16LE(payload.length, 0);
+    const firstHdr = Buffer.from([(0x02 << 4) | (0x01 << 2) | (this.audinCbId & 0x03)]);
+    this.sendToTlsVc(
+      this.drdynvcChanId,
+      Buffer.concat([firstHdr, idBuf, lenBuf, payload.subarray(0, MAX_FIRST)])
+    );
+    let off = MAX_FIRST;
+    while (off < payload.length) {
+      const nextSlice = payload.subarray(off, Math.min(payload.length, off + MAX_FIRST));
+      const dataHdr = Buffer.from([(0x03 << 4) | (this.audinCbId & 0x03)]);
+      this.sendToTlsVc(this.drdynvcChanId, Buffer.concat([dataHdr, idBuf, nextSlice]));
+      off += nextSlice.length;
+    }
+  }
+
+  forwardMicPcmToServer(pcmBytes) {
+    if (!this.audinOpen || this.audinDvcId === null || !pcmBytes || pcmBytes.length === 0) return;
+    this.sendAudinDvcData(Buffer.from([0x05])); // MSG_SNDIN_DATA_INCOMING
+    const dataPdu = Buffer.allocUnsafe(1 + pcmBytes.length);
+    dataPdu[0] = 0x06; // MSG_SNDIN_DATA
+    pcmBytes.copy(dataPdu, 1);
+    this.sendAudinDvcData(dataPdu);
+  }
+
+  _extractNextRdpPdu(buf) {
+    if (buf.length < 2) return null;
+    if (buf[0] === 0x03) {
+      if (buf.length < 4) return null;
+      const len = (buf[2] << 8) | buf[3];
+      if (len < 4) return { pkt: buf, rest: Buffer.alloc(0) };
+      if (buf.length < len) return null;
+      return { pkt: Buffer.from(buf.subarray(0, len)), rest: buf.subarray(len) };
+    }
+    const b1 = buf[1];
+    let len = 0;
+    if ((b1 & 0x80) === 0) {
+      len = b1;
+      if (len < 2) return { pkt: buf, rest: Buffer.alloc(0) };
+    } else {
+      if (buf.length < 3) return null;
+      len = ((b1 & 0x7f) << 8) | buf[2];
+    }
+    if (buf.length < len) return null;
+    return { pkt: Buffer.from(buf.subarray(0, len)), rest: buf.subarray(len) };
+  }
+
+  processClientToServerChunk(chunk, writeToTls) {
+    this.clientStreamBuf = this.clientStreamBuf.length === 0
+      ? chunk
+      : Buffer.concat([this.clientStreamBuf, chunk]);
+
+    while (this.clientStreamBuf.length > 0) {
+      const parsed = this._extractNextRdpPdu(this.clientStreamBuf);
+      if (!parsed) break;
+      this.clientStreamBuf = parsed.rest;
+      const pkt = parsed.pkt;
+
+      if (pkt[0] === 0x03 && pkt.length >= 14 && pkt[4] === 0x02 && pkt[5] === 0xf0 && pkt[6] === 0x80) {
+        if (this.csNetNames.length === 0 && pkt[7] === 0x7f && pkt[8] === 0x65) {
+          this._scanCsNetAndDisableAudioCompression(pkt);
+        } else if ((pkt[7] >> 2) === 25 && pkt.length >= 15) {
+          this.mcsInitiator = pkt.readUInt16BE(8);
+          const chanId = pkt.readUInt16BE(10);
+          if (this.rdpsndChanId !== null && chanId === this.rdpsndChanId) {
+            continue; // Chặn phản hồi rỗng của NoopRdpsndBackend
+          }
+        }
+      }
+      writeToTls(pkt);
+    }
+  }
+
+  processServerToClientChunk(chunk, writeToClient) {
+    this.serverStreamBuf = this.serverStreamBuf.length === 0
+      ? chunk
+      : Buffer.concat([this.serverStreamBuf, chunk]);
+
+    while (this.serverStreamBuf.length > 0) {
+      const parsed = this._extractNextRdpPdu(this.serverStreamBuf);
+      if (!parsed) break;
+      this.serverStreamBuf = parsed.rest;
+      const pkt = parsed.pkt;
+
+      if (pkt[0] === 0x03 && pkt.length >= 14 && pkt[4] === 0x02 && pkt[5] === 0xf0 && pkt[6] === 0x80) {
+        if (this.csNetNames.length > 0 && this.rdpsndChanId === null && pkt[7] === 0x7f && pkt[8] === 0x66) {
+          this._scanScNet(pkt);
+        } else if ((pkt[7] >> 2) === 26 && pkt.length >= 16) {
+          const chanId = pkt.readUInt16BE(10);
+          if (this.rdpsndChanId !== null && chanId === this.rdpsndChanId) {
+            this._handleRdpsndPacket(pkt);
+            continue;
+          }
+          if (this.drdynvcChanId !== null && chanId === this.drdynvcChanId) {
+            const forwardPkts = this._handleDrdynvcPacket(pkt);
+            for (const fp of forwardPkts) writeToClient(fp);
+            continue;
+          }
+        }
+      }
+      writeToClient(pkt);
+    }
+  }
+
+  _scanCsNetAndDisableAudioCompression(pkt) {
+    for (let pos = 12; pos + 20 <= pkt.length; pos++) {
+      if (pkt[pos] === 0x03 && pkt[pos + 1] === 0xc0) {
+        const blockLen = pkt.readUInt16LE(pos + 2);
+        const count = pkt.readUInt32LE(pos + 4);
+        if (count >= 1 && count <= 31 && blockLen === 8 + count * 12 && pos + blockLen <= pkt.length) {
+          const names = [];
+          for (let i = 0; i < count; i++) {
+            const cOff = pos + 8 + i * 12;
+            const rawName = pkt.subarray(cOff, cOff + 8).toString('ascii').replace(/\0+$/, '').toLowerCase();
+            names.push(rawName);
+            if (rawName === 'rdpsnd' || rawName === 'drdynvc') {
+              const opts = pkt.readUInt32LE(cOff + 8);
+              pkt.writeUInt32LE((opts & ~0x00c00000) >>> 0, cOff + 8);
+            }
+          }
+          this.csNetNames = names;
+          return;
+        }
+      }
+    }
+  }
+
+  _scanScNet(pkt) {
+    const n = this.csNetNames.length;
+    if (n === 0) return;
+    const expectedPad = (n % 2 === 1) ? 2 : 0;
+    for (let pos = 12; pos + 8 + n * 2 <= pkt.length; pos++) {
+      if (pkt[pos] === 0x03 && pkt[pos + 1] === 0x0c) {
+        const blockLen = pkt.readUInt16LE(pos + 2);
+        const ioChan = pkt.readUInt16LE(pos + 4);
+        const count = pkt.readUInt16LE(pos + 6);
+        if (
+          count === n &&
+          ioChan >= 1000 &&
+          ioChan <= 1100 &&
+          (blockLen === 8 + n * 2 + expectedPad || blockLen === 8 + n * 2)
+        ) {
+          for (let i = 0; i < count; i++) {
+            const cid = pkt.readUInt16LE(pos + 8 + i * 2);
+            if (this.csNetNames[i] === 'rdpsnd') this.rdpsndChanId = cid;
+            if (this.csNetNames[i] === 'drdynvc') this.drdynvcChanId = cid;
+          }
+          return;
+        }
+      }
+    }
+  }
+
+  _parseVcChunk(pkt) {
+    let vcOff = 14;
+    if ((pkt[13] & 0x80) !== 0) vcOff = 15;
+    if (pkt.length < vcOff + 8) return null;
+    const vcFlags = pkt.readUInt32LE(vcOff + 4);
+    const vcChunk = pkt.subarray(vcOff + 8);
+    return { vcFlags, vcChunk };
+  }
+
+  _handleRdpsndPacket(pkt) {
+    const parsed = this._parseVcChunk(pkt);
+    if (!parsed) return;
+    if (parsed.vcFlags & 0x01) {
+      this.rdpsndVcBuf = Buffer.from(parsed.vcChunk);
+    } else {
+      this.rdpsndVcBuf = Buffer.concat([this.rdpsndVcBuf, parsed.vcChunk]);
+    }
+    if (!(parsed.vcFlags & 0x02)) return;
+
+    const pdu = this.rdpsndVcBuf;
+    this.rdpsndVcBuf = Buffer.alloc(0);
+    if (pdu.length < 4) return;
+
+    if (this.pendingLegacyWave) {
+      const pw = this.pendingLegacyWave;
+      this.pendingLegacyWave = null;
+      const pcm = Buffer.concat([pw.first4, pdu.subarray(Math.min(4, pdu.length))]);
+      this._sendWaveConfirm(pw.ts, pw.blockNo);
+      this._pushSpeakerPcm(pcm);
+      return;
+    }
+
+    const msgType = pdu[0];
+    if (msgType === 0x07 && pdu.length >= 24) {
+      const numFmt = pdu.readUInt16LE(18);
+      const srvVer = pdu.readUInt16LE(21);
+      let off = 24;
+      let chosen = null;
+      for (let i = 0; i < numFmt && off + 18 <= pdu.length; i++) {
+        const tag = pdu.readUInt16LE(off);
+        const ch = pdu.readUInt16LE(off + 2);
+        const rate = pdu.readUInt32LE(off + 4);
+        const bits = pdu.readUInt16LE(off + 14);
+        const cbSize = pdu.readUInt16LE(off + 16);
+        if (tag === 1 && bits === 16 && (ch === 2 || ch === 1)) {
+          if (!chosen || (ch === 2 && chosen.ch < 2) || (rate >= 44100 && chosen.rate < 44100)) {
+            chosen = { ch, rate, bits: 16 };
+          }
+        }
+        off += 18 + cbSize;
+      }
+      if (!chosen) chosen = { ch: 2, rate: 44100, bits: 16 };
+      this.spkFormat = { rate: chosen.rate, channels: chosen.ch };
+
+      const fmt18 = Buffer.allocUnsafe(18);
+      fmt18.writeUInt16LE(1, 0);
+      fmt18.writeUInt16LE(chosen.ch, 2);
+      fmt18.writeUInt32LE(chosen.rate, 4);
+      fmt18.writeUInt32LE(chosen.rate * chosen.ch * 2, 8);
+      fmt18.writeUInt16LE(chosen.ch * 2, 12);
+      fmt18.writeUInt16LE(16, 14);
+      fmt18.writeUInt16LE(0, 16);
+
+      const resp = Buffer.allocUnsafe(24 + 18);
+      resp[0] = 0x07;
+      resp[1] = 0x00;
+      resp.writeUInt16LE(20 + 18, 2);
+      resp.writeUInt32LE(0x00000003, 4); // TSSNDCAPS_ALIVE | TSSNDCAPS_VOLUME
+      resp.writeUInt32LE(0xffffffff, 8);
+      resp.writeUInt32LE(0, 12);
+      resp.writeUInt16LE(0, 16);
+      resp.writeUInt16LE(1, 18);
+      resp[20] = 0;
+      resp.writeUInt16LE(Math.min(Math.max(srvVer, 2), 6), 21);
+      resp[23] = 0;
+      fmt18.copy(resp, 24);
+      this.sendToTlsVc(this.rdpsndChanId, resp);
+
+      if (srvVer >= 6) {
+        const qm = Buffer.from([0x0c, 0x00, 0x04, 0x00, 0x02, 0x00, 0x00, 0x00]);
+        this.sendToTlsVc(this.rdpsndChanId, qm);
+      }
+      if (this.audioWs) {
+        this.audioWs.sendText(JSON.stringify({ type: 'spk_format', ...this.spkFormat }));
+      }
+    } else if (msgType === 0x06 && pdu.length >= 8) {
+      const confirm = Buffer.from([0x06, 0x00, 0x04, 0x00, pdu[4], pdu[5], pdu[6], pdu[7]]);
+      this.sendToTlsVc(this.rdpsndChanId, confirm);
+    } else if (msgType === 0x0d && pdu.length >= 16) {
+      const ts = pdu.readUInt16LE(4);
+      const blockNo = pdu[8];
+      const pcm = pdu.subarray(16);
+      this._sendWaveConfirm(ts, blockNo);
+      this._pushSpeakerPcm(pcm);
+    } else if (msgType === 0x02 && pdu.length >= 16) {
+      const ts = pdu.readUInt16LE(4);
+      const blockNo = pdu[8];
+      const first4 = Buffer.from(pdu.subarray(12, 16));
+      this.pendingLegacyWave = { ts, blockNo, first4 };
+    }
+  }
+
+  _sendWaveConfirm(ts, blockNo) {
+    const c = Buffer.allocUnsafe(8);
+    c[0] = 0x05;
+    c[1] = 0x00;
+    c.writeUInt16LE(4, 2);
+    c.writeUInt16LE(ts & 0xffff, 4);
+    c[6] = blockNo & 0xff;
+    c[7] = 0x00;
+    this.sendToTlsVc(this.rdpsndChanId, c);
+  }
+
+  _pushSpeakerPcm(pcm) {
+    if (!this.audioWs || !pcm || pcm.length === 0) return;
+    const out = Buffer.allocUnsafe(1 + pcm.length);
+    out[0] = 0x01;
+    pcm.copy(out, 1);
+    this.audioWs.sendBinary(out);
+  }
+
+  _handleDrdynvcPacket(pkt) {
+    const parsed = this._parseVcChunk(pkt);
+    if (!parsed) return [pkt];
+    if (parsed.vcFlags & 0x01) {
+      this.drdynvcVcBuf = Buffer.from(parsed.vcChunk);
+      this.drdynvcRawPkts = [pkt];
+    } else {
+      this.drdynvcVcBuf = Buffer.concat([this.drdynvcVcBuf, parsed.vcChunk]);
+      this.drdynvcRawPkts.push(pkt);
+    }
+    if (!(parsed.vcFlags & 0x02)) return [];
+
+    const dvc = this.drdynvcVcBuf;
+    const rawPkts = this.drdynvcRawPkts;
+    this.drdynvcVcBuf = Buffer.alloc(0);
+    this.drdynvcRawPkts = [];
+
+    if (dvc.length < 2) return rawPkts;
+    const cmd = (dvc[0] >> 4) & 0x0f;
+    const spOrLen = (dvc[0] >> 2) & 0x03;
+    const cbId = dvc[0] & 0x03;
+    if (cbId === 3) return rawPkts;
+    const idLen = cbId === 0 ? 1 : (cbId === 1 ? 2 : 4);
+    if (dvc.length < 1 + idLen) return rawPkts;
+    const { id: dvcChanId } = decodeDvcId(dvc, 1, cbId);
+
+    if (cmd === 0x01) {
+      const nameSlice = dvc.subarray(1 + idLen);
+      const nulIdx = nameSlice.indexOf(0);
+      const chName = (nulIdx >= 0 ? nameSlice.subarray(0, nulIdx) : nameSlice).toString('ascii');
+      if (chName === 'AUDIO_INPUT') {
+        this.audinDvcId = dvcChanId;
+        this.audinCbId = cbId;
+        this.audinExpectedLen = 0;
+        this.audinFragBuf = Buffer.alloc(0);
+        const rsp = Buffer.concat([
+          Buffer.from([(0x01 << 4) | cbId]),
+          encodeDvcId(dvcChanId, cbId),
+          Buffer.from([0x00, 0x00, 0x00, 0x00]),
+        ]);
+        this.sendToTlsVc(this.drdynvcChanId, rsp);
+        return [];
+      }
+      return rawPkts;
+    }
+
+    if (this.audinDvcId !== null && dvcChanId === this.audinDvcId) {
+      if (cmd === 0x04) {
+        const cls = Buffer.concat([
+          Buffer.from([(0x04 << 4) | cbId]),
+          encodeDvcId(dvcChanId, cbId),
+        ]);
+        this.sendToTlsVc(this.drdynvcChanId, cls);
+        this.audinOpen = false;
+        this.audinDvcId = null;
+        if (this.audioWs) this.audioWs.sendText('{"type":"mic_stop"}');
+        return [];
+      }
+      if (cmd === 0x02) {
+        const lenBytes = spOrLen === 0 ? 1 : (spOrLen === 1 ? 2 : 4);
+        if (dvc.length < 1 + idLen + lenBytes) return [];
+        const totalLen = lenBytes === 1
+          ? dvc[1 + idLen]
+          : (lenBytes === 2 ? dvc.readUInt16LE(1 + idLen) : dvc.readUInt32LE(1 + idLen));
+        this.audinExpectedLen = totalLen;
+        this.audinFragBuf = Buffer.from(dvc.subarray(1 + idLen + lenBytes));
+        if (this.audinFragBuf.length >= this.audinExpectedLen) {
+          const full = this.audinFragBuf.subarray(0, this.audinExpectedLen);
+          this.audinExpectedLen = 0;
+          this.audinFragBuf = Buffer.alloc(0);
+          this._handleAudinPdu(full);
+        }
+        return [];
+      }
+      if (cmd === 0x03) {
+        const body = dvc.subarray(1 + idLen);
+        if (this.audinExpectedLen > 0) {
+          this.audinFragBuf = Buffer.concat([this.audinFragBuf, body]);
+          if (this.audinFragBuf.length >= this.audinExpectedLen) {
+            const full = this.audinFragBuf.subarray(0, this.audinExpectedLen);
+            this.audinExpectedLen = 0;
+            this.audinFragBuf = Buffer.alloc(0);
+            this._handleAudinPdu(full);
+          }
+        } else {
+          this._handleAudinPdu(body);
+        }
+        return [];
+      }
+      return [];
+    }
+
+    return rawPkts;
+  }
+
+  _handleAudinPdu(msg) {
+    if (!msg || msg.length < 1) return;
+    const msgId = msg[0];
+    if (msgId === 0x01 && msg.length >= 5) {
+      const srvVer = msg.readUInt32LE(1);
+      const reply = Buffer.allocUnsafe(5);
+      reply[0] = 0x01;
+      reply.writeUInt32LE(Math.min(Math.max(1, srvVer), 2), 1);
+      this.sendAudinDvcData(reply);
+    } else if (msgId === 0x02 && msg.length >= 9) {
+      const numFmt = msg.readUInt32LE(1);
+      let off = 9;
+      let chosen = null;
+      for (let i = 0; i < numFmt && off + 18 <= msg.length; i++) {
+        const tag = msg.readUInt16LE(off);
+        const ch = msg.readUInt16LE(off + 2);
+        const rate = msg.readUInt32LE(off + 4);
+        const bits = msg.readUInt16LE(off + 14);
+        const cbSize = msg.readUInt16LE(off + 16);
+        if (tag === 1 && bits === 16 && (ch === 1 || ch === 2)) {
+          if (!chosen || (ch === 1 && chosen.ch > 1) || (rate >= 44100 && chosen.rate < 44100)) {
+            chosen = { ch, rate, bits: 16 };
+          }
+        }
+        off += 18 + cbSize;
+      }
+      if (!chosen) chosen = { ch: 1, rate: 44100, bits: 16 };
+
+      const fmt18 = Buffer.allocUnsafe(18);
+      fmt18.writeUInt16LE(1, 0);
+      fmt18.writeUInt16LE(chosen.ch, 2);
+      fmt18.writeUInt32LE(chosen.rate, 4);
+      fmt18.writeUInt32LE(chosen.rate * chosen.ch * 2, 8);
+      fmt18.writeUInt16LE(chosen.ch * 2, 12);
+      fmt18.writeUInt16LE(16, 14);
+      fmt18.writeUInt16LE(0, 16);
+
+      const reply = Buffer.allocUnsafe(9 + 18);
+      reply[0] = 0x02;
+      reply.writeUInt32LE(1, 1);
+      reply.writeUInt32LE(9 + 18, 5);
+      fmt18.copy(reply, 9);
+      this.sendAudinDvcData(reply);
+    } else if (msgId === 0x03 && msg.length >= 27) {
+      const framesPerPacket = msg.readUInt32LE(1) || 480;
+      const initialFormat = msg.readUInt32LE(5);
+      const ch = msg.readUInt16LE(11) || 1;
+      const rate = msg.readUInt32LE(13) || 44100;
+
+      const fmtChg = Buffer.allocUnsafe(5);
+      fmtChg[0] = 0x07;
+      fmtChg.writeUInt32LE(initialFormat, 1);
+      this.sendAudinDvcData(fmtChg);
+
+      const openReply = Buffer.from([0x04, 0x00, 0x00, 0x00, 0x00]);
+      this.sendAudinDvcData(openReply);
+
+      this.audinOpen = true;
+      this.micSpec = { rate, channels: ch, framesPerPacket };
+      if (this.audioWs) {
+        this.audioWs.sendText(JSON.stringify({ type: 'mic_start', ...this.micSpec }));
+      }
+    } else if (msgId === 0x07 && msg.length >= 5) {
+      const fmtChg = Buffer.from(msg.subarray(0, 5));
+      this.sendAudinDvcData(fmtChg);
+    }
+  }
+}
+
+function handleRdpWebSocket(wsConn, sid) {
   let tlsSocket = null;
   let handshakeDone = false;
+  const audioSess = getOrCreateAudioSession(sid);
 
   wsConn.onBinaryMessage = async (data) => {
     if (!handshakeDone) {
@@ -425,19 +1017,29 @@ function handleRdpWebSocket(wsConn) {
         const res = await performRDPHandshake(host, port, req.x224ConnectionRequest);
         tlsSocket = res.tlsSocket;
         handshakeDone = true;
+        if (audioSess) audioSess.attachTls(tlsSocket);
 
         const pdu = buildRDCleanPathResponse(`${host}:${port}`, res.x224Response, res.certChain);
         wsConn.sendBinary(pdu);
 
         tlsSocket.on('data', (chunk) => {
-          wsConn.sendBinary(chunk);
+          if (audioSess) {
+            audioSess.processServerToClientChunk(chunk, (outPkt) => wsConn.sendBinary(outPkt));
+          } else {
+            wsConn.sendBinary(chunk);
+          }
         });
         tlsSocket.on('end', () => wsConn.close());
         tlsSocket.on('close', () => wsConn.close());
         tlsSocket.on('error', () => wsConn.close());
 
         wsConn.onBinaryMessage = (clientChunk) => {
-          if (tlsSocket && !tlsSocket.destroyed) {
+          if (!tlsSocket || tlsSocket.destroyed) return;
+          if (audioSess) {
+            audioSess.processClientToServerChunk(clientChunk, (outPkt) => {
+              if (tlsSocket && !tlsSocket.destroyed) tlsSocket.write(outPkt);
+            });
+          } else {
             tlsSocket.write(clientChunk);
           }
         };
@@ -451,6 +1053,7 @@ function handleRdpWebSocket(wsConn) {
   };
 
   wsConn.onClose = () => {
+    if (audioSess) audioSess.destroy();
     if (tlsSocket && !tlsSocket.destroyed) {
       try { tlsSocket.destroy(); } catch (_) {}
     }
@@ -482,7 +1085,7 @@ const server = http.createServer((req, res) => {
     const payload = JSON.stringify({
       ok: true,
       service: 'pc-rdp-gateway',
-      version: '2.1.1',
+      version: '2.1.4',
       hostname: os.hostname(),
       default_user: `${os.hostname()}\\${os.userInfo().username}`,
       port: LISTEN_PORT,
@@ -531,7 +1134,18 @@ server.on('upgrade', (req, socket, head) => {
   socket.write(headers.join('\r\n'));
 
   const wsConn = new SimpleWebSocketConnection(socket, head);
-  handleRdpWebSocket(wsConn);
+  const parsedUrl = new URL(req.url || '/', 'http://localhost');
+  const sid = parsedUrl.searchParams.get('sid') || '';
+  if (parsedUrl.pathname.startsWith('/rdp-audio-ws')) {
+    const sess = getOrCreateAudioSession(sid);
+    if (sess) {
+      sess.attachAudioWs(wsConn);
+    } else {
+      wsConn.close();
+    }
+    return;
+  }
+  handleRdpWebSocket(wsConn, sid);
 });
 
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {

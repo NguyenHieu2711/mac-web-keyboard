@@ -2293,6 +2293,597 @@ async def ironrdp_asset(filename: str) -> FileResponse:
     )
 
 
+_RDP_AUDIO_SESSIONS: Dict[str, "_RdpAudioSession"] = {}
+
+
+def _encode_dvc_id(chan_id: int, cb_id: int) -> bytes:
+    if cb_id == 0:
+        return bytes([chan_id & 0xFF])
+    if cb_id == 1:
+        return struct.pack("<H", chan_id & 0xFFFF)
+    return struct.pack("<I", chan_id & 0xFFFFFFFF)
+
+
+def _decode_dvc_id(buf: bytes, offset: int, cb_id: int) -> Tuple[int, int]:
+    if cb_id == 0:
+        return buf[offset], 1
+    if cb_id == 1:
+        return struct.unpack_from("<H", buf, offset)[0], 2
+    return struct.unpack_from("<I", buf, offset)[0], 4
+
+
+class _RdpAudioSession:
+    """
+    Bộ giải mã & ghép kênh âm thanh RDP gốc ngay trên đường truyền RDCleanPath:
+    - MS-RDPSND (kênh tĩnh `rdpsnd`): nhận PCM 16-bit Stereo từ Windows -> phát ra loa điện thoại.
+    - MS-RDPEAI (kênh động `AUDIO_INPUT` trên `drdynvc`): tạo thiết bị thu âm thật `Microphone (Remote Audio)`
+      trên Windows và bơm luồng PCM 16-bit trực tiếp từ Microphone điện thoại vào mọi ứng dụng trên PC.
+    """
+
+    def __init__(self, sid: str) -> None:
+        self.sid = sid
+        self.writer: Optional[asyncio.StreamWriter] = None
+        self.audio_ws: Optional[WebSocket] = None
+        self.audio_tx_q: asyncio.Queue = asyncio.Queue()
+        self.client_buf = bytearray()
+        self.server_buf = bytearray()
+
+        self.cs_net_names: List[str] = []
+        self.rdpsnd_chan_id: Optional[int] = None
+        self.drdynvc_chan_id: Optional[int] = None
+        self.mcs_initiator: Optional[int] = None
+
+        self.rdpsnd_vc_buf = bytearray()
+        self.pending_legacy_wave: Optional[Tuple[int, int, bytes]] = None
+        self.spk_format: Optional[Dict[str, int]] = None
+
+        self.drdynvc_vc_buf = bytearray()
+        self.drdynvc_raw_pkts: List[bytes] = []
+        self.audin_dvc_id: Optional[int] = None
+        self.audin_cb_id: int = 0
+        self.audin_frag_buf = bytearray()
+        self.audin_expected_len: int = 0
+        self.audin_open: bool = False
+        self.mic_spec: Optional[Dict[str, int]] = None
+
+    def attach_writer(self, writer: asyncio.StreamWriter) -> None:
+        self.writer = writer
+
+    def enqueue_audio_ws(self, item: Any) -> None:
+        if self.audio_ws is None:
+            return
+        if self.audio_tx_q.qsize() > 80:
+            try:
+                self.audio_tx_q.get_nowait()
+            except Exception:
+                pass
+        try:
+            self.audio_tx_q.put_nowait(item)
+        except Exception:
+            pass
+
+    def destroy(self) -> None:
+        _RDP_AUDIO_SESSIONS.pop(self.sid, None)
+        self.enqueue_audio_ws(None)
+
+    def send_to_tls_vc(self, channel_id: Optional[int], vc_payload: bytes) -> None:
+        if self.writer is None or self.mcs_initiator is None or not channel_id:
+            return
+        chunk_max = 1600
+        total_len = len(vc_payload)
+        offset = 0
+        while offset < total_len or (total_len == 0 and offset == 0):
+            end = min(total_len, offset + chunk_max)
+            chunk = vc_payload[offset:end]
+            flags = 0
+            if offset == 0:
+                flags |= 0x01
+            if end >= total_len:
+                flags |= 0x02
+
+            vc_pdu = struct.pack("<II", total_len, flags) + chunk
+            vlen = len(vc_pdu)
+            if vlen < 0x80:
+                per_len = bytes([vlen])
+            else:
+                per_len = bytes([0x80 | (vlen >> 8), vlen & 0xFF])
+
+            mcs_hdr = struct.pack(
+                ">BHHB", 0x64, self.mcs_initiator, channel_id, 0x70
+            )
+            tpkt_len = 4 + 3 + len(mcs_hdr) + len(per_len) + vlen
+            pkt = (
+                struct.pack(">BBH", 0x03, 0x00, tpkt_len)
+                + b"\x02\xf0\x80"
+                + mcs_hdr
+                + per_len
+                + vc_pdu
+            )
+            try:
+                self.writer.write(pkt)
+            except Exception:
+                pass
+            offset = end
+            if total_len == 0:
+                break
+
+    def send_audin_dvc_data(self, payload: bytes) -> None:
+        if self.audin_dvc_id is None or not self.drdynvc_chan_id:
+            return
+        id_buf = _encode_dvc_id(self.audin_dvc_id, self.audin_cb_id)
+        max_first = 1580
+        if len(payload) <= max_first:
+            hdr = bytes([(0x03 << 4) | (self.audin_cb_id & 0x03)])
+            self.send_to_tls_vc(self.drdynvc_chan_id, hdr + id_buf + payload)
+            return
+        first_hdr = bytes([(0x02 << 4) | (0x01 << 2) | (self.audin_cb_id & 0x03)])
+        len_buf = struct.pack("<H", len(payload))
+        self.send_to_tls_vc(
+            self.drdynvc_chan_id,
+            first_hdr + id_buf + len_buf + payload[:max_first],
+        )
+        off = max_first
+        while off < len(payload):
+            nxt = payload[off : off + max_first]
+            data_hdr = bytes([(0x03 << 4) | (self.audin_cb_id & 0x03)])
+            self.send_to_tls_vc(self.drdynvc_chan_id, data_hdr + id_buf + nxt)
+            off += len(nxt)
+
+    def forward_mic_pcm_to_server(self, pcm_bytes: bytes) -> None:
+        if not self.audin_open or self.audin_dvc_id is None or not pcm_bytes:
+            return
+        self.send_audin_dvc_data(b"\x05")
+        self.send_audin_dvc_data(b"\x06" + pcm_bytes)
+
+    @staticmethod
+    def _extract_next_pdu(buf: bytearray) -> Optional[bytes]:
+        blen = len(buf)
+        if blen < 2:
+            return None
+        if buf[0] == 0x03:
+            if blen < 4:
+                return None
+            plen = (buf[2] << 8) | buf[3]
+            if plen < 4:
+                out = bytes(buf)
+                buf.clear()
+                return out
+            if blen < plen:
+                return None
+            out = bytes(buf[:plen])
+            del buf[:plen]
+            return out
+        b1 = buf[1]
+        if (b1 & 0x80) == 0:
+            plen = b1
+            if plen < 2:
+                out = bytes(buf)
+                buf.clear()
+                return out
+        else:
+            if blen < 3:
+                return None
+            plen = ((b1 & 0x7F) << 8) | buf[2]
+        if blen < plen:
+            return None
+        out = bytes(buf[:plen])
+        del buf[:plen]
+        return out
+
+    def process_client_chunk(self, chunk: bytes) -> List[bytes]:
+        self.client_buf.extend(chunk)
+        out_pkts: List[bytes] = []
+        while True:
+            pkt = self._extract_next_pdu(self.client_buf)
+            if pkt is None:
+                break
+            if (
+                len(pkt) >= 14
+                and pkt[0] == 0x03
+                and pkt[4] == 0x02
+                and pkt[5] == 0xF0
+                and pkt[6] == 0x80
+            ):
+                if not self.cs_net_names and pkt[7] == 0x7F and pkt[8] == 0x65:
+                    pkt = self._scan_cs_net_and_disable_comp(pkt)
+                elif (pkt[7] >> 2) == 25 and len(pkt) >= 15:
+                    self.mcs_initiator = (pkt[8] << 8) | pkt[9]
+                    chan_id = (pkt[10] << 8) | pkt[11]
+                    if self.rdpsnd_chan_id is not None and chan_id == self.rdpsnd_chan_id:
+                        continue
+            out_pkts.append(pkt)
+        return out_pkts
+
+    def process_server_chunk(self, chunk: bytes) -> List[bytes]:
+        self.server_buf.extend(chunk)
+        out_pkts: List[bytes] = []
+        while True:
+            pkt = self._extract_next_pdu(self.server_buf)
+            if pkt is None:
+                break
+            if (
+                len(pkt) >= 14
+                and pkt[0] == 0x03
+                and pkt[4] == 0x02
+                and pkt[5] == 0xF0
+                and pkt[6] == 0x80
+            ):
+                if (
+                    self.cs_net_names
+                    and self.rdpsnd_chan_id is None
+                    and pkt[7] == 0x7F
+                    and pkt[8] == 0x66
+                ):
+                    self._scan_sc_net(pkt)
+                elif (pkt[7] >> 2) == 26 and len(pkt) >= 16:
+                    chan_id = (pkt[10] << 8) | pkt[11]
+                    if self.rdpsnd_chan_id is not None and chan_id == self.rdpsnd_chan_id:
+                        self._handle_rdpsnd_pkt(pkt)
+                        continue
+                    if self.drdynvc_chan_id is not None and chan_id == self.drdynvc_chan_id:
+                        out_pkts.extend(self._handle_drdynvc_pkt(pkt))
+                        continue
+            out_pkts.append(pkt)
+        return out_pkts
+
+    def _scan_cs_net_and_disable_comp(self, pkt: bytes) -> bytes:
+        m = bytearray(pkt)
+        plen = len(m)
+        for pos in range(12, plen - 19):
+            if m[pos] == 0x03 and m[pos + 1] == 0xC0:
+                block_len = struct.unpack_from("<H", m, pos + 2)[0]
+                count = struct.unpack_from("<I", m, pos + 4)[0]
+                if 1 <= count <= 31 and block_len == 8 + count * 12 and pos + block_len <= plen:
+                    names: List[str] = []
+                    for i in range(count):
+                        c_off = pos + 8 + i * 12
+                        raw_name = (
+                            bytes(m[c_off : c_off + 8])
+                            .split(b"\x00", 1)[0]
+                            .decode("ascii", errors="ignore")
+                            .lower()
+                        )
+                        names.append(raw_name)
+                        if raw_name in ("rdpsnd", "drdynvc"):
+                            opts = struct.unpack_from("<I", m, c_off + 8)[0]
+                            struct.pack_into("<I", m, c_off + 8, opts & ~0x00C00000)
+                    self.cs_net_names = names
+                    return bytes(m)
+        return pkt
+
+    def _scan_sc_net(self, pkt: bytes) -> None:
+        n = len(self.cs_net_names)
+        if n == 0:
+            return
+        expected_pad = 2 if (n % 2 == 1) else 0
+        plen = len(pkt)
+        for pos in range(12, plen - (8 + n * 2) + 1):
+            if pkt[pos] == 0x03 and pkt[pos + 1] == 0x0C:
+                block_len, io_chan, count = struct.unpack_from("<HHH", pkt, pos + 2)
+                if (
+                    count == n
+                    and 1000 <= io_chan <= 1100
+                    and block_len in (8 + n * 2 + expected_pad, 8 + n * 2)
+                ):
+                    for i in range(count):
+                        cid = struct.unpack_from("<H", pkt, pos + 8 + i * 2)[0]
+                        if self.cs_net_names[i] == "rdpsnd":
+                            self.rdpsnd_chan_id = cid
+                        elif self.cs_net_names[i] == "drdynvc":
+                            self.drdynvc_chan_id = cid
+                    return
+
+    @staticmethod
+    def _parse_vc_chunk(pkt: bytes) -> Optional[Tuple[int, bytes]]:
+        vc_off = 15 if (pkt[13] & 0x80) != 0 else 14
+        if len(pkt) < vc_off + 8:
+            return None
+        vc_flags = struct.unpack_from("<I", pkt, vc_off + 4)[0]
+        return vc_flags, pkt[vc_off + 8 :]
+
+    def _send_wave_confirm(self, ts: int, block_no: int) -> None:
+        c = struct.pack("<BBHHBB", 0x05, 0, 4, ts & 0xFFFF, block_no & 0xFF, 0)
+        self.send_to_tls_vc(self.rdpsnd_chan_id, c)
+
+    def _push_speaker_pcm(self, pcm: bytes) -> None:
+        if pcm:
+            self.enqueue_audio_ws(b"\x01" + pcm)
+
+    def _handle_rdpsnd_pkt(self, pkt: bytes) -> None:
+        parsed = self._parse_vc_chunk(pkt)
+        if parsed is None:
+            return
+        vc_flags, vc_chunk = parsed
+        if vc_flags & 0x01:
+            self.rdpsnd_vc_buf = bytearray(vc_chunk)
+        else:
+            self.rdpsnd_vc_buf.extend(vc_chunk)
+        if not (vc_flags & 0x02):
+            return
+
+        pdu = bytes(self.rdpsnd_vc_buf)
+        self.rdpsnd_vc_buf.clear()
+        if len(pdu) < 4:
+            return
+
+        if self.pending_legacy_wave is not None:
+            ts, block_no, first4 = self.pending_legacy_wave
+            self.pending_legacy_wave = None
+            pcm = first4 + pdu[min(4, len(pdu)) :]
+            self._send_wave_confirm(ts, block_no)
+            self._push_speaker_pcm(pcm)
+            return
+
+        msg_type = pdu[0]
+        if msg_type == 0x07 and len(pdu) >= 24:
+            num_fmt = struct.unpack_from("<H", pdu, 18)[0]
+            srv_ver = struct.unpack_from("<H", pdu, 21)[0]
+            off = 24
+            chosen: Optional[Tuple[int, int]] = None
+            for _ in range(num_fmt):
+                if off + 18 > len(pdu):
+                    break
+                tag, ch, rate, _avg, _align, bits, cb_size = struct.unpack_from(
+                    "<HHIIHHH", pdu, off
+                )
+                if tag == 1 and bits == 16 and ch in (1, 2):
+                    if (
+                        chosen is None
+                        or (ch == 2 and chosen[0] < 2)
+                        or (rate >= 44100 and chosen[1] < 44100)
+                    ):
+                        chosen = (ch, rate)
+                off += 18 + cb_size
+            sel_ch, sel_rate = chosen if chosen is not None else (2, 44100)
+            self.spk_format = {"rate": sel_rate, "channels": sel_ch}
+
+            fmt18 = struct.pack(
+                "<HHIIHHH",
+                1,
+                sel_ch,
+                sel_rate,
+                sel_rate * sel_ch * 2,
+                sel_ch * 2,
+                16,
+                0,
+            )
+            cli_ver = min(max(srv_ver, 2), 6)
+            body = (
+                struct.pack(
+                    "<IIIHHBHB",
+                    0x00000003,
+                    0xFFFFFFFF,
+                    0,
+                    0,
+                    1,
+                    0,
+                    cli_ver,
+                    0,
+                )
+                + fmt18
+            )
+            hdr = struct.pack("<BBH", 0x07, 0, len(body))
+            self.send_to_tls_vc(self.rdpsnd_chan_id, hdr + body)
+            if srv_ver >= 6:
+                self.send_to_tls_vc(
+                    self.rdpsnd_chan_id, struct.pack("<BBHHH", 0x0C, 0, 4, 2, 0)
+                )
+            self.enqueue_audio_ws(
+                json.dumps({"type": "spk_format", **self.spk_format})
+            )
+        elif msg_type == 0x06 and len(pdu) >= 8:
+            self.send_to_tls_vc(self.rdpsnd_chan_id, b"\x06\x00\x04\x00" + pdu[4:8])
+        elif msg_type == 0x0D and len(pdu) >= 16:
+            ts = struct.unpack_from("<H", pdu, 4)[0]
+            block_no = pdu[8]
+            self._send_wave_confirm(ts, block_no)
+            self._push_speaker_pcm(pdu[16:])
+        elif msg_type == 0x02 and len(pdu) >= 16:
+            ts = struct.unpack_from("<H", pdu, 4)[0]
+            block_no = pdu[8]
+            self.pending_legacy_wave = (ts, block_no, pdu[12:16])
+
+    def _handle_drdynvc_pkt(self, pkt: bytes) -> List[bytes]:
+        parsed = self._parse_vc_chunk(pkt)
+        if parsed is None:
+            return [pkt]
+        vc_flags, vc_chunk = parsed
+        if vc_flags & 0x01:
+            self.drdynvc_vc_buf = bytearray(vc_chunk)
+            self.drdynvc_raw_pkts = [pkt]
+        else:
+            self.drdynvc_vc_buf.extend(vc_chunk)
+            self.drdynvc_raw_pkts.append(pkt)
+        if not (vc_flags & 0x02):
+            return []
+
+        dvc = bytes(self.drdynvc_vc_buf)
+        raw_pkts = list(self.drdynvc_raw_pkts)
+        self.drdynvc_vc_buf.clear()
+        self.drdynvc_raw_pkts.clear()
+
+        if len(dvc) < 2:
+            return raw_pkts
+        cmd = (dvc[0] >> 4) & 0x0F
+        sp_len = (dvc[0] >> 2) & 0x03
+        cb_id = dvc[0] & 0x03
+        if cb_id == 3:
+            return raw_pkts
+        id_len = 1 if cb_id == 0 else (2 if cb_id == 1 else 4)
+        if len(dvc) < 1 + id_len:
+            return raw_pkts
+        dvc_chan_id, _ = _decode_dvc_id(dvc, 1, cb_id)
+
+        if cmd == 0x01:
+            ch_name = dvc[1 + id_len :].split(b"\x00", 1)[0].decode("ascii", errors="ignore")
+            if ch_name == "AUDIO_INPUT":
+                self.audin_dvc_id = dvc_chan_id
+                self.audin_cb_id = cb_id
+                self.audin_expected_len = 0
+                self.audin_frag_buf.clear()
+                rsp = (
+                    bytes([(0x01 << 4) | cb_id])
+                    + _encode_dvc_id(dvc_chan_id, cb_id)
+                    + b"\x00\x00\x00\x00"
+                )
+                self.send_to_tls_vc(self.drdynvc_chan_id, rsp)
+                return []
+            return raw_pkts
+
+        if self.audin_dvc_id is not None and dvc_chan_id == self.audin_dvc_id:
+            if cmd == 0x04:
+                cls = bytes([(0x04 << 4) | cb_id]) + _encode_dvc_id(dvc_chan_id, cb_id)
+                self.send_to_tls_vc(self.drdynvc_chan_id, cls)
+                self.audin_open = False
+                self.audin_dvc_id = None
+                self.enqueue_audio_ws('{"type":"mic_stop"}')
+                return []
+            if cmd == 0x02:
+                lbytes = 1 if sp_len == 0 else (2 if sp_len == 1 else 4)
+                if len(dvc) < 1 + id_len + lbytes:
+                    return []
+                if lbytes == 1:
+                    tlen = dvc[1 + id_len]
+                elif lbytes == 2:
+                    tlen = struct.unpack_from("<H", dvc, 1 + id_len)[0]
+                else:
+                    tlen = struct.unpack_from("<I", dvc, 1 + id_len)[0]
+                self.audin_expected_len = tlen
+                self.audin_frag_buf = bytearray(dvc[1 + id_len + lbytes :])
+                if len(self.audin_frag_buf) >= self.audin_expected_len:
+                    full = bytes(self.audin_frag_buf[: self.audin_expected_len])
+                    self.audin_expected_len = 0
+                    self.audin_frag_buf.clear()
+                    self._handle_audin_pdu(full)
+                return []
+            if cmd == 0x03:
+                body = dvc[1 + id_len :]
+                if self.audin_expected_len > 0:
+                    self.audin_frag_buf.extend(body)
+                    if len(self.audin_frag_buf) >= self.audin_expected_len:
+                        full = bytes(self.audin_frag_buf[: self.audin_expected_len])
+                        self.audin_expected_len = 0
+                        self.audin_frag_buf.clear()
+                        self._handle_audin_pdu(full)
+                else:
+                    self._handle_audin_pdu(body)
+                return []
+            return []
+
+        return raw_pkts
+
+    def _handle_audin_pdu(self, msg: bytes) -> None:
+        if not msg:
+            return
+        msg_id = msg[0]
+        if msg_id == 0x01 and len(msg) >= 5:
+            srv_ver = struct.unpack_from("<I", msg, 1)[0]
+            self.send_audin_dvc_data(struct.pack("<BI", 0x01, min(max(1, srv_ver), 2)))
+        elif msg_id == 0x02 and len(msg) >= 9:
+            num_fmt = struct.unpack_from("<I", msg, 1)[0]
+            off = 9
+            chosen: Optional[Tuple[int, int]] = None
+            for _ in range(num_fmt):
+                if off + 18 > len(msg):
+                    break
+                tag, ch, rate, _avg, _align, bits, cb_size = struct.unpack_from(
+                    "<HHIIHHH", msg, off
+                )
+                if tag == 1 and bits == 16 and ch in (1, 2):
+                    if (
+                        chosen is None
+                        or (ch == 1 and chosen[0] > 1)
+                        or (rate >= 44100 and chosen[1] < 44100)
+                    ):
+                        chosen = (ch, rate)
+                off += 18 + cb_size
+            sel_ch, sel_rate = chosen if chosen is not None else (1, 44100)
+            fmt18 = struct.pack(
+                "<HHIIHHH",
+                1,
+                sel_ch,
+                sel_rate,
+                sel_rate * sel_ch * 2,
+                sel_ch * 2,
+                16,
+                0,
+            )
+            self.send_audin_dvc_data(struct.pack("<BII", 0x02, 1, 9 + 18) + fmt18)
+        elif msg_id == 0x03 and len(msg) >= 27:
+            frames_pp = struct.unpack_from("<I", msg, 1)[0] or 480
+            init_fmt = struct.unpack_from("<I", msg, 5)[0]
+            ch = struct.unpack_from("<H", msg, 11)[0] or 1
+            rate = struct.unpack_from("<I", msg, 13)[0] or 44100
+            self.send_audin_dvc_data(struct.pack("<BI", 0x07, init_fmt))
+            self.send_audin_dvc_data(b"\x04\x00\x00\x00\x00")
+            self.audin_open = True
+            self.mic_spec = {
+                "rate": rate,
+                "channels": ch,
+                "framesPerPacket": frames_pp,
+            }
+            self.enqueue_audio_ws(json.dumps({"type": "mic_start", **self.mic_spec}))
+        elif msg_id == 0x07 and len(msg) >= 5:
+            self.send_audin_dvc_data(msg[:5])
+
+
+@app.websocket("/rdp-audio-ws")
+async def rdp_audio_ws(ws: WebSocket) -> None:
+    await ws.accept()
+    sid = ws.query_params.get("sid", "").strip()
+    if not sid:
+        await ws.close()
+        return
+    audio_sess = _RDP_AUDIO_SESSIONS.get(sid)
+    if audio_sess is None:
+        audio_sess = _RdpAudioSession(sid)
+        _RDP_AUDIO_SESSIONS[sid] = audio_sess
+
+    audio_sess.audio_ws = ws
+    if audio_sess.spk_format:
+        await ws.send_text(json.dumps({"type": "spk_format", **audio_sess.spk_format}))
+    if audio_sess.audin_open and audio_sess.mic_spec:
+        await ws.send_text(json.dumps({"type": "mic_start", **audio_sess.mic_spec}))
+
+    async def _tx_loop() -> None:
+        try:
+            while True:
+                item = await audio_sess.audio_tx_q.get()
+                if item is None:
+                    break
+                if isinstance(item, bytes):
+                    await ws.send_bytes(item)
+                elif isinstance(item, str):
+                    await ws.send_text(item)
+        except Exception:
+            pass
+
+    tx_task = asyncio.create_task(_tx_loop())
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            bdata = msg.get("bytes")
+            if bdata and len(bdata) >= 2 and bdata[0] == 0x02:
+                audio_sess.forward_mic_pcm_to_server(bdata[1:])
+                if audio_sess.writer is not None:
+                    try:
+                        await audio_sess.writer.drain()
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    finally:
+        tx_task.cancel()
+        if audio_sess.audio_ws is ws:
+            audio_sess.audio_ws = None
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
 @app.websocket("/rdp-ws")
 async def rdp_cleanpath_ws(ws: WebSocket) -> None:
     subproto = None
@@ -2300,6 +2891,14 @@ async def rdp_cleanpath_ws(ws: WebSocket) -> None:
     if raw_proto:
         subproto = raw_proto.split(",")[0].strip() or None
     await ws.accept(subprotocol=subproto)
+
+    sid = ws.query_params.get("sid", "").strip()
+    audio_sess: Optional[_RdpAudioSession] = None
+    if sid:
+        audio_sess = _RDP_AUDIO_SESSIONS.get(sid)
+        if audio_sess is None:
+            audio_sess = _RdpAudioSession(sid)
+            _RDP_AUDIO_SESSIONS[sid] = audio_sess
 
     writer: Optional[asyncio.StreamWriter] = None
     pump_task: Optional[asyncio.Task] = None
@@ -2330,6 +2929,8 @@ async def rdp_cleanpath_ws(ws: WebSocket) -> None:
             asyncio.open_connection(sock=raw_sock, ssl=ssl_ctx, server_hostname=host),
             timeout=10.0,
         )
+        if audio_sess is not None:
+            audio_sess.attach_writer(writer)
         ssl_obj = writer.get_extra_info("ssl_object")
         der_cert = ssl_obj.getpeercert(binary_form=True) if ssl_obj else None
         certs = [der_cert] if der_cert else []
@@ -2342,7 +2943,14 @@ async def rdp_cleanpath_ws(ws: WebSocket) -> None:
                     chunk = await reader.read(65536)
                     if not chunk:
                         break
-                    await ws.send_bytes(chunk)
+                    if audio_sess is not None:
+                        out_pkts = audio_sess.process_server_chunk(chunk)
+                        for op in out_pkts:
+                            await ws.send_bytes(op)
+                        if writer is not None:
+                            await writer.drain()
+                    else:
+                        await ws.send_bytes(chunk)
             except Exception:
                 pass
             try:
@@ -2359,7 +2967,11 @@ async def rdp_cleanpath_ws(ws: WebSocket) -> None:
                 break
             bdata = msg.get("bytes")
             if bdata and writer is not None:
-                writer.write(bdata)
+                if audio_sess is not None:
+                    for cp in audio_sess.process_client_chunk(bdata):
+                        writer.write(cp)
+                else:
+                    writer.write(bdata)
                 await writer.drain()
     except WebSocketDisconnect:
         pass
@@ -2370,6 +2982,8 @@ async def rdp_cleanpath_ws(ws: WebSocket) -> None:
         except Exception:
             pass
     finally:
+        if audio_sess is not None:
+            audio_sess.destroy()
         if pump_task is not None:
             pump_task.cancel()
         if writer is not None:
@@ -2403,7 +3017,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.1.3",
+        "version": "2.1.4",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,

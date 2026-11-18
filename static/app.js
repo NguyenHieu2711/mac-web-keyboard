@@ -2245,6 +2245,7 @@
   const remoteHudBar = document.getElementById("remote-hud-bar");
   const remoteStatusDot = document.getElementById("remote-status-dot");
   const remoteModeMenu = document.getElementById("remote-mode-menu");
+  const btnRemoteSpk = document.getElementById("btn-remote-spk");
   const btnRemoteMic = document.getElementById("btn-remote-mic");
   const btnRemoteKb = document.getElementById("btn-remote-kb");
   const btnRemoteEdge = document.getElementById("btn-remote-edge");
@@ -2289,6 +2290,18 @@
   let cursorHotspotX = 2;
   let cursorHotspotY = 1;
   let cursorHiddenByServer = false;
+
+  let rdpAudioWs = null;
+  let rdpAudioCtx = null;
+  let rdpNextPlayTime = 0;
+  let rdpSpkRate = 44100;
+  let rdpSpkChannels = 2;
+  let rdpSpkEnabled = true;
+  let rdpMicEnabled = true;
+  let rdpServerMicOpen = false;
+  let rdpServerMicSpec = { rate: 44100, channels: 1, framesPerPacket: 480 };
+  let rdpWebMicStream = null;
+  let rdpWebMicProc = null;
 
   let webSpeechRec = null;
   let voiceListening = false;
@@ -2665,8 +2678,291 @@
     ]);
   }
 
+  function ensureRdpAudioContext() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    if (!rdpAudioCtx) {
+      try {
+        rdpAudioCtx = new AudioCtx({ latencyHint: "interactive" });
+      } catch {
+        try {
+          rdpAudioCtx = new AudioCtx();
+        } catch {
+          return null;
+        }
+      }
+    }
+    if (rdpAudioCtx && rdpAudioCtx.state === "suspended") {
+      rdpAudioCtx.resume().catch(() => {});
+    }
+    return rdpAudioCtx;
+  }
+
+  function syncRdpAudioButtonsUI() {
+    if (btnRemoteSpk) {
+      btnRemoteSpk.textContent = rdpSpkEnabled ? "🔊 Loa" : "🔇 Loa";
+      btnRemoteSpk.classList.toggle("is-active", rdpSpkEnabled);
+    }
+    if (btnRemoteMic) {
+      btnRemoteMic.textContent = rdpMicEnabled ? "🎤 Mic" : "🚫 Mic";
+      btnRemoteMic.classList.toggle("is-active", rdpMicEnabled && !rdpServerMicOpen);
+      btnRemoteMic.classList.toggle("is-recording", rdpMicEnabled && rdpServerMicOpen);
+    }
+  }
+  syncRdpAudioButtonsUI();
+
+  function playRdpSpeakerPcm(arrayBuf) {
+    if (!rdpSpkEnabled || !arrayBuf || arrayBuf.byteLength <= 3) return;
+    const ctx = ensureRdpAudioContext();
+    if (!ctx) return;
+    const ch = rdpSpkChannels === 1 ? 1 : 2;
+    const pcmByteLen = arrayBuf.byteLength - 1;
+    const totalFrames = Math.floor(pcmByteLen / (ch * 2));
+    if (totalFrames <= 0) return;
+
+    try {
+      const dv = new DataView(arrayBuf, 1, totalFrames * ch * 2);
+      const audioBuf = ctx.createBuffer(ch, totalFrames, rdpSpkRate || 44100);
+      if (ch === 2) {
+        const left = audioBuf.getChannelData(0);
+        const right = audioBuf.getChannelData(1);
+        for (let i = 0, byteOff = 0; i < totalFrames; i += 1, byteOff += 4) {
+          left[i] = dv.getInt16(byteOff, true) / 32768;
+          right[i] = dv.getInt16(byteOff + 2, true) / 32768;
+        }
+      } else {
+        const mono = audioBuf.getChannelData(0);
+        for (let i = 0, byteOff = 0; i < totalFrames; i += 1, byteOff += 2) {
+          mono[i] = dv.getInt16(byteOff, true) / 32768;
+        }
+      }
+
+      const now = ctx.currentTime;
+      if (rdpNextPlayTime < now + 0.012 || rdpNextPlayTime > now + 0.36) {
+        rdpNextPlayTime = now + 0.042;
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(ctx.destination);
+      src.start(rdpNextPlayTime);
+      rdpNextPlayTime += audioBuf.duration;
+    } catch {
+      // ignore transient decode error
+    }
+  }
+
+  window.__onNativeMicPcm = (b64) => {
+    if (
+      !rdpMicEnabled ||
+      !rdpServerMicOpen ||
+      !rdpAudioWs ||
+      rdpAudioWs.readyState !== WebSocket.OPEN ||
+      !b64
+    ) {
+      return;
+    }
+    try {
+      const bin = atob(b64);
+      const len = bin.length;
+      if (len <= 0) return;
+      const pkt = new Uint8Array(1 + len);
+      pkt[0] = 0x02;
+      for (let i = 0; i < len; i += 1) {
+        pkt[i + 1] = bin.charCodeAt(i);
+      }
+      rdpAudioWs.send(pkt);
+    } catch {
+      // ignore
+    }
+  };
+
+  window.__onRemoteMicCaptureState = (running) => {
+    if (!running && rdpServerMicOpen) {
+      syncRdpAudioButtonsUI();
+    }
+  };
+
+  async function startRdpMicCapture(spec) {
+    const rate = (spec && spec.rate) || 44100;
+    const channels = (spec && spec.channels) || 1;
+    const framesPerPacket = (spec && spec.framesPerPacket) || 480;
+    rdpServerMicSpec = { rate, channels, framesPerPacket };
+
+    if (!rdpMicEnabled) return;
+
+    if (
+      hasAndroidBridge &&
+      typeof window.AndroidBridge.startPcmMicCapture === "function"
+    ) {
+      try {
+        window.AndroidBridge.startPcmMicCapture(rate, channels, framesPerPacket);
+        return;
+      } catch {
+        // fallback Web Audio getUserMedia
+      }
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+    stopRdpMicCapture();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: rate,
+          channelCount: channels,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      const ctx = ensureRdpAudioContext();
+      if (!ctx) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      rdpWebMicStream = stream;
+      const source = ctx.createMediaStreamSource(stream);
+      const proc = ctx.createScriptProcessor(1024, channels, channels);
+      rdpWebMicProc = proc;
+      proc.onaudioprocess = (ev) => {
+        if (
+          !rdpMicEnabled ||
+          !rdpServerMicOpen ||
+          !rdpAudioWs ||
+          rdpAudioWs.readyState !== WebSocket.OPEN
+        ) {
+          return;
+        }
+        const ch0 = ev.inputBuffer.getChannelData(0);
+        const ch1 = channels >= 2 && ev.inputBuffer.numberOfChannels >= 2
+          ? ev.inputBuffer.getChannelData(1)
+          : ch0;
+        const frames = ch0.length;
+        const out = new Uint8Array(1 + frames * channels * 2);
+        out[0] = 0x02;
+        const dv = new DataView(out.buffer, 1);
+        if (channels >= 2) {
+          for (let i = 0; i < frames; i += 1) {
+            const s0 = Math.max(-1, Math.min(1, ch0[i]));
+            const s1 = Math.max(-1, Math.min(1, ch1[i]));
+            dv.setInt16(i * 4, s0 < 0 ? s0 * 32768 : s0 * 32767, true);
+            dv.setInt16(i * 4 + 2, s1 < 0 ? s1 * 32768 : s1 * 32767, true);
+          }
+        } else {
+          for (let i = 0; i < frames; i += 1) {
+            const s0 = Math.max(-1, Math.min(1, ch0[i]));
+            dv.setInt16(i * 2, s0 < 0 ? s0 * 32768 : s0 * 32767, true);
+          }
+        }
+        rdpAudioWs.send(out);
+      };
+      source.connect(proc);
+      proc.connect(ctx.destination);
+    } catch {
+      // ignore permission denied on web
+    }
+  }
+
+  function stopRdpMicCapture() {
+    if (
+      hasAndroidBridge &&
+      typeof window.AndroidBridge.stopPcmMicCapture === "function"
+    ) {
+      try {
+        window.AndroidBridge.stopPcmMicCapture();
+      } catch {
+        // ignore
+      }
+    }
+    if (rdpWebMicProc) {
+      try {
+        rdpWebMicProc.disconnect();
+      } catch {
+        // ignore
+      }
+      rdpWebMicProc.onaudioprocess = null;
+      rdpWebMicProc = null;
+    }
+    if (rdpWebMicStream) {
+      try {
+        rdpWebMicStream.getTracks().forEach((t) => t.stop());
+      } catch {
+        // ignore
+      }
+      rdpWebMicStream = null;
+    }
+  }
+
+  function closeRdpAudioWs() {
+    rdpServerMicOpen = false;
+    stopRdpMicCapture();
+    syncRdpAudioButtonsUI();
+    if (rdpAudioWs) {
+      try {
+        rdpAudioWs.onclose = null;
+        rdpAudioWs.onerror = null;
+        rdpAudioWs.onmessage = null;
+        rdpAudioWs.close();
+      } catch {
+        // ignore
+      }
+      rdpAudioWs = null;
+    }
+  }
+
+  function openRdpAudioWs(baseProxyWsUrl, sid) {
+    closeRdpAudioWs();
+    try {
+      const au = new URL(baseProxyWsUrl);
+      au.pathname = "/rdp-audio-ws";
+      au.searchParams.set("sid", sid);
+      const sock = new WebSocket(au.toString());
+      sock.binaryType = "arraybuffer";
+      sock.onmessage = (ev) => {
+        if (ev.data instanceof ArrayBuffer) {
+          const b0 = new Uint8Array(ev.data, 0, 1)[0];
+          if (b0 === 0x01) {
+            playRdpSpeakerPcm(ev.data);
+          }
+          return;
+        }
+        if (typeof ev.data === "string") {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === "spk_format") {
+              rdpSpkRate = Number(msg.rate) || 44100;
+              rdpSpkChannels = Number(msg.channels) || 2;
+              rdpNextPlayTime = 0;
+            } else if (msg.type === "mic_start") {
+              rdpServerMicOpen = true;
+              syncRdpAudioButtonsUI();
+              void startRdpMicCapture(msg);
+            } else if (msg.type === "mic_stop") {
+              rdpServerMicOpen = false;
+              stopRdpMicCapture();
+              syncRdpAudioButtonsUI();
+            }
+          } catch {
+            // ignore
+          }
+        }
+      };
+      sock.onclose = () => {
+        if (rdpAudioWs === sock) {
+          rdpAudioWs = null;
+          rdpServerMicOpen = false;
+          stopRdpMicCapture();
+          syncRdpAudioButtonsUI();
+        }
+      };
+      rdpAudioWs = sock;
+    } catch {
+      // ignore
+    }
+  }
+
   async function connectRdpSession() {
     if (rdpConnecting || !remoteCanvas) return;
+    ensureRdpAudioContext();
     const rawHost = (rdpHostInput ? rdpHostInput.value : "192.168.52.230").trim() || "192.168.52.230";
     const rawUser = (rdpUserInput ? rdpUserInput.value : "DESKTOP-4LTT2HE\\User").trim() || "DESKTOP-4LTT2HE\\User";
     const rawPass = rdpPassInput ? rdpPassInput.value : "";
@@ -2712,18 +3008,33 @@
 
       for (const proxyWsUrl of proxies) {
         try {
+          const sid =
+            "s" +
+            Date.now().toString(36) +
+            Math.random().toString(36).slice(2, 8);
+          const sessionUrlObj = new URL(proxyWsUrl);
+          sessionUrlObj.searchParams.set("sid", sid);
+          openRdpAudioWs(proxyWsUrl, sid);
+
           const builder = new mod.SessionBuilder();
           builder.username(username);
           if (domain) builder.serverDomain(domain);
           builder.password(rawPass);
           builder.destination(dest);
-          builder.proxyAddress(proxyWsUrl);
+          builder.proxyAddress(sessionUrlObj.toString());
           builder.authToken("local");
           builder.desktopSize(new mod.DesktopSize(RDP_TARGET_W, RDP_TARGET_H));
           builder.renderCanvas(remoteCanvas);
           builder.extension(new mod.Extension("enable_credssp", true));
           builder.extension(new mod.Extension("display_control", true));
           builder.extension(new mod.Extension("enable_server_pointer", true));
+          // Kích hoạt kênh tĩnh RDPSND để ghép kênh Loa Stereo + kết hợp DRDYNVC AUDIO_INPUT cho Microphone Remote Audio
+          builder.extension(
+            new mod.Extension("print_job_stream_callbacks", {
+              onJobData: () => {},
+              onJobComplete: () => {},
+            })
+          );
 
           builder.remoteClipboardChangedCallback((clipData) => {
             try {
@@ -2776,6 +3087,7 @@
           connectedSession = await builder.connect();
           break;
         } catch (err) {
+          closeRdpAudioWs();
           lastErr = err;
           // Nếu sai mật khẩu thì dừng ngay không thử cổng kế tiếp
           if (err && typeof err.kind === "function" && (err.kind() === 1 || err.kind() === 2)) {
@@ -2807,6 +3119,17 @@
       setRemoteHudExpanded(false);
       syncRdpConnectionUI();
       pushKvmConfigToServer();
+      if (
+        rdpMicEnabled &&
+        hasAndroidBridge &&
+        typeof window.AndroidBridge.ensureMicPermission === "function"
+      ) {
+        try {
+          window.AndroidBridge.ensureMicPermission();
+        } catch {
+          // ignore
+        }
+      }
 
       // Chỉ gửi lệnh resize nếu độ phân giải ban đầu chưa khớp 2248x1080 (tránh DeactivateAll gây trễ màn hình)
       if (ds.width !== RDP_TARGET_W || ds.height !== RDP_TARGET_H) {
@@ -2831,6 +3154,7 @@
         .run()
         .then(() => {
           rdpSession = null;
+          closeRdpAudioWs();
           syncRdpConnectionUI();
           if (kbLayout === "remote" && remoteLoginOverlay) {
             setRdpStatus("Phiên Remote PC đã ngắt.", false);
@@ -2839,6 +3163,7 @@
         })
         .catch((runErr) => {
           rdpSession = null;
+          closeRdpAudioWs();
           syncRdpConnectionUI();
           if (kbLayout === "remote" && remoteLoginOverlay) {
             setRdpStatus(formatIronRdpError(runErr), false);
@@ -2846,6 +3171,7 @@
           }
         });
     } catch (err) {
+      closeRdpAudioWs();
       rdpConnecting = false;
       rdpSession = null;
       syncRdpConnectionUI();
@@ -2855,6 +3181,7 @@
   }
 
   function disconnectRdpSession() {
+    closeRdpAudioWs();
     if (rdpSession) {
       try {
         rdpSession.shutdown();
@@ -3029,6 +3356,7 @@
     remoteViewport.addEventListener(
       "touchstart",
       (e) => {
+        ensureRdpAudioContext();
         if (rdpHudExpanded) {
           setRemoteHudExpanded(false);
         }
@@ -3366,66 +3694,34 @@
     if (btnRemoteMic) btnRemoteMic.classList.toggle("is-recording", voiceListening);
   };
 
+  function toggleRemoteSpeaker() {
+    triggerHaptic(10);
+    rdpSpkEnabled = !rdpSpkEnabled;
+    if (rdpSpkEnabled) {
+      ensureRdpAudioContext();
+      rdpNextPlayTime = 0;
+    }
+    syncRdpAudioButtonsUI();
+  }
+
   function toggleRemoteMicrophone() {
-    triggerHaptic(12);
-    if (hasAndroidBridge && typeof window.AndroidBridge.startVoiceInput === "function") {
-      try {
-        window.AndroidBridge.startVoiceInput("vi-VN");
-        return;
-      } catch {
-        // fallback Web Speech
+    triggerHaptic(10);
+    rdpMicEnabled = !rdpMicEnabled;
+    if (rdpMicEnabled) {
+      if (rdpServerMicOpen) {
+        void startRdpMicCapture(rdpServerMicSpec);
       }
+    } else {
+      stopRdpMicCapture();
     }
+    syncRdpAudioButtonsUI();
+  }
 
-    const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRec) {
-      openRemoteSoftKeyboard();
-      return;
-    }
-
-    if (voiceListening && webSpeechRec) {
-      try {
-        webSpeechRec.stop();
-      } catch {
-        // ignore
-      }
-      voiceListening = false;
-      if (btnRemoteMic) btnRemoteMic.classList.remove("is-recording");
-      return;
-    }
-
-    try {
-      webSpeechRec = new SpeechRec();
-      webSpeechRec.lang = "vi-VN";
-      webSpeechRec.interimResults = false;
-      webSpeechRec.continuous = false;
-      webSpeechRec.onstart = () => {
-        voiceListening = true;
-        if (btnRemoteMic) btnRemoteMic.classList.add("is-recording");
-      };
-      webSpeechRec.onresult = (ev) => {
-        let out = "";
-        for (let i = ev.resultIndex; i < ev.results.length; i += 1) {
-          if (ev.results[i].isFinal) {
-            out += ev.results[i][0].transcript;
-          }
-        }
-        if (out.trim()) {
-          injectUnicodeTextToRdp(out.trim() + " ");
-        }
-      };
-      webSpeechRec.onend = () => {
-        voiceListening = false;
-        if (btnRemoteMic) btnRemoteMic.classList.remove("is-recording");
-      };
-      webSpeechRec.onerror = () => {
-        voiceListening = false;
-        if (btnRemoteMic) btnRemoteMic.classList.remove("is-recording");
-      };
-      webSpeechRec.start();
-    } catch {
-      openRemoteSoftKeyboard();
-    }
+  if (btnRemoteSpk) {
+    btnRemoteSpk.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleRemoteSpeaker();
+    });
   }
 
   // ── Gắn sự kiện thanh HUD tối giản & Hộp đăng nhập ──
@@ -3622,7 +3918,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.1.3";
+  const BUNDLED_WEB_VERSION = "2.1.4";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();
