@@ -38,6 +38,7 @@ MAC_VDISP_HELPER_SRC = r"""
 #import <CoreGraphics/CoreGraphics.h>
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <ApplicationServices/ApplicationServices.h>
 #import <dispatch/dispatch.h>
 #import <stdio.h>
 #import <stdlib.h>
@@ -154,17 +155,158 @@ static BOOL dock_is_dark_mode(void) {
     return [best isEqualToString:NSAppearanceNameDarkAqua];
 }
 
+static BOOL ax_raise_app_on_vdisp(pid_t pid, CGRect vb) {
+    if (pid <= 0) return YES;
+    AXUIElementRef appAX = AXUIElementCreateApplication(pid);
+    if (!appAX) return NO;
+    AXError fErr = AXUIElementSetAttributeValue(appAX, kAXFrontmostAttribute, kCFBooleanTrue);
+    if (fErr == kAXErrorAPIDisabled) {
+        CFRelease(appAX);
+        return NO;
+    }
+    CFTypeRef winsRef = NULL;
+    if (AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute, &winsRef) == kAXErrorSuccess && winsRef) {
+        CFIndex cnt = CFArrayGetCount((CFArrayRef)winsRef);
+        NSMutableArray *vdispWins = [NSMutableArray array];
+        NSMutableArray *minFallback = [NSMutableArray array];
+        for (CFIndex i = 0; i < cnt; i++) {
+            AXUIElementRef wAX = (AXUIElementRef)CFArrayGetValueAtIndex((CFArrayRef)winsRef, i);
+            if (!wAX) continue;
+            BOOL inVdisp = NO;
+            CFTypeRef posRef = NULL, szRef = NULL;
+            if (AXUIElementCopyAttributeValue(wAX, kAXPositionAttribute, &posRef) == kAXErrorSuccess && posRef &&
+                AXUIElementCopyAttributeValue(wAX, kAXSizeAttribute, &szRef) == kAXErrorSuccess && szRef) {
+                CGPoint pt = CGPointZero;
+                CGSize sz = CGSizeZero;
+                if (AXValueGetValue((AXValueRef)posRef, kAXValueCGPointType, &pt) &&
+                    AXValueGetValue((AXValueRef)szRef, kAXValueCGSizeType, &sz) &&
+                    sz.width >= 120.0 && sz.height >= 80.0) {
+                    CGFloat cx = pt.x + sz.width * 0.5;
+                    CGFloat cy = pt.y + sz.height * 0.5;
+                    inVdisp = (cx >= vb.origin.x && cx < (vb.origin.x + vb.size.width) &&
+                               cy >= vb.origin.y && cy < (vb.origin.y + vb.size.height));
+                }
+            }
+            if (posRef) CFRelease(posRef);
+            if (szRef) CFRelease(szRef);
+
+            BOOL isMin = NO;
+            CFTypeRef minRef = NULL;
+            if (AXUIElementCopyAttributeValue(wAX, kAXMinimizedAttribute, &minRef) == kAXErrorSuccess && minRef) {
+                isMin = (CFGetTypeID(minRef) == CFBooleanGetTypeID() && CFBooleanGetValue((CFBooleanRef)minRef));
+                CFRelease(minRef);
+            }
+            if (inVdisp) {
+                [vdispWins addObject:(__bridge id)wAX];
+            } else if (isMin) {
+                [minFallback addObject:(__bridge id)wAX];
+            }
+        }
+        NSArray *targets = (vdispWins.count > 0) ? vdispWins : minFallback;
+        for (id wObj in targets) {
+            AXUIElementRef wAX = (__bridge AXUIElementRef)wObj;
+            AXUIElementSetAttributeValue(wAX, kAXMinimizedAttribute, kCFBooleanFalse);
+            AXUIElementSetAttributeValue(wAX, kAXMainAttribute, kCFBooleanTrue);
+            AXUIElementSetAttributeValue(wAX, kAXFocusedAttribute, kCFBooleanTrue);
+            AXUIElementPerformAction(wAX, kAXRaiseAction);
+        }
+        CFRelease(winsRef);
+    }
+    CFRelease(appAX);
+    return YES;
+}
+
+static BOOL ax_minimize_app_on_vdisp(pid_t pid, CGRect vb) {
+    if (pid <= 0) return YES;
+    AXUIElementRef appAX = AXUIElementCreateApplication(pid);
+    if (!appAX) return NO;
+    CFTypeRef winsRef = NULL;
+    AXError err = AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute, &winsRef);
+    if (err == kAXErrorAPIDisabled) {
+        CFRelease(appAX);
+        return NO;
+    }
+    if (err == kAXErrorSuccess && winsRef) {
+        CFIndex cnt = CFArrayGetCount((CFArrayRef)winsRef);
+        for (CFIndex i = 0; i < cnt; i++) {
+            AXUIElementRef wAX = (AXUIElementRef)CFArrayGetValueAtIndex((CFArrayRef)winsRef, i);
+            if (!wAX) continue;
+            BOOL inVdisp = NO;
+            CFTypeRef posRef = NULL, szRef = NULL;
+            if (AXUIElementCopyAttributeValue(wAX, kAXPositionAttribute, &posRef) == kAXErrorSuccess && posRef &&
+                AXUIElementCopyAttributeValue(wAX, kAXSizeAttribute, &szRef) == kAXErrorSuccess && szRef) {
+                CGPoint pt = CGPointZero;
+                CGSize sz = CGSizeZero;
+                if (AXValueGetValue((AXValueRef)posRef, kAXValueCGPointType, &pt) &&
+                    AXValueGetValue((AXValueRef)szRef, kAXValueCGSizeType, &sz) &&
+                    sz.width >= 120.0 && sz.height >= 80.0) {
+                    CGFloat cx = pt.x + sz.width * 0.5;
+                    CGFloat cy = pt.y + sz.height * 0.5;
+                    inVdisp = (cx >= vb.origin.x && cx < (vb.origin.x + vb.size.width) &&
+                               cy >= vb.origin.y && cy < (vb.origin.y + vb.size.height));
+                }
+            }
+            if (posRef) CFRelease(posRef);
+            if (szRef) CFRelease(szRef);
+            if (!inVdisp) continue;
+
+            BOOL isFs = NO;
+            CFTypeRef fsRef = NULL;
+            if (AXUIElementCopyAttributeValue(wAX, CFSTR("AXFullScreen"), &fsRef) == kAXErrorSuccess && fsRef) {
+                isFs = (CFGetTypeID(fsRef) == CFBooleanGetTypeID() && CFBooleanGetValue((CFBooleanRef)fsRef));
+                CFRelease(fsRef);
+            }
+            if (!isFs) {
+                AXUIElementSetAttributeValue(wAX, kAXMinimizedAttribute, kCFBooleanTrue);
+            }
+        }
+        CFRelease(winsRef);
+    }
+    CFRelease(appAX);
+    return YES;
+}
+
+@interface DockPanel : NSPanel
+@end
+@implementation DockPanel
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
+@interface DockGlassView : NSVisualEffectView
+@end
+@implementation DockGlassView
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
+@end
+
+@interface DockItemView : NSView
+@property (nonatomic) pid_t appPid;
+@property (nonatomic, strong) NSImageView *iconView;
+@property (nonatomic, strong) NSView *dotView;
+@property (nonatomic, copy) void (^onClick)(pid_t pid);
+@end
+@implementation DockItemView
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
+- (void)mouseDown:(NSEvent *)event {
+    (void)event;
+    if (self.iconView) self.iconView.alphaValue = 0.58;
+    if (self.onClick && self.appPid > 0) {
+        self.onClick(self.appPid);
+    }
+}
+@end
+
 @interface SecondaryDockController : NSObject
 @property (nonatomic) CGDirectDisplayID vdispId;
 @property (nonatomic) pid_t selfPid;
-@property (nonatomic, strong) NSPanel *panel;
-@property (nonatomic, strong) NSVisualEffectView *bgView;
+@property (nonatomic, strong) DockPanel *panel;
+@property (nonatomic, strong) DockGlassView *bgView;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *knownWins;
-@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *minGraceUntil;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *hiddenPids;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, DockItemView *> *itemViews;
 @property (nonatomic, strong) NSMutableArray<NSNumber *> *appOrder;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSDictionary *> *appState;
-@property (nonatomic, copy) NSString *lastSig;
+@property (nonatomic, copy) NSString *lastLayoutSig;
 - (instancetype)initWithDisplayID:(CGDirectDisplayID)did;
 - (void)refresh;
 - (void)shutdown;
@@ -178,18 +320,18 @@ static BOOL dock_is_dark_mode(void) {
     _vdispId = did;
     _selfPid = getpid();
     _knownWins = [NSMutableDictionary dictionary];
-    _minGraceUntil = [NSMutableDictionary dictionary];
     _hiddenPids = [NSMutableDictionary dictionary];
+    _itemViews = [NSMutableDictionary dictionary];
     _appOrder = [NSMutableArray array];
     _appState = [NSMutableDictionary dictionary];
-    _lastSig = @"";
+    _lastLayoutSig = @"";
 
     NSRect initRect = NSMakeRect(0, 0, 42, 120);
-    _panel = [[NSPanel alloc] initWithContentRect:initRect
-                                        styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
-                                          backing:NSBackingStoreBuffered
-                                            defer:NO];
-    // Ngang tầng Dock gốc / SmartRightDock (layer 20) + FullScreenAuxiliary để LUÔN nổi trên cả app Full Screen (Remote Desktop)
+    _panel = [[DockPanel alloc] initWithContentRect:initRect
+                                          styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
+                                            backing:NSBackingStoreBuffered
+                                              defer:NO];
+    // Ngang tầng Dock gốc / SmartRightDock (layer 20) + FullScreenAuxiliary để LUÔN nổi trên cả app Full Screen
     _panel.level = (NSWindowLevel)CGWindowLevelForKey(kCGDockWindowLevelKey);
     _panel.collectionBehavior = (NSWindowCollectionBehaviorCanJoinAllSpaces |
                                  NSWindowCollectionBehaviorFullScreenAuxiliary |
@@ -197,15 +339,13 @@ static BOOL dock_is_dark_mode(void) {
                                  NSWindowCollectionBehaviorIgnoresCycle);
     _panel.opaque = NO;
     _panel.backgroundColor = [NSColor clearColor];
-    // Tắt đổ bóng cửa sổ hình chữ nhật gốc của NSPanel để loại bỏ hoàn toàn viền/quầng đen vuông quanh Dock
     _panel.hasShadow = NO;
     _panel.ignoresMouseEvents = NO;
     _panel.hidesOnDeactivate = NO;
     _panel.becomesKeyOnlyIfNeeded = YES;
     _panel.releasedWhenClosed = NO;
 
-    _bgView = [[NSVisualEffectView alloc] initWithFrame:initRect];
-    // Kính mờ chuẩn macOS Dock / SmartRightDock (tự đồng bộ Light/Dark của hệ thống, không dùng HUD đen đặc)
+    _bgView = [[DockGlassView alloc] initWithFrame:initRect];
     _bgView.material = NSVisualEffectMaterialPopover;
     _bgView.blendingMode = NSVisualEffectBlendingModeBehindWindow;
     _bgView.state = NSVisualEffectStateActive;
@@ -230,44 +370,106 @@ static BOOL dock_is_dark_mode(void) {
     return nil;
 }
 
-- (void)onIconClick:(NSButton *)sender {
-    pid_t pid = (pid_t)sender.tag;
+- (void)updateItemVisuals:(BOOL)isDark {
+    for (NSNumber *pidNum in self.appOrder) {
+        DockItemView *iv = self.itemViews[pidNum];
+        NSDictionary *st = self.appState[pidNum];
+        if (!iv || !st) continue;
+        BOOL isVis = [st[@"visible"] boolValue];
+        BOOL isTop = [st[@"top"] boolValue];
+        iv.iconView.alphaValue = isVis ? 1.0 : 0.72;
+        if (isDark) {
+            CGFloat da = isVis ? (isTop ? 0.95 : 0.45) : 0.20;
+            iv.dotView.layer.backgroundColor = [[NSColor colorWithWhite:1.0 alpha:da] CGColor];
+        } else {
+            CGFloat da = isVis ? (isTop ? 0.78 : 0.36) : 0.16;
+            iv.dotView.layer.backgroundColor = [[NSColor colorWithWhite:0.12 alpha:da] CGColor];
+        }
+    }
+}
+
+- (void)handleClickForPid:(pid_t)pid {
     if (pid <= 0) return;
     NSDictionary *info = self.appState[@(pid)];
-    BOOL isVis = info ? [info[@"visible"] boolValue] : YES;
+    BOOL isVis = info ? [info[@"visible"] boolValue] : NO;
     BOOL isTop = info ? [info[@"top"] boolValue] : NO;
     BOOL hasMain = info ? [info[@"hasMain"] boolValue] : NO;
     BOOL isFs = info ? [info[@"isFs"] boolValue] : NO;
     unsigned int winId = info ? [info[@"winId"] unsignedIntValue] : 0;
     NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+    CGRect vb = CGDisplayBounds(self.vdispId);
 
+    // Logic tối giản 100% chuẩn taskbar 2 màn hình Windows:
+    // - Đang ẩn hoặc bị cửa sổ khác đè -> MỞ LÊN TRÊN CÙNG tức thì (1ms native ObjC)
+    // - Đang mở nằm trên cùng -> THU GỌN TỨC THÌ xuống khay Dock phụ (không vải lụa, không bay về MacBook)
     if (!isVis || !isTop) {
-        [self.minGraceUntil removeObjectForKey:@(pid)];
         [self.hiddenPids removeObjectForKey:@(pid)];
         if (winId > 0) self.knownWins[@(winId)] = @(pid);
+
+        // Cập nhật trạng thái tức thì để click liên tiếp không bao giờ bị trễ
+        NSMutableDictionary *nextSt = [NSMutableDictionary dictionaryWithDictionary:self.appState];
+        for (NSNumber *k in [nextSt allKeys]) {
+            NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:nextSt[k]];
+            BOOL same = ([k intValue] == (int)pid);
+            if (same) {
+                m[@"visible"] = @YES;
+                m[@"top"] = @YES;
+                m[@"active"] = @YES;
+            } else {
+                m[@"top"] = @NO;
+                m[@"active"] = @NO;
+            }
+            nextSt[k] = m;
+        }
+        self.appState = nextSt;
+        [self updateItemVisuals:dock_is_dark_mode()];
+
         if (rapp) {
             [rapp unhide];
             [rapp activateWithOptions:NSApplicationActivateIgnoringOtherApps];
         }
-        fprintf(stdout, "DOCK_ACTIVATE %d %u\n", (int)pid, winId);
-        fflush(stdout);
+        BOOL okAX = ax_raise_app_on_vdisp(pid, vb);
+        if (!okAX) {
+            // Fallback sang tiến trình Python cha nếu macOS chưa kế thừa quyền Accessibility cho helper con
+            fprintf(stdout, "DOCK_ACTIVATE %d %u\n", (int)pid, winId);
+            fflush(stdout);
+        } else {
+            // Nhịp phụ 30ms sau khi unhide để bắt chắc cửa sổ Electron/Chromium (Edge/Obsidian)
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                ax_raise_app_on_vdisp(pid, vb);
+                if (rapp) [rapp activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+            });
+        }
     } else if (isFs && hasMain) {
-        // App Full Screen trải cả 2 màn (như Remote Desktop): không ẩn để tránh tắt nhầm màn MacBook
+        // App Full Screen trải 2 màn (Remote Desktop): không ẩn để tránh mất màn MacBook
+        [self updateItemVisuals:dock_is_dark_mode()];
         return;
     } else {
         if (winId > 0) self.knownWins[@(winId)] = @(pid);
-        self.minGraceUntil[@(pid)] = @(CFAbsoluteTimeGetCurrent() + 0.65);
+        NSMutableDictionary *nextSt = [NSMutableDictionary dictionaryWithDictionary:self.appState];
+        if (nextSt[@(pid)]) {
+            NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:nextSt[@(pid)]];
+            m[@"visible"] = @NO;
+            m[@"top"] = @NO;
+            m[@"active"] = @NO;
+            nextSt[@(pid)] = m;
+        }
+        self.appState = nextSt;
+        [self updateItemVisuals:dock_is_dark_mode()];
+
         if (!hasMain && rapp) {
-            // Ẩn tức thì ngay trên Màn phụ (KHÔNG hiệu ứng uốn vải lụa Genie, KHÔNG bay về Dock MacBook!)
             self.hiddenPids[@(pid)] = @(winId);
             [rapp hide];
         } else {
-            // App có mở thêm cửa sổ khác trên MacBook -> chỉ thu nhỏ riêng cửa sổ ở Màn phụ
-            fprintf(stdout, "DOCK_MINIMIZE %d %u\n", (int)pid, winId);
-            fflush(stdout);
+            BOOL okAX = ax_minimize_app_on_vdisp(pid, vb);
+            if (!okAX) {
+                fprintf(stdout, "DOCK_MINIMIZE %d %u\n", (int)pid, winId);
+                fflush(stdout);
+            }
         }
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self refresh];
     });
 }
@@ -288,14 +490,12 @@ static BOOL dock_is_dark_mode(void) {
     if (!allList) return;
 
     NSArray *wins = (__bridge_transfer NSArray *)allList;
-    BOOL hasFullscreen = NO;
     NSMutableSet<NSNumber *> *aliveWinIds = [NSMutableSet set];
     NSMutableSet<NSNumber *> *mainScreenPids = [NSMutableSet set];
     NSMutableDictionary<NSNumber *, NSMutableDictionary *> *appsByPid = [NSMutableDictionary dictionary];
     NSRunningApplication *frontApp = [[NSWorkspace sharedWorkspace] frontmostApplication];
     pid_t frontPid = frontApp ? frontApp.processIdentifier : 0;
     pid_t topVdispPid = 0;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
 
     for (NSDictionary *w in wins) {
         NSInteger layer = [w[(id)kCGWindowLayer] integerValue];
@@ -323,7 +523,6 @@ static BOOL dock_is_dark_mode(void) {
         BOOL trackedVisible = (inVdisp && isBigWindow && isOnscreen && alpha > 0.05);
         BOOL movedAwayVisibly = (!inVdisp && isBigWindow && isOnscreen && alpha > 0.05);
 
-        // Nếu người dùng kéo cửa sổ trở lại màn chính MacBook -> gỡ khỏi Dock phụ và đánh dấu app có cửa sổ trên MacBook
         if (movedAwayVisibly) {
             [mainScreenPids addObject:@(pid)];
             if (isTrackedKnown) [self.knownWins removeObjectForKey:winIdNum];
@@ -337,23 +536,14 @@ static BOOL dock_is_dark_mode(void) {
             continue;
         }
 
-        // Trong 0.65s ngay sau khi bấm ẩn: giữ trạng thái ẩn ổn định
-        NSNumber *graceObj = self.minGraceUntil[@(pid)];
-        BOOL inMinGrace = (graceObj != nil && now < [graceObj doubleValue]);
-        if (!trackedVisible && graceObj != nil) {
-            [self.minGraceUntil removeObjectForKey:@(pid)];
-        }
-
-        BOOL effectiveVisible = (trackedVisible && !inMinGrace && !rapp.isHidden);
+        BOOL effectiveVisible = (trackedVisible && !rapp.isHidden);
         BOOL isFsWin = NO;
         if (trackedVisible) {
-            // Ghi nhớ lâu dài winId đã từng mở trên Màn phụ #2 để khi ẩn/thu nhỏ icon LUÔN giữ nguyên trên Dock phụ!
             self.knownWins[winIdNum] = @(pid);
             if (effectiveVisible) {
                 [self.hiddenPids removeObjectForKey:@(pid)];
                 if (topVdispPid == 0) topVdispPid = pid;
                 if (wb.size.width >= vb.size.width - 4.0 && wb.size.height >= vb.size.height - 4.0) {
-                    hasFullscreen = YES;
                     isFsWin = YES;
                 }
             }
@@ -382,7 +572,7 @@ static BOOL dock_is_dark_mode(void) {
         }
     }
 
-    // Giữ nguyên icon cho các app đang ẩn bằng [rapp hide] trên Màn phụ (kể cả khi Chromium tạm ẩn winId)
+    // Giữ icon các app đang thu gọn xuống khay bằng [rapp hide]
     NSArray<NSNumber *> *hiddenKeys = [self.hiddenPids allKeys];
     for (NSNumber *pidNum in hiddenKeys) {
         pid_t hpid = (pid_t)[pidNum intValue];
@@ -399,6 +589,7 @@ static BOOL dock_is_dark_mode(void) {
                     @"top": @NO,
                     @"active": @NO,
                     @"hasMain": @NO,
+                    @"isFs": @NO,
                 }];
             }
         } else {
@@ -406,12 +597,10 @@ static BOOL dock_is_dark_mode(void) {
         }
     }
 
-    // Cập nhật cờ hasMain cho mọi app trên Dock phụ
     for (NSNumber *pidNum in appsByPid) {
         appsByPid[pidNum][@"hasMain"] = @([mainScreenPids containsObject:pidNum]);
     }
 
-    // Dọn các cửa sổ đã đóng hẳn khỏi bộ nhớ theo dõi (nếu app đang bị ẩn bởi SmartRightDock/Cmd+H -> giữ qua hiddenPids!)
     NSArray<NSNumber *> *knownKeys = [self.knownWins allKeys];
     for (NSNumber *wid in knownKeys) {
         if (![aliveWinIds containsObject:wid]) {
@@ -428,6 +617,7 @@ static BOOL dock_is_dark_mode(void) {
                         @"top": @NO,
                         @"active": @NO,
                         @"hasMain": @NO,
+                        @"isFs": @NO,
                     }];
                 }
             }
@@ -435,9 +625,6 @@ static BOOL dock_is_dark_mode(void) {
         }
     }
 
-    (void)hasFullscreen;
-
-    // Giữ thứ tự icon ổn định trên -> dưới ở mép PHẢI Màn phụ, luôn nổi kể cả khi đang Full Screen (Remote Desktop)
     NSMutableArray<NSNumber *> *nextOrder = [NSMutableArray array];
     for (NSNumber *pidNum in self.appOrder) {
         if (appsByPid[pidNum]) [nextOrder addObject:pidNum];
@@ -450,17 +637,18 @@ static BOOL dock_is_dark_mode(void) {
     self.appState = appsByPid;
 
     BOOL isDark = dock_is_dark_mode();
-    NSMutableString *sig = [NSMutableString stringWithFormat:@"%.0f,%.0f,%.0f,%.0f:%d:",
-                            scr.frame.origin.x, scr.frame.origin.y, scr.frame.size.width, scr.frame.size.height, isDark ? 1 : 0];
+    // CHỈ dựng lại khung nút khi danh sách app / kích thước màn hình / Light-Dark thay đổi -> KHÔNG BAO GIỜ hủy nút lúc đang bấm!
+    NSMutableString *layoutSig = [NSMutableString stringWithFormat:@"%.0f,%.0f,%.0f,%.0f:%d:",
+                                  scr.frame.origin.x, scr.frame.origin.y, scr.frame.size.width, scr.frame.size.height, isDark ? 1 : 0];
     for (NSNumber *pidNum in self.appOrder) {
-        NSDictionary *st = appsByPid[pidNum];
-        [sig appendFormat:@"%@:%d%d,", pidNum, [st[@"visible"] boolValue], [st[@"active"] boolValue]];
+        [layoutSig appendFormat:@"%@,", pidNum];
     }
 
-    if (![sig isEqualToString:self.lastSig]) {
-        self.lastSig = sig;
+    if (![layoutSig isEqualToString:self.lastLayoutSig]) {
+        self.lastLayoutSig = layoutSig;
         NSArray<NSView *> *oldSubs = [self.bgView.subviews copy];
         for (NSView *sv in oldSubs) [sv removeFromSuperview];
+        [self.itemViews removeAllObjects];
 
         CGFloat dockW = 16.0;
         CGFloat dockH = 56.0;
@@ -485,47 +673,41 @@ static BOOL dock_is_dark_mode(void) {
             dockW = 42.0;
             dockH = 14.0 + count * itemStep;
 
+            __weak SecondaryDockController *weakSelf = self;
             for (NSUInteger i = 0; i < count; i++) {
                 NSNumber *pidNum = self.appOrder[i];
                 pid_t pid = (pid_t)[pidNum intValue];
-                NSDictionary *st = appsByPid[pidNum];
-                BOOL isVis = [st[@"visible"] boolValue];
-                BOOL isAct = [st[@"active"] boolValue];
+                CGFloat by = dockH - 7.0 - (CGFloat)(i + 1) * itemStep;
 
-                // Xếp dọc từ trên xuống dưới (AppKit y=0 ở đáy)
-                CGFloat by = dockH - 7.0 - (CGFloat)(i + 1) * itemStep + 3.0;
-                NSButton *btn = [[NSButton alloc] initWithFrame:NSMakeRect(4.0, by, 32.0, 30.0)];
-                btn.bordered = NO;
-                btn.title = @"";
-                btn.bezelStyle = NSBezelStyleRegularSquare;
-                btn.buttonType = NSButtonTypeMomentaryChange;
-                btn.imagePosition = NSImageOnly;
-                btn.imageScaling = NSImageScaleProportionallyUpOrDown;
-                btn.tag = (NSInteger)pid;
-                btn.target = self;
-                btn.action = @selector(onIconClick:);
-                btn.alphaValue = isVis ? 1.0 : 0.82;
+                DockItemView *item = [[DockItemView alloc] initWithFrame:NSMakeRect(0.0, by, dockW, itemStep)];
+                item.appPid = pid;
+                item.onClick = ^(pid_t clickedPid) {
+                    SecondaryDockController *strongSelf = weakSelf;
+                    if (strongSelf) [strongSelf handleClickForPid:clickedPid];
+                };
+
+                NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(6.0, 5.0, 26.0, 26.0)];
+                iv.imageScaling = NSImageScaleProportionallyUpOrDown;
                 NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
                 if (rapp && rapp.icon) {
                     NSImage *ico = [rapp.icon copy];
                     ico.size = NSMakeSize(26.0, 26.0);
-                    btn.image = ico;
+                    iv.image = ico;
                 }
-                [self.bgView addSubview:btn];
+                [item addSubview:iv];
+                item.iconView = iv;
 
-                // Chấm trạng thái gọn sát mép phải icon (đồng bộ kiểu Dock dọc bên phải)
-                NSView *dot = [[NSView alloc] initWithFrame:NSMakeRect(dockW - 5.5, by + 13.25, 3.5, 3.5)];
+                NSView *dot = [[NSView alloc] initWithFrame:NSMakeRect(dockW - 5.5, (itemStep - 3.5) * 0.5, 3.5, 3.5)];
                 dot.wantsLayer = YES;
                 dot.layer.cornerRadius = 1.75;
-                CGFloat dotAlpha = isVis ? (isAct ? 0.90 : 0.50) : 0.22;
-                dot.layer.backgroundColor = isDark
-                    ? [[NSColor colorWithWhite:1.0 alpha:dotAlpha] CGColor]
-                    : [[NSColor colorWithWhite:0.12 alpha:(isVis ? (isAct ? 0.72 : 0.42) : 0.18)] CGColor];
-                [self.bgView addSubview:dot];
+                [item addSubview:dot];
+                item.dotView = dot;
+
+                [self.bgView addSubview:item];
+                self.itemViews[pidNum] = item;
             }
         }
 
-        // Đặt dọc ở mép PHẢI Màn phụ, căn giữa theo chiều dọc (không đè thanh Taskbar đáy của Windows RDP)
         CGFloat dockX = scr.frame.origin.x + scr.frame.size.width - dockW - 4.0;
         CGFloat dockY = scr.frame.origin.y + (scr.frame.size.height - dockH) * 0.5;
         self.bgView.maskImage = make_pill_mask(radius);
@@ -537,12 +719,13 @@ static BOOL dock_is_dark_mode(void) {
         self.bgView.frame = NSMakeRect(0, 0, dockW, dockH);
         [self.panel invalidateShadow];
     }
+
+    [self updateItemVisuals:isDark];
     [self.panel orderFrontRegardless];
 }
 
 - (void)markPidMinimized:(pid_t)pid {
     if (pid <= 0) return;
-    self.minGraceUntil[@(pid)] = @(CFAbsoluteTimeGetCurrent() + 0.65);
     NSDictionary *st = self.appState[@(pid)];
     if (st && st[@"winId"]) {
         self.knownWins[st[@"winId"]] = @(pid);
@@ -554,7 +737,6 @@ static BOOL dock_is_dark_mode(void) {
 
 - (void)unmarkPidMinimized:(pid_t)pid {
     if (pid <= 0) return;
-    [self.minGraceUntil removeObjectForKey:@(pid)];
     [self.hiddenPids removeObjectForKey:@(pid)];
 }
 
@@ -681,6 +863,23 @@ int main(int argc, const char * argv[]) {
 
         // Theo dõi stdin lệnh điều khiển (m <pid> / u <pid> / q) và EOF để tự hủy màn ảo
         __weak SecondaryDockController *weakDock = dockCtrl;
+        void (^triggerStop)(void) = ^{
+            g_should_exit = 1;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [NSApp stop:nil];
+                NSEvent *wakeEv = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                                     location:NSZeroPoint
+                                                modifierFlags:0
+                                                    timestamp:0
+                                                 windowNumber:0
+                                                      context:nil
+                                                      subtype:0
+                                                        data1:0
+                                                        data2:0];
+                if (wakeEv) [NSApp postEvent:wakeEv atStart:YES];
+            });
+        };
+
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
             char line[128];
             while (fgets(line, sizeof(line), stdin) != NULL) {
@@ -697,39 +896,71 @@ int main(int argc, const char * argv[]) {
                     });
                 }
             }
-            g_should_exit = 1;
+            triggerStop();
         });
 
-        CFAbsoluteTime lastDockRefresh = 0.0;
-        while (!g_should_exit) {
-            @autoreleasepool {
-                if (dockCtrl) {
-                    NSEvent *ev = [NSApp nextEventMatchingMask:NSEventMaskAny
-                                                     untilDate:[NSDate dateWithTimeIntervalSinceNow:0.06]
-                                                        inMode:NSDefaultRunLoopMode
-                                                       dequeue:YES];
-                    if (ev) {
-                        [NSApp sendEvent:ev];
-                        [NSApp updateWindows];
+        if (dockCtrl) {
+            // Dùng vòng lặp sự kiện gốc [NSApp run] + NSWorkspace notifications (phản hồi click < 1ms, 0% lag!)
+            NSNotificationCenter *wsnc = [[NSWorkspace sharedWorkspace] notificationCenter];
+            NSArray<NSNotificationName> *evNames = @[
+                NSWorkspaceDidActivateApplicationNotification,
+                NSWorkspaceDidHideApplicationNotification,
+                NSWorkspaceDidUnhideApplicationNotification,
+                NSWorkspaceDidTerminateApplicationNotification,
+                NSWorkspaceActiveSpaceDidChangeNotification
+            ];
+            NSMutableArray *obsTokens = [NSMutableArray array];
+            for (NSNotificationName name in evNames) {
+                id tok = [wsnc addObserverForName:name
+                                           object:nil
+                                            queue:[NSOperationQueue mainQueue]
+                                       usingBlock:^(NSNotification *note) {
+                    (void)note;
+                    SecondaryDockController *d = weakDock;
+                    if (d) {
+                        @try { [d refresh]; } @catch (NSException *ex) { (void)ex; }
                     }
-                    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-                    if ((now - lastDockRefresh) >= 0.35) {
-                        lastDockRefresh = now;
-                        @try {
-                            [dockCtrl refresh];
-                        } @catch (NSException *ex) {
-                            (void)ex;
-                        }
-                    }
-                } else {
+                }];
+                if (tok) [obsTokens addObject:tok];
+            }
+
+            NSTimer *pollTimer = [NSTimer scheduledTimerWithTimeInterval:0.45
+                                                                 repeats:YES
+                                                                   block:^(NSTimer *t) {
+                if (g_should_exit) {
+                    [t invalidate];
+                    [NSApp stop:nil];
+                    NSEvent *wakeEv = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                                         location:NSZeroPoint
+                                                    modifierFlags:0
+                                                        timestamp:0
+                                                     windowNumber:0
+                                                          context:nil
+                                                          subtype:0
+                                                            data1:0
+                                                            data2:0];
+                    if (wakeEv) [NSApp postEvent:wakeEv atStart:YES];
+                    return;
+                }
+                SecondaryDockController *d = weakDock;
+                if (d) {
+                    @try { [d refresh]; } @catch (NSException *ex) { (void)ex; }
+                }
+            }];
+
+            [NSApp run];
+
+            [pollTimer invalidate];
+            for (id tok in obsTokens) [wsnc removeObserver:tok];
+            [dockCtrl shutdown];
+            dockCtrl = nil;
+        } else {
+            while (!g_should_exit) {
+                @autoreleasepool {
                     [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                                              beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
                 }
             }
-        }
-        if (dockCtrl) {
-            [dockCtrl shutdown];
-            dockCtrl = nil;
         }
         vdisp = nil;
     }
@@ -977,7 +1208,11 @@ class MacVirtualDisplayManager:
                     except Exception:
                         continue
                     act = "activate" if parts[0] == "DOCK_ACTIVATE" else "minimize"
-                    self._ax_handle_dock_action(act, pid)
+                    threading.Thread(
+                        target=self._ax_handle_dock_action,
+                        args=(act, pid),
+                        daemon=True,
+                    ).start()
         except Exception:
             pass
 
@@ -1013,6 +1248,8 @@ class MacVirtualDisplayManager:
                 "AppKit",
                 "-framework",
                 "QuartzCore",
+                "-framework",
+                "ApplicationServices",
                 str(self._src_path),
                 "-o",
                 str(self._bin_path),
