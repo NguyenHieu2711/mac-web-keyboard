@@ -6183,8 +6183,6 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                 ax.AXUIElementSetAttributeValue(bel, s_focused, kTrue)
                 if _click_menu_item(("connections", "connection"), "connect"):
                     launched = True
-                elif ax.AXUIElementPerformAction(bel, s_open) == 0:
-                    launched = True
                 elif q is not None:
                     # Bấm vào góc trên-trái của thẻ (tránh nút bút chì Edit ở góc dưới-phải) rồi gọi Connect / double-click
                     cx = bx + min(42.0, bw * 0.35)
