@@ -1,6 +1,62 @@
 (() => {
   "use strict";
 
+  const BUNDLED_BOOT_VER = "2.2.4";
+  if (!window.__MAC_KB_HOT_BOOTED__) {
+    try {
+      const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
+      if (rawHot) {
+        const bundle = JSON.parse(rawHot);
+        const cmpBootVer = (a, b) => {
+          const pa = String(a || "")
+            .trim()
+            .replace(/^[vV]/, "")
+            .split("-")[0]
+            .split(".")
+            .map((n) => parseInt(n, 10) || 0);
+          const pb = String(b || "")
+            .trim()
+            .replace(/^[vV]/, "")
+            .split("-")[0]
+            .split(".")
+            .map((n) => parseInt(n, 10) || 0);
+          for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+            if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+          }
+          return 0;
+        };
+        if (
+          bundle &&
+          bundle.etag &&
+          bundle.app_js &&
+          bundle.body_html &&
+          typeof bundle.style_css === "string"
+        ) {
+          if (cmpBootVer(BUNDLED_BOOT_VER, bundle.web_version || "0.0.0") > 0) {
+            localStorage.removeItem("mac_kb_hot_bundle_v1");
+          } else {
+            window.__MAC_KB_HOT_BOOTED__ = String(bundle.etag);
+            window.__MAC_KB_HOT_VERSION__ = String(bundle.web_version || BUNDLED_BOOT_VER);
+            document
+              .querySelectorAll('link[rel="stylesheet"], style#hot-ota-style')
+              .forEach((el) => el.remove());
+            const st = document.createElement("style");
+            st.id = "hot-ota-style";
+            st.textContent = bundle.style_css;
+            document.head.appendChild(st);
+            document.body.innerHTML = bundle.body_html;
+            const sc = document.createElement("script");
+            sc.textContent = bundle.app_js;
+            document.body.appendChild(sc);
+            return;
+          }
+        }
+      }
+    } catch {
+      // fallback to bundled script
+    }
+  }
+
   const wsDots = Array.from(document.querySelectorAll(".js-ws-dot"));
   const utilIcons = Array.from(document.querySelectorAll(".js-util-icon"));
   const layoutLabels = Array.from(document.querySelectorAll(".js-layout-label"));
@@ -5020,16 +5076,18 @@
   }
 
   // ============================================================================
-  // 9. CẬP NHẬT THÔNG MINH TRỰC TIẾP KHI ĐANG DÙNG APP (LIVE OTA HOT-UPDATE)
-  //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
-  //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
+  // 9. CẬP NHẬT NÓNG TỨC THÌ TRỰC TIẾP KHI ĐANG MỞ APP (INSTANT LAN + GITHUB SHA HOT-OTA)
+  //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
+  //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.2.3";
-  const LIVE_MANIFEST_URL =
-    "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
+  const BUNDLED_WEB_VERSION = "2.2.4";
+  const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
+  const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
-  let liveUpdateTriggered = false;
+  let liveUpdateInFlight = false;
+  let pendingHotBundleReady = false;
   let pendingUpdateApplyTimer = null;
+  let lastGithubCheckAt = 0;
 
   const markUserActive = () => {
     lastUserTouchAt = performance.now();
@@ -5038,11 +5096,14 @@
     }
   };
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && kbLayout === "remote") {
-      ensureRdpAudioContext();
-      if (rdpServerMicOpen && rdpSession) {
-        void startRdpMicCapture(rdpServerMicSpec);
+    if (document.visibilityState === "visible") {
+      if (kbLayout === "remote") {
+        ensureRdpAudioContext();
+        if (rdpServerMicOpen && rdpSession) {
+          void startRdpMicCapture(rdpServerMicSpec);
+        }
       }
+      void pollLiveUpdateManifest();
     }
   });
   window.addEventListener("touchstart", markUserActive, { passive: true, capture: true });
@@ -5073,7 +5134,7 @@
   }
 
   function getRunningWebVersion() {
-    let best = BUNDLED_WEB_VERSION;
+    let best = window.__MAC_KB_HOT_VERSION__ || BUNDLED_WEB_VERSION;
     if (hasAndroidBridge && typeof window.AndroidBridge.getAppVersion === "function") {
       try {
         const bridgeVer = String(window.AndroidBridge.getAppVersion() || "").trim();
@@ -5087,59 +5148,253 @@
     return best;
   }
 
-  function triggerWhenIdle() {
-    if (liveUpdateTriggered || rdpSession) return;
+  function getRunningEtag() {
+    if (window.__MAC_KB_HOT_BOOTED__) {
+      return String(window.__MAC_KB_HOT_BOOTED__);
+    }
+    try {
+      return localStorage.getItem(`mac_kb_base_etag_${BUNDLED_WEB_VERSION}`) || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function buildLanLiveBaseUrls() {
+    const bases = [];
+    const pcHostVal = (rdpHostInput ? rdpHostInput.value : "192.168.52.230")
+      .trim()
+      .replace(/^https?:\/\/|^wss?:\/\//, "")
+      .split(":")[0]
+      .trim();
+    if (pcHostVal) {
+      bases.push(`http://${pcHostVal}:5051`);
+    }
+    const macBase = resolveMacHttpBase();
+    if (macBase) {
+      bases.push(macBase.replace(/\/+$/, ""));
+    }
+    for (const h of resolveCandidateHosts()) {
+      const clean = h.replace(/^https?:\/\/|^wss?:\/\//, "").split("/")[0];
+      if (clean) {
+        bases.push(`http://${clean}`);
+      }
+    }
+    return Array.from(new Set(bases));
+  }
+
+  async function fetchJsonFast(url, timeoutMs = 1200) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        cache: "no-store",
+        signal: ctrl.signal,
+      });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function applyReadyHotBundleWhenIdle() {
+    if (!pendingHotBundleReady) return;
     const idleMs = performance.now() - lastUserTouchAt;
-    if (document.visibilityState !== "visible" || activePointers.size > 0 || idleMs < 2000) {
+    if (document.visibilityState !== "visible" || activePointers.size > 0 || idleMs < 1200) {
       if (pendingUpdateApplyTimer === null) {
         pendingUpdateApplyTimer = setTimeout(() => {
           pendingUpdateApplyTimer = null;
-          triggerWhenIdle();
-        }, 1200);
+          applyReadyHotBundleWhenIdle();
+        }, 700);
       }
       return;
     }
-    liveUpdateTriggered = true;
-    releaseAllActiveTouches();
-    if (hasAndroidBridge && typeof window.AndroidBridge.startNativeUpdate === "function") {
+    pendingHotBundleReady = false;
+    rdpManualDisconnect = true;
+    closeParallelRdpWs();
+    closeRdpAudioWs();
+    if (rdpSession) {
       try {
-        window.AndroidBridge.startNativeUpdate();
-        return;
+        rdpSession.shutdown();
       } catch {
-        // fallback reload
+        // ignore
       }
+      rdpSession = null;
     }
+    releaseAllActiveTouches();
     window.location.reload();
   }
 
-  async function pollLiveUpdateManifest() {
-    if (liveUpdateTriggered || document.visibilityState !== "visible") return;
+  function saveHotBundleToStorage(bundle) {
+    if (
+      !bundle ||
+      !bundle.etag ||
+      !bundle.app_js ||
+      !bundle.body_html ||
+      typeof bundle.style_css !== "string"
+    ) {
+      return false;
+    }
     try {
-      const res = await fetch(`${LIVE_MANIFEST_URL}?t=${Date.now()}`, {
-        method: "GET",
-        cache: "no-store",
-      });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data || typeof data !== "object") return;
-      const curVer = getRunningWebVersion();
-      const remoteWeb = String(data.web_version || "").trim();
-      const remoteTag = String(data.tag_name || "").trim();
+      localStorage.setItem(
+        HOT_BUNDLE_STORAGE_KEY,
+        JSON.stringify({
+          web_version: String(bundle.web_version || BUNDLED_WEB_VERSION),
+          etag: String(bundle.etag),
+          body_html: bundle.body_html,
+          style_css: bundle.style_css,
+          app_js: bundle.app_js,
+        })
+      );
+      localStorage.setItem(
+        `mac_kb_base_etag_${bundle.web_version || BUNDLED_WEB_VERSION}`,
+        String(bundle.etag)
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function tryUpdateFromGithubUncached(curVer, curEtag) {
+    try {
+      const commitRes = await fetchJsonFast(
+        `https://api.github.com/repos/${GITHUB_REPO_SLUG}/commits/main`,
+        4500
+      );
+      const sha = commitRes && typeof commitRes.sha === "string" ? commitRes.sha.trim() : "";
+      if (!sha) return false;
+      const shortSha = sha.slice(0, 12);
+      const seenSha = localStorage.getItem("mac_kb_last_gh_sha") || "";
+      if (seenSha === shortSha && curEtag) return false;
+
+      const rawBase = `https://raw.githubusercontent.com/${GITHUB_REPO_SLUG}/${sha}`;
+      const manifest = await fetchJsonFast(`${rawBase}/releases/latest.json`, 4500);
+      if (!manifest) return false;
+
+      const remoteTag = String(manifest.tag_name || "").trim();
       if (
-        (remoteWeb && compareVer(remoteWeb, curVer) > 0) ||
-        (remoteTag && compareVer(remoteTag, curVer) > 0)
+        hasAndroidBridge &&
+        typeof window.AndroidBridge.getAppVersion === "function" &&
+        typeof window.AndroidBridge.startNativeUpdate === "function" &&
+        remoteTag &&
+        compareVer(remoteTag, BUNDLED_WEB_VERSION) > 0
       ) {
-        triggerWhenIdle();
+        // Chỉ gọi bộ cài APK gốc khi thực sự có bản APK mới (tag_name tăng)
+        try {
+          window.AndroidBridge.startNativeUpdate();
+          return true;
+        } catch {
+          // ignore
+        }
+      }
+
+      const remoteWeb = String(manifest.web_version || "").trim();
+      if (!remoteWeb || compareVer(remoteWeb, curVer) < 0) {
+        localStorage.setItem("mac_kb_last_gh_sha", shortSha);
+        return false;
+      }
+      if (compareVer(remoteWeb, curVer) === 0 && seenSha === shortSha) {
+        return false;
+      }
+
+      const [idxTxt, cssTxt, jsTxt] = await Promise.all([
+        fetch(`${rawBase}/static/index.html`, { cache: "no-store" }).then((r) =>
+          r.ok ? r.text() : ""
+        ),
+        fetch(`${rawBase}/static/style.css`, { cache: "no-store" }).then((r) =>
+          r.ok ? r.text() : ""
+        ),
+        fetch(`${rawBase}/static/app.js`, { cache: "no-store" }).then((r) =>
+          r.ok ? r.text() : ""
+        ),
+      ]);
+      if (!idxTxt || !cssTxt || !jsTxt) return false;
+      const mBody = idxTxt.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+      const bodyHtml = (mBody ? mBody[1] : idxTxt)
+        .replace(/<script[^>]*src=["'][^"']*app\.js[^"']*["'][^>]*>\s*<\/script>/gi, "")
+        .trim();
+
+      localStorage.setItem("mac_kb_last_gh_sha", shortSha);
+      if (
+        saveHotBundleToStorage({
+          web_version: remoteWeb,
+          etag: shortSha,
+          body_html: bodyHtml,
+          style_css: cssTxt,
+          app_js: jsTxt,
+        })
+      ) {
+        pendingHotBundleReady = true;
+        applyReadyHotBundleWhenIdle();
+        return true;
       }
     } catch {
-      // ignore offline / transient network errors
+      // ignore
+    }
+    return false;
+  }
+
+  async function pollLiveUpdateManifest() {
+    if (liveUpdateInFlight || pendingHotBundleReady || document.visibilityState !== "visible") {
+      return;
+    }
+    liveUpdateInFlight = true;
+    try {
+      const curVer = getRunningWebVersion();
+      const curEtag = getRunningEtag();
+
+      // 1. Ưu tiên kiểm tra trực tiếp PC (:5051) và MacBook (:5050) qua Wi-Fi nội bộ (~3ms, cập nhật tức thì 0 độ trễ CDN!)
+      const lanBases = buildLanLiveBaseUrls();
+      for (const base of lanBases) {
+        const mf = await fetchJsonFast(`${base}/web-manifest?t=${Date.now()}`, 900);
+        if (!mf || !mf.ok || !mf.etag || !mf.web_version) continue;
+
+        const rVer = String(mf.web_version).trim();
+        const rEtag = String(mf.etag).trim();
+        const verCmp = compareVer(rVer, curVer);
+        if (verCmp < 0) continue;
+
+        // Lần đầu khởi động bản gốc trên máy: ghi nhận mã etag gốc để tránh reload thừa 1 nhịp
+        if (!curEtag && verCmp === 0) {
+          try {
+            localStorage.setItem(`mac_kb_base_etag_${BUNDLED_WEB_VERSION}`, rEtag);
+          } catch {
+            // ignore
+          }
+          return;
+        }
+
+        if (verCmp > 0 || rEtag !== curEtag) {
+          const bundle = await fetchJsonFast(`${base}/web-bundle?t=${Date.now()}`, 3500);
+          if (bundle && bundle.ok && saveHotBundleToStorage(bundle)) {
+            pendingHotBundleReady = true;
+            applyReadyHotBundleWhenIdle();
+            return;
+          }
+        }
+        // Đã kiểm tra thành công máy chủ LAN và đang khớp 100% mã mới nhất
+        return;
+      }
+
+      // 2. Dự phòng khi đi ra ngoài mạng 4G/Tailscale: đọc trực tiếp SHA mới nhất qua GitHub Commits API (vượt cache 5 phút của Fastly CDN)
+      const now = performance.now();
+      if (now - lastGithubCheckAt >= 24000) {
+        lastGithubCheckAt = now;
+        await tryUpdateFromGithubUncached(curVer, curEtag);
+      }
+    } finally {
+      liveUpdateInFlight = false;
     }
   }
 
   setTimeout(() => {
     void pollLiveUpdateManifest();
-  }, 4000);
+  }, 1800);
   setInterval(() => {
     void pollLiveUpdateManifest();
-  }, 22000);
+  }, 4200);
 })();

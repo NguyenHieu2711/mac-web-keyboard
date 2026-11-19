@@ -11,9 +11,11 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import ctypes.util
+import hashlib
 import io
 import json
 import logging
+import re
 import socket
 import ssl
 import struct
@@ -2248,6 +2250,69 @@ app.add_middleware(
 )
 
 
+_CACHED_WEB_BUNDLE: Optional[Dict[str, Any]] = None
+_CACHED_WEB_MTIMES: str = ""
+
+
+def _get_live_web_bundle() -> Dict[str, Any]:
+    global _CACHED_WEB_BUNDLE, _CACHED_WEB_MTIMES
+    idx_p = STATIC_DIR / "index.html"
+    css_p = STATIC_DIR / "style.css"
+    js_p = STATIC_DIR / "app.js"
+    mkey = f"{idx_p.stat().st_mtime_ns}:{css_p.stat().st_mtime_ns}:{js_p.stat().st_mtime_ns}"
+    if _CACHED_WEB_BUNDLE is not None and _CACHED_WEB_MTIMES == mkey:
+        return _CACHED_WEB_BUNDLE
+    idx_txt = idx_p.read_text(encoding="utf-8")
+    css_txt = css_p.read_text(encoding="utf-8")
+    js_txt = js_p.read_text(encoding="utf-8")
+    m_ver = re.search(r'const\s+BUNDLED_WEB_VERSION\s*=\s*"([^"]+)"', js_txt)
+    web_ver = m_ver.group(1) if m_ver else "2.2.4"
+    etag = hashlib.sha1(
+        (idx_txt + "\n" + css_txt + "\n" + js_txt).encode("utf-8")
+    ).hexdigest()[:12]
+    m_body = re.search(r"<body[^>]*>([\s\S]*?)</body>", idx_txt, flags=re.IGNORECASE)
+    raw_body = m_body.group(1) if m_body else idx_txt
+    body_html = re.sub(
+        r'<script[^>]*src=["\'][^"\']*app\.js[^"\']*["\'][^>]*>\s*</script>',
+        "",
+        raw_body,
+        flags=re.IGNORECASE,
+    ).strip()
+    _CACHED_WEB_MTIMES = mkey
+    _CACHED_WEB_BUNDLE = {
+        "ok": True,
+        "web_version": web_ver,
+        "etag": etag,
+        "body_html": body_html,
+        "style_css": css_txt,
+        "app_js": js_txt,
+    }
+    return _CACHED_WEB_BUNDLE
+
+
+@app.get("/web-manifest")
+async def web_manifest() -> dict:
+    b = _get_live_web_bundle()
+    tag_name = "v2.1.4"
+    try:
+        lj = json.loads((BASE_DIR / "releases" / "latest.json").read_text(encoding="utf-8"))
+        if isinstance(lj, dict) and lj.get("tag_name"):
+            tag_name = str(lj["tag_name"])
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "tag_name": tag_name,
+        "web_version": b["web_version"],
+        "etag": b["etag"],
+    }
+
+
+@app.get("/web-bundle")
+async def web_bundle() -> dict:
+    return _get_live_web_bundle()
+
+
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(
@@ -3766,7 +3831,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.2.3",
+        "version": "2.2.4",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,

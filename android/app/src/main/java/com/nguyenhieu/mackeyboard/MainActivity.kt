@@ -777,9 +777,69 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun buildLanUpdateHttpBases(): List<String> {
+        val result = mutableListOf("http://192.168.52.230:5051")
+        val rawHosts = getSavedServerHost()
+        if (rawHosts.isNotBlank()) {
+            rawHosts.split(",")
+                .map { it.trim().replace(Regex("^https?://|^wss?://"), "").substringBefore("/") }
+                .filter { it.isNotEmpty() }
+                .forEach { h ->
+                    val withPort = if (":" in h) h else "$h:5050"
+                    result.add("http://$withPort")
+                }
+        }
+        return result.distinct()
+    }
+
+    private fun resolveLatestGithubCommitSha(): String? {
+        val apiUrl = "https://api.github.com/repos/${BuildConfig.GITHUB_REPO}/commits/main"
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 4500
+                readTimeout = 4500
+                setRequestProperty("Accept", "application/vnd.github+json")
+                setRequestProperty("Cache-Control", "no-cache")
+                setRequestProperty("User-Agent", "MacWebKeyboard-Android/${BuildConfig.VERSION_NAME}")
+            }
+            if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            JSONObject(body).optString("sha", "").trim().ifEmpty { null }
+        } catch (_: Exception) {
+            null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
     private fun fetchRawManifestJson(): JSONObject? {
+        // 1. Ưu tiên đọc trực tiếp từ máy chủ LAN (:5051 trên PC hoặc :5050 trên MacBook — 0ms trễ CDN!)
+        for (base in buildLanUpdateHttpBases()) {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL("$base/web-manifest?t=${System.currentTimeMillis()}").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 900
+                    readTimeout = 1200
+                    setRequestProperty("Cache-Control", "no-cache")
+                }
+                if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                    val body = conn.inputStream.bufferedReader().use { it.readText() }
+                    val j = JSONObject(body)
+                    if (j.optString("web_version", "").isNotEmpty()) return j
+                }
+            } catch (_: Exception) {
+            } finally {
+                conn?.disconnect()
+            }
+        }
+
+        // 2. Dự phòng qua GitHub: dùng SHA mới nhất để không bao giờ dính cache 5 phút của Fastly CDN
+        val ref = resolveLatestGithubCommitSha() ?: "main"
         val rawUrl =
-            "https://raw.githubusercontent.com/${BuildConfig.GITHUB_REPO}/main/releases/latest.json?t=${System.currentTimeMillis()}"
+            "https://raw.githubusercontent.com/${BuildConfig.GITHUB_REPO}/$ref/releases/latest.json?t=${System.currentTimeMillis()}"
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL(rawUrl).openConnection() as HttpURLConnection).apply {
@@ -806,22 +866,62 @@ class MainActivity : AppCompatActivity() {
             tmpDir.deleteRecursively()
             tmpDir.mkdirs()
             val ts = System.currentTimeMillis()
-            for (name in files) {
-                val u = "https://raw.githubusercontent.com/${BuildConfig.GITHUB_REPO}/main/static/$name?t=$ts"
-                var conn: HttpURLConnection? = null
-                try {
-                    conn = (URL(u).openConnection() as HttpURLConnection).apply {
-                        requestMethod = "GET"
-                        connectTimeout = 6000
-                        readTimeout = 8000
-                        setRequestProperty("Cache-Control", "no-cache")
+            var fetchedFromLan = false
+
+            for (base in buildLanUpdateHttpBases()) {
+                var allOk = true
+                for (name in files) {
+                    val pathPart = if (base.endsWith(":5051")) "/static/$name" else "/$name".replace("/index.html", "/")
+                    var conn: HttpURLConnection? = null
+                    try {
+                        conn = (URL("$base$pathPart?t=$ts").openConnection() as HttpURLConnection).apply {
+                            requestMethod = "GET"
+                            connectTimeout = 1200
+                            readTimeout = 2500
+                            setRequestProperty("Cache-Control", "no-cache")
+                        }
+                        if (conn.responseCode != HttpURLConnection.HTTP_OK) {
+                            allOk = false
+                            break
+                        }
+                        val bytes = conn.inputStream.use { it.readBytes() }
+                        if (bytes.isEmpty()) {
+                            allOk = false
+                            break
+                        }
+                        File(tmpDir, name).writeBytes(bytes)
+                    } catch (_: Exception) {
+                        allOk = false
+                        break
+                    } finally {
+                        conn?.disconnect()
                     }
-                    if (conn.responseCode != HttpURLConnection.HTTP_OK) return false
-                    val bytes = conn.inputStream.use { it.readBytes() }
-                    if (bytes.isEmpty()) return false
-                    File(tmpDir, name).writeBytes(bytes)
-                } finally {
-                    conn?.disconnect()
+                }
+                if (allOk) {
+                    fetchedFromLan = true
+                    break
+                }
+            }
+
+            if (!fetchedFromLan) {
+                val ref = resolveLatestGithubCommitSha() ?: "main"
+                for (name in files) {
+                    val u = "https://raw.githubusercontent.com/${BuildConfig.GITHUB_REPO}/$ref/static/$name?t=$ts"
+                    var conn: HttpURLConnection? = null
+                    try {
+                        conn = (URL(u).openConnection() as HttpURLConnection).apply {
+                            requestMethod = "GET"
+                            connectTimeout = 6000
+                            readTimeout = 8000
+                            setRequestProperty("Cache-Control", "no-cache")
+                        }
+                        if (conn.responseCode != HttpURLConnection.HTTP_OK) return false
+                        val bytes = conn.inputStream.use { it.readBytes() }
+                        if (bytes.isEmpty()) return false
+                        File(tmpDir, name).writeBytes(bytes)
+                    } finally {
+                        conn?.disconnect()
+                    }
                 }
             }
             val finalDir = getOtaWebDir()

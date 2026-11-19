@@ -1148,19 +1148,79 @@ function getLanIps() {
   return ips;
 }
 
+const STATIC_DIR = path.resolve(__dirname, '..', 'static');
+const RELEASES_DIR = path.resolve(__dirname, '..', 'releases');
+let cachedWebBundle = null;
+let cachedWebMtimes = '';
+
+function getLiveWebBundle() {
+  const idxPath = path.join(STATIC_DIR, 'index.html');
+  const cssPath = path.join(STATIC_DIR, 'style.css');
+  const jsPath = path.join(STATIC_DIR, 'app.js');
+  const mKey = [
+    fs.statSync(idxPath).mtimeMs,
+    fs.statSync(cssPath).mtimeMs,
+    fs.statSync(jsPath).mtimeMs,
+  ].join(':');
+  if (cachedWebBundle && cachedWebMtimes === mKey) {
+    return cachedWebBundle;
+  }
+  const indexHtml = fs.readFileSync(idxPath, 'utf-8');
+  const styleCss = fs.readFileSync(cssPath, 'utf-8');
+  const appJs = fs.readFileSync(jsPath, 'utf-8');
+  const verMatch = appJs.match(/const\s+BUNDLED_WEB_VERSION\s*=\s*"([^"]+)"/);
+  const webVersion = verMatch ? verMatch[1] : '2.2.4';
+  const etag = crypto
+    .createHash('sha1')
+    .update(indexHtml)
+    .update('\n')
+    .update(styleCss)
+    .update('\n')
+    .update(appJs)
+    .digest('hex')
+    .slice(0, 12);
+  const bodyMatch = indexHtml.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+  const rawBody = bodyMatch ? bodyMatch[1] : indexHtml;
+  const bodyHtml = rawBody
+    .replace(/<script[^>]*src=["'][^"']*app\.js[^"']*["'][^>]*>\s*<\/script>/gi, '')
+    .trim();
+
+  cachedWebMtimes = mKey;
+  cachedWebBundle = {
+    ok: true,
+    web_version: webVersion,
+    etag,
+    body_html: bodyHtml,
+    style_css: styleCss,
+    app_js: appJs,
+  };
+  return cachedWebBundle;
+}
+
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
     return;
   }
-  if (req.url && req.url.startsWith('/health')) {
+  const cleanPath = String(req.url || '/').split('?')[0];
+  if (cleanPath === '/health') {
+    let webVer = '2.2.4';
+    let etag = '';
+    try {
+      const b = getLiveWebBundle();
+      webVer = b.web_version;
+      etag = b.etag;
+    } catch (_) {}
     const payload = JSON.stringify({
       ok: true,
       service: 'pc-rdp-gateway',
-      version: '2.2.3',
+      version: '2.2.4',
+      web_version: webVer,
+      etag,
       hostname: os.hostname(),
       default_user: `${os.hostname()}\\${os.userInfo().username}`,
       port: LISTEN_PORT,
@@ -1169,6 +1229,50 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(payload);
     return;
+  }
+  if (cleanPath === '/web-manifest') {
+    try {
+      const b = getLiveWebBundle();
+      let tagName = 'v2.1.4';
+      try {
+        const lj = JSON.parse(fs.readFileSync(path.join(RELEASES_DIR, 'latest.json'), 'utf-8'));
+        if (lj && lj.tag_name) tagName = lj.tag_name;
+      } catch (_) {}
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true, tag_name: tagName, web_version: b.web_version, etag: b.etag }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: String(err.message || err) }));
+    }
+    return;
+  }
+  if (cleanPath === '/web-bundle') {
+    try {
+      const b = getLiveWebBundle();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(b));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: String(err.message || err) }));
+    }
+    return;
+  }
+  if (cleanPath.startsWith('/static/')) {
+    const rel = path.basename(cleanPath);
+    if (['index.html', 'style.css', 'app.js', 'manifest.json'].includes(rel)) {
+      const fp = path.join(STATIC_DIR, rel);
+      if (fs.existsSync(fp)) {
+        const mimes = {
+          'index.html': 'text/html; charset=utf-8',
+          'style.css': 'text/css; charset=utf-8',
+          'app.js': 'application/javascript; charset=utf-8',
+          'manifest.json': 'application/json; charset=utf-8',
+        };
+        res.writeHead(200, { 'Content-Type': mimes[rel] });
+        res.end(fs.readFileSync(fp));
+        return;
+      }
+    }
   }
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('Windows PC Remote RDP Gateway Running.\n');
