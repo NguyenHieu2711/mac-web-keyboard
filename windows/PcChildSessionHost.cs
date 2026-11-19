@@ -250,9 +250,11 @@ namespace MacWebKeyboard
                             using (cli)
                             using (NetworkStream ns = cli.GetStream())
                             {
+                                string safeErr = (form.LastError ?? "").Replace("\\", "\\\\").Replace("\"", "'").Replace("\r", " ").Replace("\n", " ");
                                 string json = "{\"ok\":true,\"child_enabled\":" + (QueryChildEnabled() ? "true" : "false") +
                                               ",\"child_sid\":" + QueryChildSessionId() +
-                                              ",\"connected\":" + (form.IsConnected ? "true" : "false") + "}\n";
+                                              ",\"connected\":" + (form.IsConnected ? "true" : "false") +
+                                              ",\"last_error\":\"" + safeErr + "\"}\n";
                                 byte[] b = Encoding.UTF8.GetBytes(json);
                                 ns.Write(b, 0, b.Length);
                                 ns.Flush();

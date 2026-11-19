@@ -2,22 +2,28 @@
 chcp 65001 >nul
 net session >nul 2>&1
 if %errorlevel% neq 0 (
-  echo [!] Vui long bam chuot phai vao file nay va chon "Run as administrator" 1 lan duy nhat!
+  echo [!] Vui long bam CHUOT PHAI vao file nay va chon "Run as administrator" 1 lan duy nhat!
   pause
   exit /b 1
 )
-echo [1/3] Dang bat Windows Child Sessions chinh chu (WTSEnableChildSessions)...
-"%~dp0pc_child_host.exe" --enable
+
+echo [1/4] Dang bat Windows Child Sessions chinh chu (WTSEnableChildSessions)...
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class WtsEn { [DllImport(\"wtsapi32.dll\", SetLastError=true)] public static extern bool WTSEnableChildSessions(bool b); [DllImport(\"wtsapi32.dll\", SetLastError=true)] public static extern bool WTSIsChildSessionsEnabled(out bool b); }'; $ok = [WtsEn]::WTSEnableChildSessions($true); $en = $false; [void][WtsEn]::WTSIsChildSessionsEnabled([ref]$en); Write-Host ('WTSEnable=' + $ok + ' Enabled=' + $en); if (-not $en) { exit 1 }"
 if %errorlevel% neq 0 (
-  echo [!] Khong bat duoc Child Sessions. Kiem tra quyen Administrator.
+  echo [!] Khong bat duoc Child Sessions.
   pause
   exit /b 1
 )
-echo [2/3] Dang cap nhat tu khoi dong (Startup) cho Child Session + Gateway...
+
+echo [2/4] Dang cap nhat tu khoi dong (Startup) cho Child Session + Streamer + Gateway...
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install_autostart_pc.ps1"
-echo [3/3] Dang khoi chay Desktop con doc lap 2248x1080 @ 125%% cho Dien thoai...
+
+echo [3/4] Dang khoi chay Desktop con doc lap 2248x1080 @ 125%% cho Dien thoai...
 explorer.exe "%~dp0start_pc_gateway_hidden.vbs"
-timeout /t 3 /nobreak >nul
+timeout /t 5 /nobreak >nul
+
+echo [4/4] Kiem tra trang thai truc tiep:
+powershell.exe -NoProfile -Command "try { Invoke-RestMethod -Uri 'http://127.0.0.1:5051/rdp-mode-check' -TimeoutSec 3 | ConvertTo-Json -Compress } catch { $_.Exception.Message }"
 echo.
-echo [OK] HOAN TAT! Dien thoai gio chay Desktop con doc lap 100%% (2248x1080 @ 125%%), khong chung tuong tac voi MacBook hay PC chinh!
+echo [OK] XONG! Mo lai tab Remote PC tren Dien thoai de kiem tra.
 pause
