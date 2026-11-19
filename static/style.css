@@ -52,16 +52,31 @@ body[data-layout="mac"] .layout-win-only {
 
 body[data-layout="win"] .pad-shell,
 body[data-layout="mac"] .pad-shell,
-body[data-layout="remote"] .pad-shell {
+body[data-layout="remote"] .pad-shell,
+body[data-layout="mac_ext"] .pad-shell {
   display: none !important;
 }
 
 body[data-layout="pad"] .kb-shell,
-body[data-layout="remote"] .kb-shell {
+body[data-layout="remote"] .kb-shell,
+body[data-layout="mac_ext"] .kb-shell {
   display: none !important;
 }
 
-body:not([data-layout="remote"]) .remote-shell {
+body:not([data-layout="remote"]):not([data-layout="mac_ext"]) .remote-shell {
+  display: none !important;
+}
+
+/* Tách biệt hoàn toàn giao diện Màn phụ Mac và Remote PC */
+body[data-layout="mac_ext"] #remote-login-overlay,
+body[data-layout="mac_ext"] #btn-remote-coexist,
+body[data-layout="mac_ext"] #remote-scale-wrap,
+body[data-layout="mac_ext"] #btn-remote-cfg {
+  display: none !important;
+}
+
+body[data-layout="remote"] #btn-mac-ext-display,
+body[data-layout="remote"] #mac-ext-overlay {
   display: none !important;
 }
 
@@ -108,6 +123,7 @@ body:not(.is-lens-off) .kb-ribbon-lens.has-stream .lens-ribbon-hint {
   body[data-layout="win"] .kb-shell,
   body[data-layout="mac"] .kb-shell,
   body[data-layout="remote"] .remote-shell,
+  body[data-layout="mac_ext"] .remote-shell,
   body[data-layout="pad"][data-pad-split="horizontal"] .pad-shell {
     position: fixed;
     top: 50%;

@@ -651,7 +651,7 @@
       <div id="remote-hud-bar" class="remote-hud-bar is-hidden">
         <div class="remote-mode-wrap">
           <button type="button" class="remote-pill-btn remote-mode-btn" data-action="toggle-remote-menu">
-            <span class="remote-btn-content"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span>Remote</span></span>
+            <span class="remote-btn-content"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span id="lbl-remote-mode-btn">Remote</span></span>
             <svg class="hud-caret-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
           </button>
           <div id="remote-mode-menu" class="mode-dropdown-menu remote-dropdown-menu is-hidden">
@@ -777,8 +777,27 @@
 
         <div class="remote-login-actions">
           <button type="button" id="btn-rdp-connect" class="remote-btn-primary">Kết nối</button>
-          <button type="button" id="btn-rdp-ext-display" class="remote-btn-secondary">Màn phụ</button>
           <button type="button" id="btn-rdp-disconnect" class="remote-btn-secondary is-hidden">Ngắt</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hộp trạng thái riêng cho Màn hình phụ MacBook (tách biệt hoàn toàn với Remote PC) -->
+    <div id="mac-ext-overlay" class="remote-login-overlay is-hidden">
+      <div class="remote-login-card">
+        <div class="remote-login-head">
+          <div class="remote-login-title-group">
+            <span class="remote-login-title">Màn phụ MacBook</span>
+            <span class="remote-res-badge">Trái • 1798×864 HiDPI</span>
+          </div>
+          <div class="remote-login-head-actions">
+            <button type="button" id="btn-mac-ext-back" class="remote-head-btn">← Tab</button>
+          </div>
+        </div>
+        <div id="mac-ext-status" class="remote-login-status">Đang kết nối Màn phụ MacBook...</div>
+        <div class="remote-login-actions">
+          <button type="button" id="btn-mac-ext-retry" class="remote-btn-primary">Kết nối lại</button>
+          <button type="button" id="btn-mac-ext-off" class="remote-btn-secondary">Tắt màn phụ</button>
         </div>
       </div>
     </div>
