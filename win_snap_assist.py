@@ -1281,7 +1281,10 @@ class DesktopGridController(Foundation.NSObject):
         self.last_px: Dict[str, Tuple[int, int]] = {}
         self.preview_panel: Optional[AppKit.NSPanel] = None
         self.dragging_desktop = False
+        self.drag_icon: Optional[str] = None
         self.drag_start_pt: Optional[Tuple[float, float]] = None
+        self.grab_offset: Tuple[float, float] = (0.0, 0.0)
+        self.drag_moved = False
 
         self.read_script = Foundation.NSAppleScript.alloc().initWithSource_(
             'tell application "Finder"\n'
@@ -1302,16 +1305,112 @@ class DesktopGridController(Foundation.NSObject):
         # Khởi tạo vị trí ban đầu
         self.snap_desktop_now()
 
-        AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-            AppKit.NSEventMaskLeftMouseDown, self._on_mouse_down
+        # Cài đặt Quartz CGEventTap để lượng tử hóa tọa độ thả chuột (0.000ms trước khi Finder nhận MouseUp)
+        mask = (
+            Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDown)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDragged)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseUp)
         )
-        AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-            AppKit.NSEventMaskLeftMouseDragged, self._on_mouse_dragged
+        self._tap = Quartz.CGEventTapCreate(
+            Quartz.kCGSessionEventTap,
+            Quartz.kCGHeadInsertEventTap,
+            Quartz.kCGEventTapOptionDefault,
+            mask,
+            self._event_tap_cb,
+            None,
         )
-        AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-            AppKit.NSEventMaskLeftMouseUp, self._on_mouse_up
-        )
+        if self._tap is not None:
+            rls = Quartz.CFMachPortCreateRunLoopSource(None, self._tap, 0)
+            Quartz.CFRunLoopAddSource(
+                Quartz.CFRunLoopGetCurrent(), rls, Quartz.kCFRunLoopCommonModes
+            )
+            Quartz.CGEventTapEnable(self._tap, True)
         return self
+
+    def _event_tap_cb(self, proxy, etype, event, refcon):
+        try:
+            if etype in (
+                Quartz.kCGEventTapDisabledByTimeout,
+                Quartz.kCGEventTapDisabledByUserInput,
+            ):
+                if self._tap is not None:
+                    Quartz.CGEventTapEnable(self._tap, True)
+                return event
+
+            loc = Quartz.CGEventGetLocation(event)
+            qx, qy = float(loc.x), float(loc.y)
+
+            if etype == Quartz.kCGEventLeftMouseDown:
+                if self._is_clicking_desktop(qx, qy):
+                    self.drag_start_pt = (qx, qy)
+                    self.dragging_desktop = True
+                    self.drag_moved = False
+                    best_nm = None
+                    best_d = 1e18
+                    for nm, (ix, iy) in self.last_px.items():
+                        if abs(qx - ix) <= 38 and abs(qy - iy) <= 48:
+                            d = (qx - ix) ** 2 + (qy - iy) ** 2
+                            if d < best_d:
+                                best_d = d
+                                best_nm = nm
+                    if best_nm is not None:
+                        ix, iy = self.last_px[best_nm]
+                        self.drag_icon = best_nm
+                        self.grab_offset = (qx - float(ix), qy - float(iy))
+                    else:
+                        self.drag_icon = None
+                        self.grab_offset = (0.0, 0.0)
+                else:
+                    self.dragging_desktop = False
+                    self.drag_icon = None
+                    self.drag_start_pt = None
+                    self.drag_moved = False
+
+            elif etype == Quartz.kCGEventLeftMouseDragged:
+                if self.dragging_desktop and self.drag_start_pt is not None:
+                    if (
+                        abs(qx - self.drag_start_pt[0]) > 5.0
+                        or abs(qy - self.drag_start_pt[1]) > 5.0
+                    ):
+                        self.drag_moved = True
+                    if self.drag_moved and self.drag_icon is not None:
+                        dx, dy = self.grab_offset
+                        c, r = self.to_cell(qx - dx, qy - dy)
+                        gx, gy = self.to_px(c, r)
+                        self._show_preview_at(gx, gy)
+
+            elif etype == Quartz.kCGEventLeftMouseUp:
+                was_drag = self.dragging_desktop and self.drag_moved
+                icon_nm = self.drag_icon
+                dx, dy = self.grab_offset
+                self.dragging_desktop = False
+                self.drag_icon = None
+                self.drag_start_pt = None
+                self.drag_moved = False
+                self._hide_preview()
+
+                if was_drag:
+                    if icon_nm is not None:
+                        tc, tr = self.to_cell(qx - dx, qy - dy)
+                        gx, gy = self.to_px(tc, tr)
+                        snap_pt = Quartz.CGPointMake(
+                            float(gx) + dx, float(gy) + dy
+                        )
+                        drag_ev = Quartz.CGEventCreateMouseEvent(
+                            None,
+                            Quartz.kCGEventLeftMouseDragged,
+                            snap_pt,
+                            Quartz.kCGMouseButtonLeft,
+                        )
+                        if drag_ev is not None:
+                            Quartz.CGEventTapPostEvent(proxy, drag_ev)
+                        Quartz.CGEventSetLocation(event, snap_pt)
+                    Foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                        0.02, self, "snapTimer:", None, False
+                    )
+        except Exception:
+            pass
+        return event
 
     def to_cell(self, x: float, y: float) -> Tuple[int, int]:
         c = max(
@@ -1549,8 +1648,10 @@ class DesktopGridController(Foundation.NSObject):
 def main() -> None:
     app = AppKit.NSApplication.sharedApplication()
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    dgrid = DesktopGridController.alloc().init()
     ctrl = WinSnapAssistController.alloc().init()
-    _ = ctrl
+    ctrl.dgrid = dgrid
+    _ = (ctrl, dgrid)
     app.run()
 
 
