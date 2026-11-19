@@ -1431,8 +1431,33 @@ body.is-lowercase .key-alpha .key-main {
 
 .remote-kvm-cursor.is-hidden,
 .remote-cursor-img.is-hidden,
-.remote-cursor-svg.is-hidden {
+.remote-cursor-svg.is-hidden,
+.remote-touch-ring.is-hidden {
   display: none !important;
+}
+
+.remote-touch-ring {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 36px;
+  height: 36px;
+  margin: -18px 0 0 -18px;
+  border-radius: 50%;
+  border: 2px solid rgba(56, 189, 248, 0.92);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.35);
+  pointer-events: none;
+  z-index: 45;
+  will-change: transform;
+  transition: width 0.12s ease, height 0.12s ease, margin 0.12s ease, border-color 0.12s ease, background-color 0.12s ease;
+}
+
+.remote-touch-ring.is-drag {
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+  border-color: rgba(255, 255, 255, 0.95);
+  background: rgba(56, 189, 248, 0.22);
 }
 
 .remote-cursor-img {

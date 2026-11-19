@@ -4331,9 +4331,11 @@ def _dispatch_parallel_rdp_input(
         elif mtype == "ptr_wheel":
             _activate_mac_pid_if_needed(pid)
             q.CGWarpMouseCursorPosition((sx, sy))
+            now_w = time.monotonic()
             last_wx = float(state.get("last_wheel_sx", -9999.0))
             last_wy = float(state.get("last_wheel_sy", -9999.0))
-            if abs(sx - last_wx) > 2.0 or abs(sy - last_wy) > 2.0:
+            last_wt = float(state.get("last_wheel_ev_at", 0.0))
+            if (now_w - last_wt) > 0.12 or abs(sx - last_wx) > 2.0 or abs(sy - last_wy) > 2.0:
                 state["last_wheel_sx"] = sx
                 state["last_wheel_sy"] = sy
                 mv = q.CGEventCreateMouseEvent(
@@ -4341,11 +4343,12 @@ def _dispatch_parallel_rdp_input(
                 )
                 q.CGEventSetIntegerValueField(mv, q.kCGEventSourceUserData, 0x4D4B4231)
                 q.CGEventPost(q.kCGHIDEventTap, mv)
+            state["last_wheel_ev_at"] = now_w
 
             acc_x = float(state.get("wheel_rem_x", 0.0)) + float(data.get("dx", 0.0))
             acc_y = float(state.get("wheel_rem_y", 0.0)) + float(data.get("dy", 0.0))
-            wx_d = int(acc_x) if abs(acc_x) >= 6.0 else 0
-            wy_d = int(acc_y) if abs(acc_y) >= 6.0 else 0
+            wx_d = int(round(acc_x)) if abs(acc_x) >= 1.0 else 0
+            wy_d = int(round(acc_y)) if abs(acc_y) >= 1.0 else 0
             state["wheel_rem_x"] = acc_x - wx_d
             state["wheel_rem_y"] = acc_y - wy_d
             if wx_d == 0 and wy_d == 0:
@@ -4354,6 +4357,8 @@ def _dispatch_parallel_rdp_input(
             ev = q.CGEventCreateScrollWheelEvent(
                 injector._event_source, q.kCGScrollEventUnitPixel, 2, wy_d, wx_d
             )
+            # kCGScrollWheelEventIsContinuous = 88: chuẩn Trackpad macOS (đi xuyên qua Mos và Microsoft Remote Desktop mượt)
+            q.CGEventSetIntegerValueField(ev, 88, 1)
             try:
                 q.CGEventSetLocation(ev, (sx, sy))
             except Exception:
@@ -4787,6 +4792,8 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
                     q.CGWarpMouseCursorPosition(rpos)
                 except Exception:
                     pass
+                state.pop("last_wheel_sx", None)
+                state.pop("last_wheel_sy", None)
                 state["touch_busy"] = False
 
     async def _cursor_sender() -> None:
@@ -4798,10 +4805,12 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
         last_ry = -1.0
         try:
             while running:
-                # Tự trả con trỏ về MacBook sau khi ngón tay dừng cuộn trên màn phụ (~160ms)
+                # Tự trả con trỏ về MacBook sau khi ngón tay dừng cuộn trên màn phụ (~450ms để không cắt giữa chừng quán tính)
                 wpos = input_state.get("wheel_restore_pos")
-                if wpos is not None and (time.monotonic() - float(input_state.get("last_wheel_at", 0.0))) >= 0.16:
+                if wpos is not None and (time.monotonic() - float(input_state.get("last_wheel_at", 0.0))) >= 0.45:
                     input_state.pop("wheel_restore_pos", None)
+                    input_state.pop("last_wheel_sx", None)
+                    input_state.pop("last_wheel_sy", None)
                     try:
                         q.CGWarpMouseCursorPosition(wpos)
                     except Exception:

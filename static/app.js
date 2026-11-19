@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.16";
+  const BUNDLED_BOOT_VER = "2.3.27";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -2420,11 +2420,13 @@
   let rdpActiveEngine = "none"; // "none" | "parallel" | "native"
   let macExtWs = null;
   let macExtManualStop = false;
+  const remoteTouchRing = document.getElementById("remote-touch-ring");
   let macExtCursorVisible = false;
-  let macExtTouchEnabled = true;
+  let macExtTouchMode = "touch"; // "touch" (Cảm ứng) | "pointer" (Trackpad) | "off" (Khóa chạm)
   try {
     const savedExtTouch = localStorage.getItem("mac_kb_mac_ext_touch_v1");
-    if (savedExtTouch === "0") macExtTouchEnabled = false;
+    if (savedExtTouch === "0" || savedExtTouch === "off") macExtTouchMode = "off";
+    else if (savedExtTouch === "pointer") macExtTouchMode = "pointer";
   } catch {
     // ignore
   }
@@ -3779,10 +3781,15 @@
 
   function syncMacExtTouchUI() {
     if (btnMacExtTouch) {
-      btnMacExtTouch.classList.toggle("is-active", macExtTouchEnabled);
+      btnMacExtTouch.classList.toggle("is-active", macExtTouchMode !== "off");
     }
     if (lblMacExtTouch) {
-      lblMacExtTouch.textContent = macExtTouchEnabled ? "Cảm ứng" : "Khóa chạm";
+      lblMacExtTouch.textContent =
+        macExtTouchMode === "pointer"
+          ? "Trackpad"
+          : macExtTouchMode === "off"
+            ? "Khóa chạm"
+            : "Cảm ứng";
     }
   }
 
@@ -4734,8 +4741,21 @@
       rScrollVelY = 0;
     };
 
+    const showTouchRing = (cx, cy, isDrag = false) => {
+      if (!remoteTouchRing) return;
+      remoteTouchRing.style.transform = `translate3d(${Math.round(cx)}px, ${Math.round(cy)}px, 0)`;
+      remoteTouchRing.classList.toggle("is-drag", Boolean(isDrag));
+      remoteTouchRing.classList.remove("is-hidden");
+    };
+
+    const hideTouchRing = () => {
+      if (!remoteTouchRing) return;
+      remoteTouchRing.classList.add("is-hidden");
+      remoteTouchRing.classList.remove("is-drag");
+    };
+
     const flushAccumulatedScroll = (anchorX = null, anchorY = null) => {
-      const minStep = rdpActiveEngine === "parallel" ? 6 : 3;
+      const minStep = 2;
       const py = Math.trunc(rScrollAccY);
       const px = Math.trunc(rScrollAccX);
       let sdx = 0;
@@ -4780,8 +4800,9 @@
       rScrollInertiaRaf = requestAnimationFrame(step);
     };
 
-    const isPointerModeActive = () => kbLayout !== "mac_ext" && rdpInputMode === "pointer";
-    const isMacExtTouchBlocked = () => kbLayout === "mac_ext" && !macExtTouchEnabled;
+    const isPointerModeActive = () =>
+      kbLayout === "mac_ext" ? macExtTouchMode === "pointer" : rdpInputMode === "pointer";
+    const isMacExtTouchBlocked = () => kbLayout === "mac_ext" && macExtTouchMode === "off";
 
     remoteViewport.addEventListener(
       "touchstart",
@@ -4799,6 +4820,7 @@
 
         if (e.touches.length >= 2) {
           clearRdpLongTimer();
+          hideTouchRing();
           if (rTouchMode === "none") {
             rStartAt = now;
             rTotalMoved = 0;
@@ -4848,22 +4870,28 @@
           rLongFired = false;
           rScrollAccX = 0;
           rScrollAccY = 0;
+          hideTouchRing();
           const nearPrevTap =
-            Math.hypot(t.clientX - rLastTapClientX, t.clientY - rLastTapClientY) < 34;
+            Math.hypot(t.clientX - rLastTapClientX, t.clientY - rLastTapClientY) < 36;
           rPendingDoubleTapDrag =
             now - rLastTapAt < 290 && (isPointerModeActive() || nearPrevTap);
           clearRdpLongTimer();
 
-          const holdDelay = isPointerModeActive() ? 235 : 265;
+          const holdDelay = isPointerModeActive() ? 235 : 280;
+          const holdMaxMove = isPointerModeActive() ? 8 : 11;
           rLongTimer = setTimeout(() => {
             rLongTimer = null;
-            if (rTouchMode === "single" && !rMoved && rTotalMoved < 7) {
+            if (rTouchMode === "single" && !rMoved && rTotalMoved < holdMaxMove) {
               rLongFired = true;
-              triggerHaptic(15);
+              triggerHaptic(16);
               if (isPointerModeActive()) {
-                // Ở chế độ Dùng chuột: ấn giữ 1 ngón -> khóa nút chuột trái để bôi đen / kéo cửa sổ ngay tại đầu mũi tên!
+                // Ở chế độ Trackpad: ấn giữ 1 ngón -> khóa nút chuột trái để bôi đen / kéo cửa sổ ngay tại đầu mũi tên!
                 rTouchMode = "drag";
+                showTouchRing(rLastX, rLastY, true);
                 rdpSendMouseDown(kvmX, kvmY, 0, 1);
+              } else {
+                // Ở chế độ Cảm ứng: hiện vòng sáng báo đã khóa ấn giữ (nhấc tay = chuột phải; giữ và kéo = bôi đen / kéo thả!)
+                showTouchRing(rLastX, rLastY, false);
               }
             }
           }, holdDelay);
@@ -4896,16 +4924,10 @@
           rTwoLastMidY = midY;
           rTotalMoved += Math.hypot(dMidX, dMidY);
 
-          // Ở chế độ Cảm ứng (`touch` hoặc `mac_ext`): 1 ngón cuộn nội dung, 2 ngón Pinch-Zoom + Pan mượt!
-          if (!isPointerModeActive()) {
-            rPinching = true;
-            const targetZoom = rPinchStartZoom * (dist / rPinchStartDist);
-            zoomRdpAtClientPoint(targetZoom, midX, midY, dMidX, dMidY);
-            return;
-          }
-
-          // Ở chế độ Dùng chuột (`pointer`): 2 ngón chụm/xòe -> Pinch-Zoom đúng tâm; 2 ngón song song -> Cuộn Trackpad
-          if (!rPinching && Math.abs(dist - rPinchStartDist) >= 18) {
+          // Hỗ trợ song song ở CẢ Cảm ứng LẪN Trackpad:
+          // - Chụm/xòe 2 ngón (|Δdist| >= 22px) -> Pinch-Zoom + Pan
+          // - Vuốt 2 ngón song song -> Cuộn Trackpad mượt dọc/ngang + quán tính!
+          if (!rPinching && Math.abs(dist - rPinchStartDist) >= 22) {
             rPinching = true;
             rPinchStartDist = dist;
             rPinchStartZoom = rdpZoom;
@@ -4914,7 +4936,7 @@
             const targetZoom = rPinchStartZoom * (dist / rPinchStartDist);
             zoomRdpAtClientPoint(targetZoom, midX, midY, dMidX, dMidY);
           } else {
-            const gain = rdpActiveEngine === "parallel" ? 2.0 : 2.5;
+            const gain = isStreamInputEngine() ? 2.2 : 2.6;
             const stepX = dMidX * gain * 0.85;
             const stepY = dMidY * gain;
             rScrollAccY += stepY;
@@ -4922,7 +4944,11 @@
             const normDt = 16.67 / dt;
             rScrollVelY = rScrollVelY * 0.45 + stepY * normDt * 0.55;
             rScrollVelX = rScrollVelX * 0.45 + stepX * normDt * 0.55;
-            flushAccumulatedScroll(null, null);
+            if (isPointerModeActive()) {
+              flushAccumulatedScroll(null, null);
+            } else {
+              flushAccumulatedScroll(rScrollAnchorX, rScrollAnchorY);
+            }
           }
           return;
         }
@@ -4944,7 +4970,7 @@
           rTotalMoved += stepDist;
           const distFromStart = Math.hypot(t.clientX - rStartX, t.clientY - rStartY);
 
-          // ── NHÁNH A: CHẾ ĐỘ DÙNG CHUỘT (`pointer` — Bàn rê Trackpad toàn màn hình) ──
+          // ── NHÁNH A: CHẾ ĐỘ TRACKPAD (`pointer` — Bàn rê chuột toàn màn hình) ──
           if (isPointerModeActive()) {
             if (!rMoved && rTotalMoved >= 4.5) {
               rMoved = true;
@@ -4953,6 +4979,7 @@
                 rPendingDoubleTapDrag = false;
                 rTouchMode = "drag";
                 triggerHaptic(12);
+                showTouchRing(t.clientX, t.clientY, true);
                 rdpSendMouseDown(kvmX, kvmY, 0, 1);
               }
             }
@@ -4971,14 +4998,18 @@
             const gain = computeMacTrackpadGain(rSmoothedVel) * baseScale;
             kvmX = Math.max(0, Math.min(cw - 1, kvmX + dx * gain));
             kvmY = Math.max(0, Math.min(ch - 1, kvmY + dy * gain));
+            if (rTouchMode === "drag") {
+              showTouchRing(t.clientX, t.clientY, true);
+            }
             showLocalRemoteCursor(kvmX, kvmY, 1600);
             autoPanViewportForCursor();
             rdpSendMouseMove(kvmX, kvmY);
             return;
           }
 
-          // ── NHÁNH B: CHẾ ĐỘ CHẠM CẢM ỨNG (`touch` — Vuốt 1 ngón = Cuộn mượt tự nhiên; Ấn giữ + kéo = Bôi đen / Kéo thả) ──
-          if (!rMoved && distFromStart > 6.5) {
+          // ── NHÁNH B: CHẾ ĐỘ CẢM ỨNG (`touch` — Vuốt 1 ngón = Cuộn mượt; Ấn giữ + kéo = Bôi đen / Kéo thả) ──
+          const moveThreshold = rLongFired ? 6.5 : 10.5;
+          if (!rMoved && distFromStart > moveThreshold) {
             rMoved = true;
             clearRdpLongTimer();
             const startPt = clientToRemoteCoords(rStartX, rStartY);
@@ -4986,9 +5017,11 @@
               rPendingDoubleTapDrag = false;
               rTouchMode = "drag";
               if (!rLongFired) triggerHaptic(12);
+              showTouchRing(t.clientX, t.clientY, true);
               rdpSendMouseDown(startPt.x, startPt.y, 0, 1);
             } else {
-              // Vuốt 1 ngón trực tiếp -> Cuộn nội dung ngay tại vùng dưới ngón tay (KHÔNG giữ chuột trái gây bôi đen!)
+              // Vuốt 1 ngón trực tiếp -> Cuộn nội dung ngay tại vùng dưới ngón tay
+              hideTouchRing();
               rTouchMode = "scroll";
               rScrollAnchorX = startPt.x;
               rScrollAnchorY = startPt.y;
@@ -5000,10 +5033,11 @@
           }
 
           if (rTouchMode === "drag") {
+            showTouchRing(t.clientX, t.clientY, true);
             const pt = clientToRemoteCoords(t.clientX, t.clientY);
             rdpSendMouseMove(pt.x, pt.y);
           } else if (rTouchMode === "scroll") {
-            const gain = isStreamInputEngine() ? 2.15 : 2.75;
+            const gain = isStreamInputEngine() ? 2.25 : 2.75;
             const stepX = dx * gain * 0.85;
             const stepY = dy * gain;
             rScrollAccY += stepY;
@@ -5020,7 +5054,6 @@
 
     const handleRdpTouchEnd = (e) => {
       if (e.touches.length > 0) {
-        // Nếu người dùng vừa nhấc 1 trong 2 ngón khi đang zoom -> cập nhật điểm mốc tránh nhảy khi đặt lại ngón thứ 2
         if (rTouchMode === "two" && e.touches.length === 1) {
           rLastX = e.touches[0].clientX;
           rLastY = e.touches[0].clientY;
@@ -5028,6 +5061,7 @@
         return;
       }
       clearRdpLongTimer();
+      hideTouchRing();
       if (!isRemoteConnected() || isMacExtTouchBlocked()) {
         rTouchMode = "none";
         return;
@@ -5040,7 +5074,7 @@
         applyRdpStageTransform();
       }
 
-      // ── KẾT THÚC CHẠM Ở CHẾ ĐỘ DÙNG CHUỘT (`pointer`) ──
+      // ── KẾT THÚC CHẠM Ở CHẾ ĐỘ TRACKPAD (`pointer`) ──
       if (isPointerModeActive()) {
         rPendingDoubleTapDrag = false;
         if (rTouchMode === "drag") {
@@ -5053,7 +5087,7 @@
           rTouchMode = "none";
           return;
         }
-        if (rTotalMoved < 8.5 && duration < 280) {
+        if (rTotalMoved < 10 && duration < 290) {
           if (rMaxFingers >= 3) {
             triggerHaptic(10);
             rdpSendMouseClick(kvmX, kvmY, 1, 1);
@@ -5076,7 +5110,7 @@
         return;
       }
 
-      // ── KẾT THÚC CHẠM Ở CHẾ ĐỘ CẢM ỨNG TRỰC TIẾP (`touch`) ──
+      // ── KẾT THÚC CHẠM Ở CHẾ ĐỘ CẢM ỨNG (`touch`) ──
       rPendingDoubleTapDrag = false;
       if (rTouchMode === "drag") {
         const pt = clientToRemoteCoords(rLastX, rLastY);
@@ -5093,10 +5127,18 @@
         return;
       }
 
-      if (rTouchMode === "two" && rMaxFingers === 2 && rTotalMoved < 10 && duration < 280) {
-        triggerHaptic(10);
-        const midPt = clientToRemoteCoords(rTwoLastMidX, rTwoLastMidY);
-        rdpSendMouseClick(midPt.x, midPt.y, 2, 1);
+      if (rTouchMode === "two") {
+        if (rTotalMoved < 12 && duration < 290) {
+          triggerHaptic(10);
+          const midPt = clientToRemoteCoords(rTwoLastMidX, rTwoLastMidY);
+          if (rMaxFingers >= 3) {
+            rdpSendMouseClick(midPt.x, midPt.y, 1, 1);
+          } else {
+            rdpSendMouseClick(midPt.x, midPt.y, 2, 1);
+          }
+        } else if (!rPinching && now - rPrevAt < 75 && Math.hypot(rScrollVelX, rScrollVelY) > 2.2) {
+          startRdpScrollInertia(rScrollVelX, rScrollVelY, rScrollAnchorX, rScrollAnchorY);
+        }
         rTouchMode = "none";
         return;
       }
@@ -5108,7 +5150,7 @@
         } else if (!rMoved) {
           if (
             now - rLastTapAt < 320 &&
-            Math.hypot(rLastX - rLastTapClientX, rLastY - rLastTapClientY) < 30
+            Math.hypot(rLastX - rLastTapClientX, rLastY - rLastTapClientY) < 32
           ) {
             triggerHaptic(9);
             rdpSendMouseClick(rLastTapRx, rLastTapRy, 0, 2);
@@ -5335,13 +5377,21 @@
     btnMacExtTouch.addEventListener("click", (e) => {
       e.stopPropagation();
       triggerHaptic(8);
-      macExtTouchEnabled = !macExtTouchEnabled;
+      macExtTouchMode =
+        macExtTouchMode === "touch"
+          ? "pointer"
+          : macExtTouchMode === "pointer"
+            ? "off"
+            : "touch";
       try {
-        localStorage.setItem("mac_kb_mac_ext_touch_v1", macExtTouchEnabled ? "1" : "0");
+        localStorage.setItem("mac_kb_mac_ext_touch_v1", macExtTouchMode);
       } catch {
         // ignore
       }
       syncMacExtTouchUI();
+      if (macExtTouchMode === "pointer" && isMacExtConnected()) {
+        showLocalRemoteCursor(kvmX, kvmY, 2200);
+      }
     });
   }
 
@@ -5634,7 +5684,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.16";
+  const BUNDLED_WEB_VERSION = "2.3.27";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
