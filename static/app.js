@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.11";
+  const BUNDLED_BOOT_VER = "2.3.12";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -3990,7 +3990,7 @@
               if (!rdpManualDisconnect && kbLayout === "remote") {
                 // Tự chuyển mượt giữa PC chính <-> MacBook khi đổi máy mà không làm thoát Remote trên Điện thoại!
                 void (async () => {
-                  for (const waitMs of [180, 520]) {
+                  for (const waitMs of [250, 800, 1600]) {
                     await new Promise((r) => setTimeout(r, waitMs));
                     if (rdpManualDisconnect || kbLayout !== "remote" || isRemoteConnected() || rdpConnecting) return;
                     const chk = await checkMacParallelAvailable();
@@ -5634,7 +5634,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.11";
+  const BUNDLED_WEB_VERSION = "2.3.12";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();

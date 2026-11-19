@@ -3359,10 +3359,11 @@ _ACTIVE_RDP_3389_PIDS: Set[int] = set()
 _ACTIVE_RDP_PEER_IPS: Set[str] = set()
 _RDP_WATCHER_STARTED: bool = False
 _RDP_WATCHER_READY: bool = False
+_RDP_EMPTY_STREAK: int = 0
 
 
 def _refresh_active_rdp_pids_once() -> None:
-    global _ACTIVE_RDP_3389_PIDS, _ACTIVE_RDP_PEER_IPS, _RDP_WATCHER_READY
+    global _ACTIVE_RDP_3389_PIDS, _ACTIVE_RDP_PEER_IPS, _RDP_WATCHER_READY, _RDP_EMPTY_STREAK
     if not IS_MACOS:
         return
     my_pid = None
@@ -3404,11 +3405,17 @@ def _refresh_active_rdp_pids_once() -> None:
             break
         except Exception:
             return
-    _ACTIVE_RDP_3389_PIDS = found_pids
-    if found_ips:
-        _ACTIVE_RDP_PEER_IPS = found_ips
-    elif not found_pids:
-        _ACTIVE_RDP_PEER_IPS = set()
+    if found_pids:
+        _RDP_EMPTY_STREAK = 0
+        _ACTIVE_RDP_3389_PIDS = found_pids
+        if found_ips:
+            _ACTIVE_RDP_PEER_IPS = found_ips
+    else:
+        # Chống tụt đột ngột khi lsof chậm/giật 1-2 nhịp trên macOS: chỉ xóa sau 3 nhịp trống liên tiếp (~2.7s)
+        _RDP_EMPTY_STREAK += 1
+        if _RDP_EMPTY_STREAK >= 3:
+            _ACTIVE_RDP_3389_PIDS = set()
+            _ACTIVE_RDP_PEER_IPS = set()
     _RDP_WATCHER_READY = True
 
 
@@ -4075,15 +4082,22 @@ def find_mac_rdp_window() -> Optional[Dict[str, Any]]:
                 if ww < 480.0 or wh < 320.0:
                     continue
                 pid = int(w.get("kCGWindowOwnerPID", 0) or 0)
-                if pid <= 0 or not _pid_has_established_rdp_socket(pid):
+                if pid <= 0:
                     continue
-
                 w_name = str(w.get("kCGWindowName", "") or "").strip()
+                low_name = w_name.lower()
                 is_launcher = (
-                    (w_name.lower() in _RDP_LAUNCHER_TITLES) if w_name else False
+                    (low_name in _RDP_LAUNCHER_TITLES or low_name in ("edit pc", "settings", "preferences", "add pc"))
+                    if low_name
+                    else False
                 )
+                has_tcp = _pid_has_established_rdp_socket(pid)
+                # Nếu lsof giật 1 nhịp chưa kịp bắt TCP :3389, vẫn nhận cửa sổ phiên lớn có tên thật (VD: "PC Hieu")
+                if not has_tcp and (is_launcher or not w_name or ww < 600.0 or wh < 360.0):
+                    continue
                 on_screen = bool(w.get("kCGWindowIsOnscreen", False))
                 score = (
+                    1 if has_tcp else 0,
                     0 if is_launcher else 1,
                     1 if on_screen else 0,
                     ww * wh,
@@ -4434,7 +4448,7 @@ async def rdp_parallel_ws(ws: WebSocket) -> None:
                     else:
                         if missing_since is None:
                             missing_since = now
-                        elif (now - missing_since) >= 1.3:
+                        elif (now - missing_since) >= 3.5:
                             await ws.send_text('{"type":"parallel_ended"}')
                             break
                         await asyncio.sleep(0.15)
@@ -4813,7 +4827,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.3.11",
+        "version": "2.3.12",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
