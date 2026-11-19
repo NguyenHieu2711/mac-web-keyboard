@@ -3481,12 +3481,13 @@ def _capture_mac_rdp_jpeg_packet(win_info: Dict[str, Any]) -> Optional[bytes]:
                 "kCGImageDestinationImageMaxPixelSize",
                 "kCGImageDestinationImageMaxPixelSize",
             )
-            enc_opts = {qual_key: 0.88}
+            # Giữ nguyên 100% độ phân giải Retina gốc (3024x1888, không hạ xuống 2400) + JPEG 0.92 nét căng không vỡ màu chữ
+            enc_opts = {qual_key: 0.92}
             out_w, out_h = img_w, img_h
-            if img_w > 2560:
-                enc_opts[max_px_key] = 2400
-                out_w = 2400
-                out_h = max(1, int(round(img_h * 2400.0 / img_w)))
+            if img_w > 3400:
+                enc_opts[max_px_key] = 3200
+                out_w = 3200
+                out_h = max(1, int(round(img_h * 3200.0 / img_w)))
             q.CGImageDestinationAddImage(dest, cg_img, enc_opts)
             if not q.CGImageDestinationFinalize(dest):
                 return None
@@ -3831,7 +3832,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.2.4",
+        "version": "2.2.5",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,

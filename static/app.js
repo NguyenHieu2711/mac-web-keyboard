@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.2.4";
+  const BUNDLED_BOOT_VER = "2.2.5";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -2426,10 +2426,14 @@
     if (remoteScaleMenu) remoteScaleMenu.classList.add("is-hidden");
   }
 
-  function setRemoteStageAspect() {
-    // Cố định khung điện thoại theo đúng tỉ lệ chuẩn 2248×1080 của điện thoại, tuyệt đối không co bóp theo tỉ lệ màn hình Mac!
+  function setRemoteStageAspect(w, h) {
     if (!remoteStage) return;
-    remoteStage.style.aspectRatio = `${RDP_TARGET_W} / ${RDP_TARGET_H}`;
+    const sw = w > 0 ? w : remoteCanvas ? remoteCanvas.width || RDP_TARGET_W : RDP_TARGET_W;
+    const sh = h > 0 ? h : remoteCanvas ? remoteCanvas.height || RDP_TARGET_H : RDP_TARGET_H;
+    const ratio = sw / Math.max(1, sh);
+    // Phủ kín 100% màn hình điện thoại (không viền đen 2 bên) NHƯNG giữ nguyên tỉ lệ gốc 1:1 của nguồn ảnh để chữ tuyệt đối KHÔNG bị bè ngang!
+    remoteStage.style.setProperty("--rdp-aspect", ratio.toFixed(5));
+    remoteStage.style.aspectRatio = "";
     applyRdpStageTransform();
     updateOverlayCursorVisual();
   }
@@ -2596,12 +2600,22 @@
     syncRemoteScaleUI();
   }
 
+  function isRemoteStageOverflowing() {
+    if (!remoteViewport || !remoteStage) return false;
+    const vw = remoteViewport.clientWidth || 1;
+    const vh = remoteViewport.clientHeight || 1;
+    return remoteStage.offsetWidth > vw + 2 || remoteStage.offsetHeight > vh + 2;
+  }
+
   function clampRdpPan() {
-    if (!remoteViewport || !remoteStage || rdpZoom <= 1.005) {
+    if (!remoteViewport || !remoteStage) return;
+    if (rdpZoom <= 1.005) {
       rdpZoom = 1.0;
-      rdpPanX = 0;
-      rdpPanY = 0;
-      return;
+      if (!isRemoteStageOverflowing()) {
+        rdpPanX = 0;
+        rdpPanY = 0;
+        return;
+      }
     }
     const vw = remoteViewport.clientWidth || 1;
     const vh = remoteViewport.clientHeight || 1;
@@ -2624,14 +2638,19 @@
   function applyRdpStageTransform() {
     if (!remoteStage) return;
     clampRdpPan();
-    if (rdpZoom <= 1.005) {
+    const hasPan = Math.abs(rdpPanX) > 0.4 || Math.abs(rdpPanY) > 0.4;
+    if (rdpZoom <= 1.005 && !hasPan) {
       remoteStage.style.transform = "";
       if (btnRemoteZoomReset) btnRemoteZoomReset.classList.add("is-hidden");
     } else {
       remoteStage.style.transform = `translate3d(${rdpPanX.toFixed(1)}px, ${rdpPanY.toFixed(1)}px, 0) scale(${rdpZoom.toFixed(3)})`;
       if (btnRemoteZoomReset) {
-        btnRemoteZoomReset.textContent = `${Math.round(rdpZoom * 100)}%`;
-        btnRemoteZoomReset.classList.remove("is-hidden");
+        if (rdpZoom > 1.01) {
+          btnRemoteZoomReset.textContent = `${Math.round(rdpZoom * 100)}%`;
+          btnRemoteZoomReset.classList.remove("is-hidden");
+        } else {
+          btnRemoteZoomReset.classList.add("is-hidden");
+        }
       }
     }
   }
@@ -2676,7 +2695,9 @@
   }
 
   function autoPanViewportForCursor() {
-    if (!remoteViewport || !remoteCanvas || rdpZoom <= 1.01) return;
+    if (!remoteViewport || !remoteCanvas || (rdpZoom <= 1.01 && !isRemoteStageOverflowing())) {
+      return;
+    }
     const rect = remoteCanvas.getBoundingClientRect();
     const vw = remoteViewport.clientWidth || 1;
     const vh = remoteViewport.clientHeight || 1;
@@ -4515,8 +4536,6 @@
       const duration = now - rStartAt;
       if (rdpZoom > 1.0 && rdpZoom < 1.02) {
         rdpZoom = 1.0;
-        rdpPanX = 0;
-        rdpPanY = 0;
         applyRdpStageTransform();
       }
 
@@ -5080,7 +5099,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.2.4";
+  const BUNDLED_WEB_VERSION = "2.2.5";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
