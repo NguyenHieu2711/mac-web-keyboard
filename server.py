@@ -4568,10 +4568,10 @@ async def mac_virtual_display_diag() -> dict:
                         mrd_bin = "/Applications/Windows App.app/Contents/MacOS/Windows App"
                     if Path(mrd_bin).exists():
                         rc_cli = subprocess.run(
-                            [mrd_bin, "--script", "bookmark", "list"],
+                            [mrd_bin, "--script", "bookmark", "write", "help"],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5,
                         )
-                        out["mrd_cli_list"] = ((rc_cli.stdout or "") + "\n" + (rc_cli.stderr or "")).strip()[:800]
+                        out["mrd_cli_list"] = ((rc_cli.stdout or "") + "\n" + (rc_cli.stderr or "")).strip()[1800:4800]
                 except Exception as me:
                     out["mrd_bookmarks_err"] = str(me)[:120]
                 out["displays"] = disps
