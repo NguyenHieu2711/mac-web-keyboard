@@ -6184,23 +6184,30 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                 if _click_menu_item(("connections", "connection"), "connect"):
                     launched = True
                 elif q is not None:
-                    # Bấm vào góc trên-trái của thẻ (tránh nút bút chì Edit ở góc dưới-phải) rồi gọi Connect / double-click
-                    cx = bx + min(42.0, bw * 0.35)
-                    cy = by + min(24.0, bh * 0.45)
+                    # Nếu bel là nhãn chữ mỏng (bh < 32), tâm ảnh thu nhỏ của thẻ PC nằm ngay phía trên nhãn ~36px
+                    cx = bx + bw * 0.5
+                    cy = (by - 36.0) if (bh < 32.0 and by > 120.0) else (by + min(32.0, bh * 0.4))
                     orig_ev = q.CGEventCreate(None)
                     orig_pt = q.CGEventGetLocation(orig_ev) if orig_ev is not None else None
-                    for clk in (1, 2):
-                        d_ev = q.CGEventCreateMouseEvent(injector._event_source, q.kCGEventLeftMouseDown, (cx, cy), q.kCGMouseButtonLeft)
-                        u_ev = q.CGEventCreateMouseEvent(injector._event_source, q.kCGEventLeftMouseUp, (cx, cy), q.kCGMouseButtonLeft)
-                        q.CGEventSetIntegerValueField(d_ev, q.kCGMouseEventClickState, clk)
-                        q.CGEventSetIntegerValueField(u_ev, q.kCGMouseEventClickState, clk)
-                        q.CGEventPost(q.kCGHIDEventTap, d_ev)
-                        q.CGEventPost(q.kCGHIDEventTap, u_ev)
-                        if clk == 1:
-                            time.sleep(0.06)
-                            if _click_menu_item(("connections", "connection"), "connect"):
-                                launched = True
-                                break
+                    # 1) Click đơn chọn thẻ -> chờ 0.14s cho Cocoa cập nhật trạng thái chọn -> bấm menu Connections -> Connect
+                    d1 = q.CGEventCreateMouseEvent(None, q.kCGEventLeftMouseDown, (cx, cy), q.kCGMouseButtonLeft)
+                    u1 = q.CGEventCreateMouseEvent(None, q.kCGEventLeftMouseUp, (cx, cy), q.kCGMouseButtonLeft)
+                    q.CGEventSetIntegerValueField(d1, q.kCGMouseEventClickState, 1)
+                    q.CGEventSetIntegerValueField(u1, q.kCGMouseEventClickState, 1)
+                    q.CGEventPost(q.kCGHIDEventTap, d1)
+                    q.CGEventPost(q.kCGHIDEventTap, u1)
+                    time.sleep(0.15)
+                    if not _click_menu_item(("connections", "connection"), "connect"):
+                        # 2) Dự phòng: Double-click liền mạch không ngắt quãng ngay tâm thẻ PC
+                        for clk in (1, 2):
+                            de = q.CGEventCreateMouseEvent(None, q.kCGEventLeftMouseDown, (cx, cy), q.kCGMouseButtonLeft)
+                            ue = q.CGEventCreateMouseEvent(None, q.kCGEventLeftMouseUp, (cx, cy), q.kCGMouseButtonLeft)
+                            q.CGEventSetIntegerValueField(de, q.kCGMouseEventClickState, clk)
+                            q.CGEventSetIntegerValueField(ue, q.kCGMouseEventClickState, clk)
+                            q.CGEventPost(q.kCGHIDEventTap, de)
+                            q.CGEventPost(q.kCGHIDEventTap, ue)
+                            if clk == 1:
+                                time.sleep(0.03)
                     if orig_pt is not None:
                         try:
                             q.CGWarpMouseCursorPosition((float(orig_pt.x), float(orig_pt.y)))
