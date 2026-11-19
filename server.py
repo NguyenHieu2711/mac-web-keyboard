@@ -4747,8 +4747,9 @@ async def mac_virtual_display_toggle(req: Request) -> dict:
             mac_vdisp.start(logical_w=logical_w, logical_h=logical_h, hidpi=hidpi)
             trigger_smart_rdp_multimon_sync(enable_multimon=True, upgrade_running=True)
         else:
-            trigger_smart_rdp_multimon_sync(enable_multimon=False, upgrade_running=False)
+            _, _, was_2mon = _rdp_probe_vdisp_state()
             mac_vdisp.stop()
+            trigger_smart_rdp_multimon_sync(enable_multimon=False, upgrade_running=False, downgrade_running=was_2mon)
         return mac_vdisp.status(injector._quartz)
 
     return await asyncio.to_thread(_run_toggle)
@@ -4784,8 +4785,9 @@ def _schedule_orphan_vdisp_shutdown(delay_sec: float = 15.0) -> None:
         if _ACTIVE_MAC_EXT_WS_COUNT <= 0 and mac_vdisp is not None and mac_vdisp.is_active():
             try:
                 logger.info("Không còn điện thoại kết nối Màn phụ Mac sau %.0fs -> tự hủy màn ảo & kéo app về MacBook.", delay_sec)
-                trigger_smart_rdp_multimon_sync(enable_multimon=False, upgrade_running=False)
+                _, _, was_2mon = _rdp_probe_vdisp_state()
                 mac_vdisp.stop()
+                trigger_smart_rdp_multimon_sync(enable_multimon=False, upgrade_running=False, downgrade_running=was_2mon)
             except Exception:
                 pass
 
@@ -5682,6 +5684,7 @@ def _detect_boot_git_sha() -> str:
 _SERVER_BOOT_SHA: str = _detect_boot_git_sha()
 _RDP_RECONNECT_UNTIL: float = 0.0
 _LAST_MULTIMON_UPGRADE_AT: float = 0.0
+_LAST_DOWNGRADED_1MON_PID: int = 0
 _SMART_MULTIMON_LOCK = threading.Lock()
 _RDP_CLOSER_DIAG: Dict[str, Any] = {
     "sessions": [],
@@ -6049,10 +6052,156 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
     return launched
 
 
-def trigger_smart_rdp_multimon_sync(enable_multimon: bool, upgrade_running: bool = False) -> None:
-    """Điều phối thông minh 1 màn <-> 2 màn cho Microsoft Remote Desktop:
-    - Tắt Màn phụ Mac: trả bookmark về 1 màn cửa sổ thường (--useallmonitors false --fullscreen false).
-    - Bật Màn phụ Mac: bật --useallmonitors true --fullscreen true; nếu PC Hieu đang mở 1 màn thì tự nâng cấp nóng sang 2 màn Full-Screen."""
+def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
+    """Đóng êm phiên cũ -> khởi động lại sạch Microsoft Remote Desktop nạp CoreData mới -> tự nối lại target_sess."""
+    global _LAST_DOWNGRADED_1MON_PID
+    import ctypes
+    import AppKit  # type: ignore
+    import objc  # type: ignore
+    from mac_virtual_display import _CGPoint, _CGSize
+
+    q = injector._quartz
+    _, app_name = _get_mrd_cli_info()
+    rpid_cur, _, _ = _rdp_probe_vdisp_state()
+    if rpid_cur > 0 and mac_vdisp is not None and mac_vdisp._init_ax_libs():
+        try:
+            ax = mac_vdisp._ax_lib
+            cf = mac_vdisp._cf_lib
+            a_ax = ax.AXUIElementCreateApplication(rpid_cur)
+            if a_ax:
+                sw_k = cf.CFStringCreateWithCString(None, b"AXWindows", 0x08000100)
+                st_k = cf.CFStringCreateWithCString(None, b"AXTitle", 0x08000100)
+                sc_k = cf.CFStringCreateWithCString(None, b"AXCloseButton", 0x08000100)
+                sp_k = cf.CFStringCreateWithCString(None, b"AXPress", 0x08000100)
+                try:
+                    wr = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(a_ax, sw_k, ctypes.byref(wr)) == 0 and wr.value:
+                        try:
+                            for wi in range(cf.CFArrayGetCount(wr.value)):
+                                wel = cf.CFArrayGetValueAtIndex(wr.value, wi)
+                                if not wel:
+                                    continue
+                                tr = ctypes.c_void_p()
+                                wt = ""
+                                if ax.AXUIElementCopyAttributeValue(wel, st_k, ctypes.byref(tr)) == 0 and tr.value:
+                                    with objc.autorelease_pool():
+                                        wt = str(objc.objc_object(c_void_p=tr.value) or "").strip().lower()
+                                    cf.CFRelease(tr.value)
+                                if wt and wt not in ("microsoft remote desktop", "windows app", "connection center"):
+                                    br = ctypes.c_void_p()
+                                    if ax.AXUIElementCopyAttributeValue(wel, sc_k, ctypes.byref(br)) == 0 and br.value:
+                                        ax.AXUIElementPerformAction(br.value, sp_k)
+                                        cf.CFRelease(br.value)
+                        finally:
+                            cf.CFRelease(wr.value)
+                finally:
+                    cf.CFRelease(a_ax)
+                    for k_ref in (sw_k, st_k, sc_k, sp_k):
+                        if k_ref:
+                            cf.CFRelease(k_ref)
+            time.sleep(0.25)
+        except Exception:
+            pass
+
+    if rpid_cur > 0:
+        try:
+            with objc.autorelease_pool():
+                rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rpid_cur)
+                if rapp is not None:
+                    rapp.terminate()
+        except Exception:
+            pass
+        for _ in range(12):
+            time.sleep(0.15)
+            p_chk, _, _ = _rdp_probe_vdisp_state()
+            if p_chk <= 0:
+                break
+
+    sync_mrd_bookmark_multimon(enable_multimon)
+    if not app_name:
+        return
+
+    subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    new_pid = 0
+    for _ in range(18):
+        time.sleep(0.18)
+        p_chk, _, _ = _rdp_probe_vdisp_state()
+        if p_chk > 0:
+            new_pid = p_chk
+            break
+    if new_pid <= 0:
+        return
+    if not enable_multimon:
+        _LAST_DOWNGRADED_1MON_PID = new_pid
+    else:
+        _LAST_DOWNGRADED_1MON_PID = 0
+
+    time.sleep(0.35)
+    _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
+
+    # Nếu vừa hạ về 1 màn cửa sổ thường (không full-screen): tự bung khung cửa sổ khít gọn màn MacBook (1512x944), xóa sạch khung lùn 1511x459 cũ!
+    if not enable_multimon and q is not None and mac_vdisp is not None and mac_vdisp._init_ax_libs():
+        mb = q.CGDisplayBounds(q.CGMainDisplayID())
+        mx, my, mw, mh = float(mb.origin.x), float(mb.origin.y), float(mb.size.width), float(mb.size.height)
+        ax = mac_vdisp._ax_lib
+        cf = mac_vdisp._cf_lib
+        t_low = target_sess.strip().lower()
+        for _ in range(14):
+            time.sleep(0.22)
+            a_ax2 = ax.AXUIElementCreateApplication(new_pid)
+            if not a_ax2:
+                continue
+            sw_k = cf.CFStringCreateWithCString(None, b"AXWindows", 0x08000100)
+            st_k = cf.CFStringCreateWithCString(None, b"AXTitle", 0x08000100)
+            sp_k = cf.CFStringCreateWithCString(None, b"AXPosition", 0x08000100)
+            ss_k = cf.CFStringCreateWithCString(None, b"AXSize", 0x08000100)
+            resized = False
+            try:
+                wr = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(a_ax2, sw_k, ctypes.byref(wr)) == 0 and wr.value:
+                    try:
+                        for wi in range(cf.CFArrayGetCount(wr.value)):
+                            wel = cf.CFArrayGetValueAtIndex(wr.value, wi)
+                            if not wel:
+                                continue
+                            tr = ctypes.c_void_p()
+                            wt = ""
+                            if ax.AXUIElementCopyAttributeValue(wel, st_k, ctypes.byref(tr)) == 0 and tr.value:
+                                with objc.autorelease_pool():
+                                    wt = str(objc.objc_object(c_void_p=tr.value) or "").strip().lower()
+                                cf.CFRelease(tr.value)
+                            if wt == t_low or (t_low and t_low in wt and wt != "microsoft remote desktop"):
+                                npt = _CGPoint(mx, my + 38.0)
+                                nsz = _CGSize(mw, max(600.0, mh - 38.0))
+                                v_pt = ax.AXValueCreate(1, ctypes.byref(npt))
+                                v_sz = ax.AXValueCreate(2, ctypes.byref(nsz))
+                                if v_pt:
+                                    ax.AXUIElementSetAttributeValue(wel, sp_k, v_pt)
+                                    cf.CFRelease(v_pt)
+                                if v_sz:
+                                    ax.AXUIElementSetAttributeValue(wel, ss_k, v_sz)
+                                    cf.CFRelease(v_sz)
+                                resized = True
+                                break
+                    finally:
+                        cf.CFRelease(wr.value)
+            finally:
+                cf.CFRelease(a_ax2)
+                for k_ref in (sw_k, st_k, sp_k, ss_k):
+                    if k_ref:
+                        cf.CFRelease(k_ref)
+            if resized:
+                break
+
+
+def trigger_smart_rdp_multimon_sync(
+    enable_multimon: bool,
+    upgrade_running: bool = False,
+    downgrade_running: bool = False,
+) -> None:
+    """Điều phối thông minh 1 màn <-> 2 màn hai chiều cho Microsoft Remote Desktop:
+    - Tắt Màn phụ Mac hoặc thu nhỏ khỏi Full-Screen: tự chuyển phiên về 1 màn cửa sổ chuẩn (--useallmonitors false --fullscreen false), KHÔNG bị chia đôi 2 màn bé tí!
+    - Bật Màn phụ Mac hoặc phóng Full-Screen: tự chuyển phiên sang 2 màn Full-Screen (--useallmonitors true --fullscreen true), đẩy Obsidian sang ĐT!"""
     if not IS_MACOS:
         return
 
@@ -6067,6 +6216,21 @@ def trigger_smart_rdp_multimon_sync(enable_multimon: bool, upgrade_running: bool
 
             if not enable_multimon:
                 rpid, sess, _ = _rdp_probe_vdisp_state()
+                if downgrade_running and sess:
+                    now_d = time.monotonic()
+                    if (now_d - _LAST_MULTIMON_UPGRADE_AT) < 4.5:
+                        return
+                    _LAST_MULTIMON_UPGRADE_AT = now_d
+                    target_sess = sess[0] if sess else default_title
+                    _RDP_RECONNECT_UNTIL = time.monotonic() + 7.5
+                    try:
+                        time.sleep(0.35)
+                        _restart_mrd_and_connect(enable_multimon=False, target_sess=target_sess)
+                        _RDP_CLOSER_DIAG["last_reconnect"] = f"downgraded_1mon:{target_sess}@{time.strftime('%H:%M:%S')}"
+                    finally:
+                        _RDP_RECONNECT_UNTIL = time.monotonic() + 0.6
+                    return
+
                 # Nếu không có phiên nào đang mở, khởi động lại ngầm MRD nếu đang chạy không để xả cache CoreData cũ
                 if rpid > 0 and not sess:
                     try:
@@ -6086,7 +6250,7 @@ def trigger_smart_rdp_multimon_sync(enable_multimon: bool, upgrade_running: bool
                 return
 
             now_m = time.monotonic()
-            if (now_m - _LAST_MULTIMON_UPGRADE_AT) < 6.0:
+            if (now_m - _LAST_MULTIMON_UPGRADE_AT) < 5.0:
                 return
             _LAST_MULTIMON_UPGRADE_AT = now_m
 
@@ -6101,13 +6265,11 @@ def trigger_smart_rdp_multimon_sync(enable_multimon: bool, upgrade_running: bool
 
             rpid, sess, has_vdisp = _rdp_probe_vdisp_state()
             if not sess:
-                # Nếu MRD đang mở sẵn Connection Center không có phiên -> làm mới cache CoreData để lúc bấm mở ăn ngay 2 màn
                 if rpid > 0:
                     try:
                         with objc.autorelease_pool():
                             rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rpid)
                             if rapp is not None:
-                                is_front = False
                                 rapp.terminate()
                         time.sleep(0.5)
                         sync_mrd_bookmark_multimon(True)
@@ -6120,79 +6282,9 @@ def trigger_smart_rdp_multimon_sync(enable_multimon: bool, upgrade_running: bool
                 return
 
             target_sess = sess[0] if sess else default_title
-            _RDP_RECONNECT_UNTIL = time.monotonic() + 7.0
+            _RDP_RECONNECT_UNTIL = time.monotonic() + 7.5
             try:
-                # 1) Đóng êm cửa sổ phiên 1 màn trước (tránh hộp thoại hỏi xác nhận thoát khi gọi terminate)
-                _, app_name = _get_mrd_cli_info()
-                rpid_cur, _, _ = _rdp_probe_vdisp_state()
-                if rpid_cur > 0 and mac_vdisp is not None and mac_vdisp._init_ax_libs():
-                    try:
-                        import ctypes
-                        ax = mac_vdisp._ax_lib
-                        cf = mac_vdisp._cf_lib
-                        a_ax = ax.AXUIElementCreateApplication(rpid_cur)
-                        if a_ax:
-                            sw_k = cf.CFStringCreateWithCString(None, b"AXWindows", 0x08000100)
-                            st_k = cf.CFStringCreateWithCString(None, b"AXTitle", 0x08000100)
-                            sc_k = cf.CFStringCreateWithCString(None, b"AXCloseButton", 0x08000100)
-                            sp_k = cf.CFStringCreateWithCString(None, b"AXPress", 0x08000100)
-                            try:
-                                wr = ctypes.c_void_p()
-                                if ax.AXUIElementCopyAttributeValue(a_ax, sw_k, ctypes.byref(wr)) == 0 and wr.value:
-                                    try:
-                                        for wi in range(cf.CFArrayGetCount(wr.value)):
-                                            wel = cf.CFArrayGetValueAtIndex(wr.value, wi)
-                                            if not wel:
-                                                continue
-                                            tr = ctypes.c_void_p()
-                                            wt = ""
-                                            if ax.AXUIElementCopyAttributeValue(wel, st_k, ctypes.byref(tr)) == 0 and tr.value:
-                                                with objc.autorelease_pool():
-                                                    wt = str(objc.objc_object(c_void_p=tr.value) or "").strip().lower()
-                                                cf.CFRelease(tr.value)
-                                            if wt and wt not in ("microsoft remote desktop", "windows app", "connection center"):
-                                                br = ctypes.c_void_p()
-                                                if ax.AXUIElementCopyAttributeValue(wel, sc_k, ctypes.byref(br)) == 0 and br.value:
-                                                    ax.AXUIElementPerformAction(br.value, sp_k)
-                                                    cf.CFRelease(br.value)
-                                    finally:
-                                        cf.CFRelease(wr.value)
-                            finally:
-                                cf.CFRelease(a_ax)
-                                for k_ref in (sw_k, st_k, sc_k, sp_k):
-                                    if k_ref:
-                                        cf.CFRelease(k_ref)
-                        time.sleep(0.25)
-                    except Exception:
-                        pass
-
-                # 2) Làm mới sạch Microsoft Remote Desktop để nạp 100% cấu hình CoreData 2 màn hình mới + tự nối lại PC Hieu ngay
-                if rpid_cur > 0:
-                    try:
-                        with objc.autorelease_pool():
-                            rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rpid_cur)
-                            if rapp is not None:
-                                rapp.terminate()
-                    except Exception:
-                        pass
-                    for _ in range(12):
-                        time.sleep(0.15)
-                        p_chk, _, _ = _rdp_probe_vdisp_state()
-                        if p_chk <= 0:
-                            break
-                sync_mrd_bookmark_multimon(True)
-                if app_name:
-                    subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    new_pid = 0
-                    for _ in range(18):
-                        time.sleep(0.18)
-                        p_chk, _, _ = _rdp_probe_vdisp_state()
-                        if p_chk > 0:
-                            new_pid = p_chk
-                            break
-                    if new_pid > 0:
-                        time.sleep(0.35)
-                        _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
+                _restart_mrd_and_connect(enable_multimon=True, target_sess=target_sess)
                 _RDP_CLOSER_DIAG["last_reconnect"] = f"upgraded_2mon:{target_sess}@{time.strftime('%H:%M:%S')}"
             finally:
                 _RDP_RECONNECT_UNTIL = time.monotonic() + 0.8
@@ -6211,6 +6303,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
         return
 
     def _watcher() -> None:
+        global _LAST_DOWNGRADED_1MON_PID
         import ctypes
         import AppKit  # type: ignore
         import objc  # type: ignore
@@ -6260,6 +6353,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
         last_close_try_at = 0.0
         last_jump_try_at = 0.0
         last_fit_try_at = 0.0
+        last_fs_poll_at = 0.0
         rdp_became_front_at = 0.0
         prev_front_pid = 0
         jump_attempt_idx = 0
@@ -6417,8 +6511,14 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                     and on_screen_session_main
                     and (now_m - last_fit_try_at) >= 3.0
                 )
-                if not want_check_close and not want_check_jump and not want_check_fit:
+                want_check_fs_state = (
+                    on_screen_session_main
+                    and (now_m - last_fs_poll_at) >= 0.55
+                )
+                if not want_check_close and not want_check_jump and not want_check_fit and not want_check_fs_state:
                     continue
+                if want_check_fs_state:
+                    last_fs_poll_at = now_m
 
                 # Bước 2: Dùng AXWindows đóng Connection Center thừa + AXMenuBar -> Window -> <session> để trượt thẳng vào PC Hieu!
 
@@ -6614,6 +6714,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                     ax_has_dialog = False
                     closed_any = False
                     has_windowed_session = False
+                    has_squished_2mon_window = False
                     has_fs_session = False
                     wins_ref = ctypes.c_void_p()
                     if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wins_ref)) == 0 and wins_ref.value:
@@ -6639,6 +6740,9 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                         has_fs_session = True
                                     elif sub_s == "AXStandardWindow":
                                         has_windowed_session = True
+                                        # Phát hiện cửa sổ bị ép ngang 2 màn hình chia đôi (VD: 1511x459, tỷ lệ ~3.3:1) sau khi thoát Full-Screen!
+                                        if sw >= 800.0 and sh > 120.0 and sw >= sh * 2.15:
+                                            has_squished_2mon_window = True
                                 if (
                                     not is_fs
                                     and sub_s == "AXStandardWindow"
@@ -6672,7 +6776,16 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                         finally:
                             cf.CFRelease(wins_ref.value)
 
-                    if has_windowed_session:
+                    if has_fs_session:
+                        _LAST_DOWNGRADED_1MON_PID = 0
+                    if has_squished_2mon_window and not ax_has_dialog and rdp_pid != _LAST_DOWNGRADED_1MON_PID:
+                        was_windowed_session = False
+                        trigger_smart_rdp_multimon_sync(
+                            enable_multimon=False,
+                            upgrade_running=False,
+                            downgrade_running=True,
+                        )
+                    elif has_windowed_session:
                         was_windowed_session = True
                     elif has_fs_session and was_windowed_session:
                         was_windowed_session = False
