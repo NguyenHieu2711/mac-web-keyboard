@@ -1426,6 +1426,7 @@ body.is-lowercase .key-alpha .key-main {
   pointer-events: none;
   z-index: 40;
   will-change: transform;
+  filter: drop-shadow(0 0 2.5px rgba(255, 255, 255, 0.55)) drop-shadow(0 0 5.5px rgba(56, 189, 248, 0.32));
 }
 
 .remote-kvm-cursor.is-hidden,

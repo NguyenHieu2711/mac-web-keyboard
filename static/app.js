@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.14";
+  const BUNDLED_BOOT_VER = "2.3.16";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -2860,7 +2860,7 @@
       !remoteCursorImg || remoteCursorImg.classList.contains("is-hidden");
     const cursorScale =
       kbLayout === "mac_ext" && usingFallbackSvg
-        ? 0.82
+        ? 0.92
         : Math.max(usingFallbackSvg ? 0.65 : 0.36, Math.min(1.0, stageScale * 1.18));
     const px = (kvmX / canvasW) * cw - cursorHotspotX * cursorScale;
     const py = (kvmY / canvasH) * ch - cursorHotspotY * cursorScale;
@@ -5634,7 +5634,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.14";
+  const BUNDLED_WEB_VERSION = "2.3.16";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
