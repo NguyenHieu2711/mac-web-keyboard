@@ -307,8 +307,10 @@ static BOOL ax_minimize_app_on_vdisp(pid_t pid, CGRect vb) {
 @property (nonatomic, strong) NSMutableArray<NSNumber *> *appOrder;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSDictionary *> *appState;
 @property (nonatomic, copy) NSString *lastLayoutSig;
+@property (nonatomic) CFAbsoluteTime lastRdpSyncAt;
 - (instancetype)initWithDisplayID:(CGDirectDisplayID)did;
 - (void)refresh;
+- (void)syncFullscreenRdpOnVdispIfNeeded:(NSRunningApplication *)activatedApp;
 - (void)shutdown;
 @end
 
@@ -740,6 +742,59 @@ static BOOL ax_minimize_app_on_vdisp(pid_t pid, CGRect vb) {
     [self.hiddenPids removeObjectForKey:@(pid)];
 }
 
+- (void)syncFullscreenRdpOnVdispIfNeeded:(NSRunningApplication *)activatedApp {
+    if (!activatedApp || self.vdispId == 0) return;
+    NSString *bid = [[activatedApp bundleIdentifier] lowercaseString] ?: @"";
+    NSString *lname = [[activatedApp localizedName] lowercaseString] ?: @"";
+    BOOL isRdp = ([bid isEqualToString:@"com.microsoft.rdc.macos"] ||
+                  [bid isEqualToString:@"com.microsoft.rdc.osx.beta"] ||
+                  [lname isEqualToString:@"microsoft remote desktop"] ||
+                  [lname isEqualToString:@"windows app"]);
+    if (!isRdp) return;
+
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if ((now - self.lastRdpSyncAt) < 0.85) return;
+
+    CGRect vb = CGDisplayBounds(self.vdispId);
+    if (vb.size.width < 64 || vb.size.height < 64) return;
+    pid_t rpid = activatedApp.processIdentifier;
+
+    // Kiểm tra xem Microsoft Remote Desktop có cửa sổ Full Screen trên Màn phụ #2 đang bị che bởi Space/app Mac khác không
+    CFArrayRef allList = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID
+    );
+    if (!allList) return;
+    NSArray *wins = (__bridge_transfer NSArray *)allList;
+    BOOL hasHiddenVdispFs = NO;
+    for (NSDictionary *w in wins) {
+        if ((pid_t)[w[(id)kCGWindowOwnerPID] intValue] != rpid) continue;
+        if ([w[(id)kCGWindowLayer] integerValue] != 0) continue;
+        NSDictionary *bDict = w[(id)kCGWindowBounds];
+        if (!bDict) continue;
+        CGRect wb = CGRectZero;
+        if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)bDict, &wb)) continue;
+        CGFloat cx = wb.origin.x + wb.size.width * 0.5;
+        CGFloat cy = wb.origin.y + wb.size.height * 0.5;
+        BOOL inVdisp = (cx >= vb.origin.x && cx < (vb.origin.x + vb.size.width) &&
+                        cy >= vb.origin.y && cy < (vb.origin.y + vb.size.height));
+        if (!inVdisp) continue;
+        if (wb.size.width >= vb.size.width - 8.0 && wb.size.height >= vb.size.height - 8.0) {
+            BOOL isOnscr = [w[(id)kCGWindowIsOnscreen] boolValue];
+            if (!isOnscr) {
+                hasHiddenVdispFs = YES;
+                break;
+            }
+        }
+    }
+    if (!hasHiddenVdispFs) return;
+
+    // Đồng bộ tức thì Space Màn phụ #2 quay lại đúng màn #2 của Remote Desktop (VD: Obsidian) khi bạn bấm về Remote trên MacBook!
+    self.lastRdpSyncAt = now;
+    [activatedApp activateWithOptions:(NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps)];
+    ax_raise_app_on_vdisp(rpid, vb);
+}
+
 - (void)shutdown {
     if (self.panel) {
         [self.panel orderOut:nil];
@@ -915,10 +970,15 @@ int main(int argc, const char * argv[]) {
                                            object:nil
                                             queue:[NSOperationQueue mainQueue]
                                        usingBlock:^(NSNotification *note) {
-                    (void)note;
                     SecondaryDockController *d = weakDock;
                     if (d) {
-                        @try { [d refresh]; } @catch (NSException *ex) { (void)ex; }
+                        @try {
+                            if ([name isEqualToString:NSWorkspaceDidActivateApplicationNotification]) {
+                                NSRunningApplication *actApp = note.userInfo[NSWorkspaceApplicationKey];
+                                if (actApp) [d syncFullscreenRdpOnVdispIfNeeded:actApp];
+                            }
+                            [d refresh];
+                        } @catch (NSException *ex) { (void)ex; }
                     }
                 }];
                 if (tok) [obsTokens addObject:tok];

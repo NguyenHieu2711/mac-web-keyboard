@@ -176,6 +176,7 @@ namespace MacWebKeyboard
         private static string _lastDiag = "";
         private static readonly List<string> _events = new List<string>();
         private static DateTime _lastStatusWriteAt = DateTime.MinValue;
+        private static DateTime _lastSingleRescueAt = DateTime.MinValue;
 
         private static void AddEventLocked(string msg)
         {
@@ -589,6 +590,126 @@ namespace MacWebKeyboard
             th.Start();
         }
 
+        private static int RescueOffscreenWindowsToPrimary(Screen pri)
+        {
+            if (pri == null) return 0;
+            Rectangle wa = pri.WorkingArea;
+            int rescued = 0;
+
+            EnumWindows((hWnd, lParam) =>
+            {
+                try
+                {
+                    string cls, title, procName;
+                    if (!IsEligibleUserWindow(hWnd, out cls, out title, out procName)) return true;
+                    if (IsHungAppWindow(hWnd)) return true;
+
+                    var wp = new WINDOWPLACEMENT();
+                    wp.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+                    if (!GetWindowPlacement(hWnd, ref wp)) return true;
+
+                    bool curMin = IsIconic(hWnd) || wp.showCmd == SW_SHOWMINIMIZED;
+                    bool curMax = wp.showCmd == SW_SHOWMAXIMIZED;
+
+                    Rectangle curRect;
+                    if (curMin)
+                    {
+                        curRect = RectFromWin32(wp.rcNormalPosition);
+                    }
+                    else
+                    {
+                        RECT wr;
+                        if (!GetWindowRect(hWnd, out wr)) return true;
+                        curRect = RectFromWin32(wr);
+                    }
+                    if (curRect.Width < 180 || curRect.Height < 100) return true;
+
+                    int cx = curRect.Left + curRect.Width / 2;
+                    int cy = curRect.Top + curRect.Height / 2;
+                    // Nếu đã nằm gọn trong màn chính -> giữ nguyên, không chớp nháy
+                    if (pri.Bounds.Contains(cx, cy)) return true;
+
+                    int nw = ClampInt(curRect.Width, Math.Min(500, wa.Width), wa.Width);
+                    int nh = ClampInt(curRect.Height, Math.Min(350, wa.Height), wa.Height);
+                    int nx = wa.Left + Math.Max(0, (wa.Width - nw) / 2);
+                    int ny = wa.Top + Math.Max(0, (wa.Height - nh) / 2);
+
+                    if (curMin)
+                    {
+                        wp.rcNormalPosition = new RECT { Left = nx, Top = ny, Right = nx + nw, Bottom = ny + nh };
+                        SetWindowPlacement(hWnd, ref wp);
+                        rescued++;
+                        return true;
+                    }
+
+                    if (curMax)
+                    {
+                        ShowWindow(hWnd, SW_RESTORE);
+                        Thread.Sleep(30);
+                        SetWindowPos(hWnd, IntPtr.Zero, nx, ny, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
+                        Thread.Sleep(35);
+                        SetWindowPos(hWnd, IntPtr.Zero, nx, ny, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
+                        Thread.Sleep(30);
+                        ShowWindow(hWnd, SW_SHOWMAXIMIZED);
+                    }
+                    else
+                    {
+                        SetWindowPos(hWnd, IntPtr.Zero, nx, ny, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
+                        Thread.Sleep(25);
+                        SetWindowPos(hWnd, IntPtr.Zero, nx, ny, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
+                    rescued++;
+                }
+                catch
+                {
+                }
+                return true;
+            }, IntPtr.Zero);
+
+            return rescued;
+        }
+
+        private static void TriggerSingleMonitorRescueAsync(int gen)
+        {
+            var th = new Thread(() =>
+            {
+                if (_defaultDesktop != IntPtr.Zero)
+                {
+                    try { SetThreadDesktop(_defaultDesktop); } catch { }
+                }
+                try
+                {
+                    int total = 0;
+                    int[] delays = new int[] { 700, 1400 };
+                    for (int i = 0; i < delays.Length; i++)
+                    {
+                        Thread.Sleep(delays[i]);
+                        lock (StateLock)
+                        {
+                            if (gen != _restoreGen) return;
+                        }
+                        Screen pri, sec;
+                        Screen[] all = GetCurrentScreens(out pri, out sec);
+                        if (all.Length != 1 || pri == null) return;
+                        total += RescueOffscreenWindowsToPrimary(pri);
+                    }
+                    if (total > 0)
+                    {
+                        lock (StateLock)
+                        {
+                            AddEventLocked("RESCUE_1MON moved=" + total);
+                        }
+                        WriteStatusFile(true);
+                    }
+                }
+                catch
+                {
+                }
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
         private static void CheckTopologyAndSnapshot(bool forceCheck, bool fromSessionEvent)
         {
             Screen pri, sec;
@@ -597,6 +718,7 @@ namespace MacWebKeyboard
             DateTime now = DateTime.UtcNow;
 
             bool needRestore = false;
+            bool needSingleRescue = false;
             int restoreGenLocal = 0;
 
             lock (StateLock)
@@ -648,9 +770,28 @@ namespace MacWebKeyboard
                     }
                     else
                     {
-                        // Tạm tụt về 1 màn (ví dụ đang chuyển Console <-> RDP) -> đóng băng _saved2MonLayout!
+                        // Chuyển về 1 màn (chỉ dùng MacBook không có màn phụ) -> ĐÓNG BĂNG _saved2MonLayout
+                        // đồng thời kéo toàn bộ cửa sổ bị lạc ngoài khung (như Obsidian ở màn #2 cũ) vào gọn màn chính!
                         _restorePending = false;
                         _restoreGen++;
+                        restoreGenLocal = _restoreGen;
+                        if (all.Length == 1 && pri != null)
+                        {
+                            needSingleRescue = true;
+                        }
+                    }
+                }
+                else if (all.Length == 1 && pri != null)
+                {
+                    // Định kỳ kéo cửa sổ vừa được bấm mở từ taskbar nếu vẫn còn lạc tọa độ ngoài màn #1 (giữ nguyên _saved2MonLayout!)
+                    if ((now - _lastSingleRescueAt).TotalSeconds >= 1.5)
+                    {
+                        _lastSingleRescueAt = now;
+                        int rMoved = RescueOffscreenWindowsToPrimary(pri);
+                        if (rMoved > 0)
+                        {
+                            AddEventLocked("RESCUE_1MON_LIVE moved=" + rMoved);
+                        }
                     }
                 }
                 else if (all.Length >= 2 && pri != null && sec != null && !_restorePending)
@@ -710,6 +851,11 @@ namespace MacWebKeyboard
             {
                 WriteStatusFile(true);
                 TriggerRestoreAsync(restoreGenLocal, sig);
+            }
+            else if (needSingleRescue)
+            {
+                WriteStatusFile(true);
+                TriggerSingleMonitorRescueAsync(restoreGenLocal);
             }
             else
             {
