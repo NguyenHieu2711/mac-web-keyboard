@@ -5560,10 +5560,10 @@ def start_git_auto_updater(check_every_sec: float = 45.0) -> None:
     t.start()
 
 
-def start_rdp_launcher_auto_closer(poll_sec: float = 0.8) -> None:
-    """Khi người dùng mở một phiên Remote mới trong Microsoft Remote Desktop / Windows App,
-    tự động đóng cửa sổ chọn máy (Connection Center) thừa ở nền sau khi phiên remote đã mở ổn định.
-    Chỉ kích hoạt 1 lần mỗi khi phiên remote mới xuất hiện (nếu sau đó bạn chủ động bấm Cmd+0 mở lại danh sách thì giữ nguyên)."""
+def start_rdp_launcher_auto_closer(poll_sec: float = 0.35) -> None:
+    """Quét xuyên toàn bộ Space (CGWindowListOptionAll): hễ Microsoft Remote Desktop / Windows App
+    đang có phiên Remote thật (như PC Hieu ở Full-Screen Space) thì tự động đóng cửa sổ chọn máy
+    (Connection Center) thừa bằng AXCloseButton — giúp bấm icon Remote trên Dock nhảy thẳng vào PC Hieu."""
     if not IS_MACOS:
         return
 
@@ -5571,7 +5571,6 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.8) -> None:
         import ctypes
         import AppKit  # type: ignore
         import objc  # type: ignore
-        from mac_virtual_display import _CGSize
 
         launcher_titles = {
             "microsoft remote desktop",
@@ -5595,17 +5594,24 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.8) -> None:
             "enter your",
             "password",
         )
-        prev_session_count = 0
-        pending_close_at = 0.0
+        session_first_seen_at = 0.0
+        last_close_try_at = 0.0
 
         while True:
             time.sleep(poll_sec)
             try:
-                if mac_vdisp is None or not mac_vdisp._init_ax_libs():
+                q = injector._quartz
+                if q is None or mac_vdisp is None or not mac_vdisp._init_ax_libs():
                     continue
+
                 rdp_pid = 0
+                rdp_app = None
+                front_pid = 0
                 with objc.autorelease_pool():
-                    apps = AppKit.NSWorkspace.sharedWorkspace().runningApplications() or []
+                    ws_shared = AppKit.NSWorkspace.sharedWorkspace()
+                    fapp = ws_shared.frontmostApplication()
+                    front_pid = int(fapp.processIdentifier()) if fapp is not None else 0
+                    apps = ws_shared.runningApplications() or []
                     for rapp in apps:
                         try:
                             bid = str(rapp.bundleIdentifier() or "").strip().lower()
@@ -5615,15 +5621,57 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.8) -> None:
                                 "windows app",
                             ):
                                 rdp_pid = int(rapp.processIdentifier())
+                                rdp_app = rapp
                                 break
                         except Exception:
                             continue
 
                 if rdp_pid <= 0:
-                    prev_session_count = 0
-                    pending_close_at = 0.0
+                    session_first_seen_at = 0.0
                     continue
 
+                # Bước 1: Dùng CGWindowListOptionAll (thấy xuyên TẤT CẢ Space!) để biết PC Hieu có đang chạy không
+                all_sessions = 0
+                all_has_launcher = False
+                all_has_dialog = False
+                with objc.autorelease_pool():
+                    wlist = q.CGWindowListCopyWindowInfo(
+                        q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements,
+                        q.kCGNullWindowID,
+                    ) or []
+                    for w in wlist:
+                        if int(w.get("kCGWindowOwnerPID", 0) or 0) != rdp_pid:
+                            continue
+                        if int(w.get("kCGWindowLayer", -1)) != 0:
+                            continue
+                        wb = w.get("kCGWindowBounds") or {}
+                        ww = float(wb.get("Width", 0))
+                        wh = float(wb.get("Height", 0))
+                        if ww < 120.0 or wh < 80.0:
+                            continue
+                        wname = str(w.get("kCGWindowName", "") or "").strip().lower()
+                        if not wname:
+                            continue
+                        if any(k in wname for k in dialog_keywords):
+                            all_has_dialog = True
+                        elif wname in launcher_titles:
+                            all_has_launcher = True
+                        elif ww >= 500.0 and wh >= 300.0:
+                            all_sessions += 1
+
+                now_m = time.monotonic()
+                if all_sessions <= 0:
+                    session_first_seen_at = 0.0
+                    continue
+                if session_first_seen_at <= 0.0:
+                    session_first_seen_at = now_m
+                # Chờ 0.5s sau khi phiên remote vừa xuất hiện để tránh đóng trong lúc còn prompt kết nối
+                if all_has_dialog or not all_has_launcher or (now_m - session_first_seen_at) < 0.5:
+                    continue
+                if (now_m - last_close_try_at) < 0.8:
+                    continue
+
+                # Bước 2: Dùng AXWindows đóng đúng cửa sổ Connection Center (chừa nguyên PC Hieu!)
                 ax = mac_vdisp._ax_lib
                 cf = mac_vdisp._cf_lib
                 kCFStringEncodingUTF8 = 0x08000100
@@ -5647,75 +5695,59 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.8) -> None:
                 s_wins = _cfstr("AXWindows")
                 s_title = _cfstr("AXTitle")
                 s_subrole = _cfstr("AXSubrole")
-                s_size = _cfstr("AXSize")
                 s_close_btn = _cfstr("AXCloseButton")
                 s_press = _cfstr("AXPress")
+                s_frontmost = _cfstr("AXFrontmost")
                 try:
                     wins_ref = ctypes.c_void_p()
                     if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wins_ref)) != 0 or not wins_ref.value:
-                        prev_session_count = 0
-                        pending_close_at = 0.0
                         continue
+                    closed_any = False
                     try:
                         cnt = cf.CFArrayGetCount(wins_ref.value)
+                        ax_has_dialog = False
                         launcher_wins = []
-                        session_count = 0
-                        has_dialog = False
                         for i in range(cnt):
                             w_ax = cf.CFArrayGetValueAtIndex(wins_ref.value, i)
                             if not w_ax:
                                 continue
                             title_l = _get_str(w_ax, s_title).strip().lower()
                             sub_s = _get_str(w_ax, s_subrole).strip()
-                            ww = wh = 0.0
-                            sr = ctypes.c_void_p()
-                            if ax.AXUIElementCopyAttributeValue(w_ax, s_size, ctypes.byref(sr)) == 0 and sr.value:
-                                sz = _CGSize()
-                                if ax.AXValueGetValue(sr.value, 2, ctypes.byref(sz)):
-                                    ww, wh = float(sz.w), float(sz.h)
-                                cf.CFRelease(sr.value)
-
                             if sub_s in ("AXDialog", "AXSheet") or any(k in title_l for k in dialog_keywords):
-                                has_dialog = True
-                                continue
+                                ax_has_dialog = True
+                                break
                             if title_l in launcher_titles and sub_s == "AXStandardWindow":
                                 launcher_wins.append(w_ax)
-                                continue
-                            if sub_s == "AXStandardWindow" and title_l and ww >= 500.0 and wh >= 300.0:
-                                session_count += 1
 
-                        now_m = time.monotonic()
-                        if session_count > prev_session_count and launcher_wins:
-                            # Phiên remote mới vừa bật -> chờ 0.6s cho ổn định rồi đóng cửa sổ chọn máy thừa
-                            pending_close_at = now_m + 0.6
-                        elif session_count == 0:
-                            pending_close_at = 0.0
-
-                        prev_session_count = session_count
-
-                        if pending_close_at > 0.0 and now_m >= pending_close_at:
-                            if has_dialog:
-                                # Đang hiện hộp thoại kết nối/mật khẩu -> chờ thêm
-                                pending_close_at = now_m + 0.6
-                            elif session_count >= 1 and launcher_wins:
-                                for lw in launcher_wins:
-                                    btn_ref = ctypes.c_void_p()
-                                    if (
-                                        ax.AXUIElementCopyAttributeValue(lw, s_close_btn, ctypes.byref(btn_ref)) == 0
-                                        and btn_ref.value
-                                    ):
-                                        try:
-                                            ax.AXUIElementPerformAction(btn_ref.value, s_press)
-                                        finally:
-                                            cf.CFRelease(btn_ref.value)
-                                pending_close_at = 0.0
-                            else:
-                                pending_close_at = 0.0
+                        if not ax_has_dialog and launcher_wins:
+                            last_close_try_at = now_m
+                            for lw in launcher_wins:
+                                btn_ref = ctypes.c_void_p()
+                                if (
+                                    ax.AXUIElementCopyAttributeValue(lw, s_close_btn, ctypes.byref(btn_ref)) == 0
+                                    and btn_ref.value
+                                ):
+                                    try:
+                                        if ax.AXUIElementPerformAction(btn_ref.value, s_press) == 0:
+                                            closed_any = True
+                                    finally:
+                                        cf.CFRelease(btn_ref.value)
                     finally:
                         cf.CFRelease(wins_ref.value)
+
+                    # Nếu người dùng vừa bấm icon Remote trên Dock để mở PC Hieu -> sau khi đóng Connection Center, kéo thẳng sang PC Hieu!
+                    if closed_any and front_pid == rdp_pid and rdp_app is not None:
+                        time.sleep(0.06)
+                        try:
+                            kTrue = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
+                            ax.AXUIElementSetAttributeValue(app_ax, s_frontmost, kTrue)
+                            with objc.autorelease_pool():
+                                rdp_app.activateWithOptions_(2)
+                        except Exception:
+                            pass
                 finally:
                     cf.CFRelease(app_ax)
-                    for s_ref in (s_wins, s_title, s_subrole, s_size, s_close_btn, s_press):
+                    for s_ref in (s_wins, s_title, s_subrole, s_close_btn, s_press, s_frontmost):
                         if s_ref:
                             cf.CFRelease(s_ref)
             except Exception:
@@ -5730,7 +5762,7 @@ if __name__ == "__main__":
     check_macos_screen_recording(prompt=True)
     start_notification_auto_dismisser(max_seconds=4.0)
     start_clipboard_retina_normalizer(poll_sec=0.25)
-    start_rdp_launcher_auto_closer(poll_sec=0.8)
+    start_rdp_launcher_auto_closer(poll_sec=0.35)
     start_git_auto_updater(check_every_sec=45.0)
     banner_ips = detect_network_ips()
     print("\n" + "=" * 62)
