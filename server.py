@@ -5019,10 +5019,18 @@ def _trigger_clean_respawn() -> None:
 
 @app.post("/respawn")
 @app.get("/respawn")
-async def respawn_worker() -> dict:
-    """Khởi chạy lại tiến trình mới sạch hoàn toàn qua launchd để nhận quyền Screen Recording vừa bật."""
+async def respawn_worker(pull: int = 0) -> dict:
+    """Khởi chạy lại tiến trình mới sạch hoàn toàn qua launchd để nhận quyền Screen Recording hoặc code mới."""
+    pulled = False
+    if pull and (BASE_DIR / ".git").exists():
+        try:
+            subprocess.run(["git", "fetch", "origin", "main", "--quiet"], cwd=str(BASE_DIR), timeout=10, check=False)
+            pr = subprocess.run(["git", "pull", "--ff-only", "origin", "main"], cwd=str(BASE_DIR), timeout=15, check=False)
+            pulled = (pr.returncode == 0)
+        except Exception:
+            pulled = False
     threading.Timer(0.2, _trigger_clean_respawn).start()
-    return {"ok": True, "restarting": True}
+    return {"ok": True, "restarting": True, "pulled": pulled}
 
 
 @app.post("/open-screen-perm")
@@ -5839,7 +5847,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                         try:
                             sz = _CGSize()
                             if ax.AXValueGetValue(r.value, 2, ctypes.byref(sz)):
-                                return float(sz.width), float(sz.height)
+                                return float(sz.w), float(sz.h)
                         finally:
                             cf.CFRelease(r.value)
                     return 0.0, 0.0
@@ -6039,7 +6047,7 @@ if __name__ == "__main__":
     check_macos_screen_recording(prompt=True)
     start_notification_auto_dismisser(max_seconds=4.0)
     start_clipboard_retina_normalizer(poll_sec=0.25)
-    start_rdp_launcher_auto_closer(poll_sec=0.20)
+    start_rdp_launcher_auto_closer(poll_sec=0.15)
     start_git_auto_updater(check_every_sec=45.0)
     banner_ips = detect_network_ips()
     print("\n" + "=" * 62)
