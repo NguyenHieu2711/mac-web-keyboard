@@ -4500,6 +4500,50 @@ async def mac_virtual_display_status() -> dict:
     return await asyncio.to_thread(mac_vdisp.status, injector._quartz)
 
 
+@app.get("/mac-virtual-display/diag")
+async def mac_virtual_display_diag() -> dict:
+    if not IS_MACOS:
+        return {"ok": False}
+
+    def _read_diag() -> dict:
+        out: Dict[str, Any] = {"ok": True}
+        for key, cmd in [
+            ("spans_displays", ["defaults", "read", "com.apple.spaces", "spans-displays"]),
+            ("dock_orientation", ["defaults", "read", "com.apple.dock", "orientation"]),
+            ("dock_autohide", ["defaults", "read", "com.apple.dock", "autohide"]),
+            ("rdp_app_ver", ["defaults", "read", "/Applications/Microsoft Remote Desktop.app/Contents/Info.plist", "CFBundleShortVersionString"]),
+            ("win_app_ver", ["defaults", "read", "/Applications/Windows App.app/Contents/Info.plist", "CFBundleShortVersionString"]),
+            ("rdp_prefs", ["defaults", "read", "com.microsoft.rdc.macos"]),
+        ]:
+            try:
+                r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.0)
+                out[key] = (r.stdout or "").strip()[:1200] if r.returncode == 0 else f"ERR:{(r.stderr or '').strip()[:120]}"
+            except Exception as e:
+                out[key] = f"EXC:{e}"
+        try:
+            q = injector._quartz
+            if q is not None:
+                err, ids, cnt = q.CGGetActiveDisplayList(8, None, None)
+                disps = []
+                if err == 0 and cnt > 0:
+                    for did in ids[:cnt]:
+                        b = q.CGDisplayBounds(did)
+                        disps.append({
+                            "id": int(did),
+                            "main": bool(q.CGDisplayIsMain(did)),
+                            "x": float(b.origin.x),
+                            "y": float(b.origin.y),
+                            "w": float(b.size.width),
+                            "h": float(b.size.height),
+                        })
+                out["displays"] = disps
+        except Exception as e:
+            out["displays_err"] = str(e)
+        return out
+
+    return await asyncio.to_thread(_read_diag)
+
+
 @app.post("/mac-virtual-display/rescue")
 @app.get("/mac-virtual-display/rescue")
 async def mac_virtual_display_rescue() -> dict:
