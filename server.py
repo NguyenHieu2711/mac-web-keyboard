@@ -6147,7 +6147,7 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
         else:
             # 4) Tìm đúng thẻ PC Hieu trong Connection Center -> chọn + mở
             t_low = target_title.strip().lower()
-            candidates: List[Tuple[float, float, float, float, Any]] = []
+            candidates: List[Tuple[float, float, float, float]] = []
             visited = [0]
 
             def _walk_cc(el: Any, depth: int) -> None:
@@ -6158,7 +6158,7 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                 if (t_low and t_low in tx) or "192.168.52.230" in tx:
                     rc_box = _grect(el, s_pos, s_size)
                     if rc_box and rc_box[2] >= 20.0 and rc_box[3] >= 12.0:
-                        candidates.append((rc_box[0], rc_box[1], rc_box[2], rc_box[3], el))
+                        candidates.append((rc_box[0], rc_box[1], rc_box[2], rc_box[3]))
                 ch = ctypes.c_void_p()
                 if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
                     try:
@@ -6179,12 +6179,8 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
 
             _RDP_CLOSER_DIAG["cc_walk"] = f"vis={visited[0]},cand={len(candidates)},ex_fs={int(exited_cc_fs)}"
             if candidates:
-                bx, by, bw, bh, bel = candidates[0]
-                ax.AXUIElementSetAttributeValue(bel, s_selected, kTrue)
-                ax.AXUIElementSetAttributeValue(bel, s_focused, kTrue)
-                if _click_menu_item(("connections", "connection"), "connect"):
-                    launched = True
-                elif q is not None:
+                bx, by, bw, bh = candidates[0]
+                if q is not None:
                     # Nếu bel là nhãn chữ mỏng (bh < 32), tâm ảnh thu nhỏ của thẻ PC nằm ngay phía trên nhãn ~36px
                     cx = bx + bw * 0.5
                     cy = (by - 36.0) if (bh < 32.0 and by > 120.0) else (by + min(32.0, bh * 0.4))
