@@ -245,7 +245,7 @@ function performRDPHandshake(host, port, x224Request) {
         tcpSocket.unshift(extraBytes);
       }
 
-      const tlsSocket = tls.connect(
+        const tlsSocket = tls.connect(
         {
           socket: tcpSocket,
           rejectUnauthorized: false,
@@ -254,6 +254,8 @@ function performRDPHandshake(host, port, x224Request) {
           if (settled) return;
           settled = true;
           tlsSocket.setNoDelay(true);
+          try { tcpSocket.setKeepAlive(true, 15000); } catch (_) {}
+          try { tlsSocket.setKeepAlive(true, 15000); } catch (_) {}
           const peerCert = tlsSocket.getPeerCertificate(true);
           const certChain = extractCertChain(peerCert);
           resolve({ x224Response, certChain, tlsSocket });
@@ -300,6 +302,17 @@ class SimpleWebSocketConnection {
     this.onClose = null;
 
     socket.setNoDelay(true);
+    try { socket.setKeepAlive(true, 15000); } catch (_) {}
+    this._pingTimer = setInterval(() => {
+      if (!this.open || this.socket.destroyed) {
+        clearInterval(this._pingTimer);
+        this._pingTimer = null;
+        return;
+      }
+      try {
+        this.socket.write(encodeWsFrame(Buffer.alloc(0), 0x09));
+      } catch (_) {}
+    }, 18000);
     socket.on('data', (chunk) => this._consume(chunk));
     socket.on('end', () => this._handleClose());
     socket.on('close', () => this._handleClose());
@@ -331,6 +344,10 @@ class SimpleWebSocketConnection {
   close() {
     if (!this.open) return;
     this.open = false;
+    if (this._pingTimer) {
+      clearInterval(this._pingTimer);
+      this._pingTimer = null;
+    }
     try {
       if (!this.socket.destroyed) {
         this.socket.write(encodeWsFrame(Buffer.alloc(0), 0x08));
@@ -347,6 +364,10 @@ class SimpleWebSocketConnection {
   _handleClose() {
     if (!this.open) return;
     this.open = false;
+    if (this._pingTimer) {
+      clearInterval(this._pingTimer);
+      this._pingTimer = null;
+    }
     if (this.onClose) {
       const fn = this.onClose;
       this.onClose = null;
@@ -603,12 +624,14 @@ class RdpAudioSession {
 
   _extractNextRdpPdu(buf, preMcs = false) {
     if (buf.length < 2) return null;
-    if (buf[0] === 0x03 && buf[1] === 0x00) {
+    if ((buf[0] & 0x03) === 0x03 && buf[0] === 0x03) {
       if (buf.length < 4) return null;
-      const len = (buf[2] << 8) | buf[3];
-      if (len < 4) return { pkt: buf, rest: Buffer.alloc(0) };
-      if (buf.length < len) return null;
-      return { pkt: Buffer.from(buf.subarray(0, len)), rest: buf.subarray(len) };
+      if (buf[1] === 0x00) {
+        const len = (buf[2] << 8) | buf[3];
+        if (len < 4) return { pkt: buf, rest: Buffer.alloc(0) };
+        if (buf.length < len) return null;
+        return { pkt: Buffer.from(buf.subarray(0, len)), rest: buf.subarray(len) };
+      }
     }
     if (preMcs) {
       if (buf[0] === 0x30) {
@@ -642,6 +665,7 @@ class RdpAudioSession {
     } else {
       if (buf.length < 3) return null;
       len = ((b1 & 0x7f) << 8) | buf[2];
+      if (len < 3) return { pkt: buf, rest: Buffer.alloc(0) };
     }
     if (buf.length < len) return null;
     return { pkt: Buffer.from(buf.subarray(0, len)), rest: buf.subarray(len) };
@@ -1136,7 +1160,7 @@ const server = http.createServer((req, res) => {
     const payload = JSON.stringify({
       ok: true,
       service: 'pc-rdp-gateway',
-      version: '2.2.0',
+      version: '2.2.1',
       hostname: os.hostname(),
       default_user: `${os.hostname()}\\${os.userInfo().username}`,
       port: LISTEN_PORT,

@@ -2738,17 +2738,26 @@
       .split(":")[0]
       .trim();
 
-    const rawUrls = [];
-    // Nếu đang có kênh WebSocket bàn phím mở sẵn tới MacBook -> dùng thẳng tức thì (0ms, không chờ probe)
-    if (ws && ws.readyState === WebSocket.OPEN && ws.url) {
-      const liveProxy = ws.url.replace(/\/ws(\?.*)?$/, "/rdp-ws");
-      if (pcIp) {
-        return [liveProxy, `ws://${pcIp}:5051`];
+    const directPcUrl = pcIp ? `ws://${pcIp}:5051` : "";
+    const liveMacProxy =
+      ws && ws.readyState === WebSocket.OPEN && ws.url
+        ? ws.url.replace(/\/ws(\?.*)?$/, "/rdp-ws")
+        : "";
+
+    // Ưu tiên kết nối thẳng 1 chặng Điện thoại -> PC (:5051) để không phụ thuộc MacBook restart / sleep
+    if (directPcUrl) {
+      const probe = await probeWsOpen(directPcUrl, 450);
+      if (probe.ok) {
+        return liveMacProxy ? [directPcUrl, liveMacProxy] : [directPcUrl];
       }
-      return [liveProxy];
     }
-    if (pcIp) {
-      rawUrls.push(`ws://${pcIp}:5051`);
+    if (liveMacProxy) {
+      return directPcUrl ? [liveMacProxy, directPcUrl] : [liveMacProxy];
+    }
+
+    const rawUrls = [];
+    if (directPcUrl) {
+      rawUrls.push(directPcUrl);
     }
     for (const h of resolveCandidateHosts()) {
       const cleanH = h.replace(/^https?:\/\/|^wss?:\/\//, "").split("/")[0];
@@ -2774,6 +2783,28 @@
     }
   }
 
+  let rdpAutoReconnectTimes = [];
+
+  function canAutoReconnectRdp() {
+    const now = performance.now();
+    rdpAutoReconnectTimes = rdpAutoReconnectTimes.filter((t) => now - t < 18000);
+    if (rdpAutoReconnectTimes.length >= 3) return false;
+    rdpAutoReconnectTimes.push(now);
+    return true;
+  }
+
+  function isAuthFailureRdpError(err) {
+    try {
+      if (err && typeof err.kind === "function") {
+        const k = err.kind();
+        return k === 1 || k === 2 || k === 3;
+      }
+    } catch {
+      // ignore
+    }
+    return false;
+  }
+
   function formatIronRdpError(err) {
     if (!err) return "Lỗi kết nối không xác định";
     try {
@@ -2786,13 +2817,21 @@
       }
       if (typeof err.backtrace === "function") {
         const bt = String(err.backtrace() || "");
+        const low = bt.toLowerCase();
+        if (low.includes("not enough bytes") || low.includes("read frame")) {
+          return "Đường truyền hình ảnh ngắt tạm thời — bấm Kết nối lại.";
+        }
         const firstLine = bt.split("\n")[0].trim();
         if (firstLine) return firstLine;
       }
     } catch {
       // ignore
     }
-    return String(err.message || err);
+    const raw = String(err.message || err);
+    if (raw.toLowerCase().includes("not enough bytes")) {
+      return "Đường truyền hình ảnh ngắt tạm thời — bấm Kết nối lại.";
+    }
+    return raw;
   }
 
   const CODE_TO_SERVER_KEY = {
@@ -3576,9 +3615,19 @@
             rdpActiveEngine = "none";
           }
           syncRdpConnectionUI();
-          if (settled && !rdpManualDisconnect && kbLayout === "remote" && remoteLoginOverlay) {
-            setRdpStatus("Phiên Song song đã ngắt.", false);
-            remoteLoginOverlay.classList.remove("is-hidden");
+          if (settled && !rdpManualDisconnect && kbLayout === "remote") {
+            if (canAutoReconnectRdp()) {
+              setTimeout(() => {
+                if (!rdpManualDisconnect && kbLayout === "remote" && !isRemoteConnected() && !rdpConnecting) {
+                  void connectRdpSession();
+                }
+              }, 550);
+              return;
+            }
+            if (remoteLoginOverlay) {
+              setRdpStatus("Phiên Song song đã ngắt.", false);
+              remoteLoginOverlay.classList.remove("is-hidden");
+            }
           }
         }
       };
@@ -3826,8 +3875,8 @@
         closeRdpAudioWs();
         syncRdpConnectionUI();
         if (!rdpManualDisconnect && kbLayout === "remote") {
-          // Nếu người dùng vừa bật Microsoft Remote Desktop trên MacBook làm phiên Native nhường chỗ -> chuyển mượt sang Song song!
-          await new Promise((r) => setTimeout(r, 520));
+          // 1. Nếu người dùng vừa bật Microsoft Remote Desktop trên MacBook làm phiên Native nhường chỗ -> chuyển mượt sang Song song!
+          await new Promise((r) => setTimeout(r, 420));
           const chk = await checkMacParallelAvailable();
           if (chk.available) {
             rdpPreferExclusive = false;
@@ -3845,6 +3894,11 @@
               rdpConnecting = false;
               syncRdpConnectionUI();
             }
+          }
+          // 2. Nếu ngắt mạng / socket tạm thời (`read frame: not enough bytes`) -> tự nối lại ngầm không văng ra màn đăng nhập!
+          if (!isAuthFailureRdpError(errObj) && canAutoReconnectRdp()) {
+            void connectRdpSession();
+            return;
           }
         }
         if (kbLayout === "remote" && remoteLoginOverlay) {
@@ -4999,7 +5053,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.2.0";
+  const BUNDLED_WEB_VERSION = "2.2.1";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();

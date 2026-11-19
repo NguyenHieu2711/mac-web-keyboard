@@ -2449,19 +2449,20 @@ class _RdpAudioSession:
         blen = len(buf)
         if blen < 2:
             return None
-        if buf[0] == 0x03 and buf[1] == 0x00:
+        if (buf[0] & 0x03) == 0x03 and buf[0] == 0x03:
             if blen < 4:
                 return None
-            plen = (buf[2] << 8) | buf[3]
-            if plen < 4:
-                out = bytes(buf)
-                buf.clear()
+            if buf[1] == 0x00:
+                plen = (buf[2] << 8) | buf[3]
+                if plen < 4:
+                    out = bytes(buf)
+                    buf.clear()
+                    return out
+                if blen < plen:
+                    return None
+                out = bytes(buf[:plen])
+                del buf[:plen]
                 return out
-            if blen < plen:
-                return None
-            out = bytes(buf[:plen])
-            del buf[:plen]
-            return out
 
         # Giai đoạn xác thực CredSSP / NLA (trước MCS Connect Initial): khung tin là ASN.1 DER TSRequest (0x30)
         if pre_mcs:
@@ -2504,6 +2505,10 @@ class _RdpAudioSession:
             if blen < 3:
                 return None
             plen = ((b1 & 0x7F) << 8) | buf[2]
+            if plen < 3:
+                out = bytes(buf)
+                buf.clear()
+                return out
         if blen < plen:
             return None
         out = bytes(buf[:plen])
@@ -2948,13 +2953,18 @@ async def rdp_audio_ws(ws: WebSocket) -> None:
             pass
 
 
+_ACTIVE_RDP_WS_COUNT: int = 0
+
+
 @app.websocket("/rdp-ws")
 async def rdp_cleanpath_ws(ws: WebSocket) -> None:
+    global _ACTIVE_RDP_WS_COUNT
     subproto = None
     raw_proto = ws.headers.get("sec-websocket-protocol", "")
     if raw_proto:
         subproto = raw_proto.split(",")[0].strip() or None
     await ws.accept(subprotocol=subproto)
+    _ACTIVE_RDP_WS_COUNT += 1
 
     sid = ws.query_params.get("sid", "").strip()
     audio_sess: Optional[_RdpAudioSession] = None
@@ -2986,6 +2996,10 @@ async def rdp_cleanpath_ws(ws: WebSocket) -> None:
         raw_sock, x224_resp = await asyncio.to_thread(
             _tcp_x224_exchange, host, port, x224_req
         )
+        try:
+            raw_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except Exception:
+            pass
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
@@ -3046,6 +3060,7 @@ async def rdp_cleanpath_ws(ws: WebSocket) -> None:
         except Exception:
             pass
     finally:
+        _ACTIVE_RDP_WS_COUNT = max(0, _ACTIVE_RDP_WS_COUNT - 1)
         if audio_sess is not None:
             audio_sess.destroy()
         if pump_task is not None:
@@ -3622,7 +3637,9 @@ async def close_mac_rdp_session() -> dict:
 
 @app.websocket("/rdp-parallel-ws")
 async def rdp_parallel_ws(ws: WebSocket) -> None:
+    global _ACTIVE_RDP_WS_COUNT
     await ws.accept()
+    _ACTIVE_RDP_WS_COUNT += 1
     audio_q: asyncio.Queue = asyncio.Queue()
     _PC_WASAPI_CLIENTS.add(audio_q)
     await _push_pc_bridge_cmd()
@@ -3703,6 +3720,7 @@ async def rdp_parallel_ws(ws: WebSocket) -> None:
     except Exception:
         pass
     finally:
+        _ACTIVE_RDP_WS_COUNT = max(0, _ACTIVE_RDP_WS_COUNT - 1)
         running = False
         _PC_WASAPI_CLIENTS.discard(audio_q)
         try:
@@ -3738,7 +3756,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.2.0",
+        "version": "2.2.1",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
@@ -4287,9 +4305,14 @@ def start_git_auto_updater(check_every_sec: float = 45.0) -> None:
     import os
 
     def _updater() -> None:
+        pending_respawn = False
         while True:
             time.sleep(check_every_sec)
             try:
+                if pending_respawn and _ACTIVE_RDP_WS_COUNT <= 0:
+                    pending_respawn = False
+                    _trigger_clean_respawn()
+                    continue
                 if not (BASE_DIR / ".git").exists():
                     continue
                 subprocess.run(
@@ -4313,7 +4336,10 @@ def start_git_auto_updater(check_every_sec: float = 45.0) -> None:
                         check=False,
                     )
                     if pull_res.returncode == 0:
-                        _trigger_clean_respawn()
+                        if _ACTIVE_RDP_WS_COUNT > 0:
+                            pending_respawn = True
+                        else:
+                            _trigger_clean_respawn()
             except Exception:
                 pass
 
@@ -4344,5 +4370,5 @@ if __name__ == "__main__":
         port=5050,
         log_level="warning",
         ws_ping_interval=20,
-        ws_ping_timeout=20,
+        ws_ping_timeout=60,
     )
