@@ -1206,9 +1206,30 @@ const server = http.createServer((req, res) => {
     res.end();
     return;
   }
-  const cleanPath = String(req.url || '/').split('?')[0];
+  const rawUrlStr = String(req.url || '/');
+  const cleanPath = rawUrlStr.split('?')[0];
+  if (cleanPath === '/sync-ime') {
+    let wantVn = true;
+    try {
+      const u = new URL(rawUrlStr, 'http://127.0.0.1');
+      const vnParam = (u.searchParams.get('vn') || '1').trim().toLowerCase();
+      wantVn = vnParam === '1' || vnParam === 'true' || vnParam === 'vn';
+      const hintMacIp = (u.searchParams.get('mac_ip') || '').trim();
+      const sockIp = String(req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : '')
+        .replace(/^::ffff:/, '')
+        .trim();
+      const learnedIp = hintMacIp || (sockIp && sockIp !== '127.0.0.1' && sockIp !== '::1' ? sockIp : '');
+      if (learnedIp && /^\d+\.\d+\.\d+\.\d+$/.test(learnedIp)) {
+        updateLearnedMacBridgeIp(learnedIp);
+      }
+    } catch (_) {}
+    setWindowsUnikeyMode(wantVn);
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, vn: wantVn }));
+    return;
+  }
   if (cleanPath === '/health') {
-    let webVer = '2.2.7';
+    let webVer = '2.2.8';
     let etag = '';
     try {
       const b = getLiveWebBundle();
@@ -1218,8 +1239,9 @@ const server = http.createServer((req, res) => {
     const payload = JSON.stringify({
       ok: true,
       service: 'pc-rdp-gateway',
-      version: '2.2.7',
+      version: '2.2.8',
       web_version: webVer,
+      unikey_vn: lastUnikeyVnState,
       etag,
       hostname: os.hostname(),
       default_user: `${os.hostname()}\\${os.userInfo().username}`,
@@ -1327,15 +1349,71 @@ server.on('upgrade', (req, socket, head) => {
   handleRdpWebSocket(wsConn, sid);
 });
 
-// ── Bộ thu âm thanh hệ thống trực tiếp WASAPI Loopback (truyền sang điện thoại khi chạy Song song cùng MacBook) ──
+// ── Bộ thu âm thanh hệ thống trực tiếp WASAPI Loopback + Đồng bộ UniKey [V]/[E] từ EVKey trên MacBook ──
 const WASAPI_EXE = path.join(__dirname, 'pc_wasapi_loopback.exe');
-const MAC_BRIDGE_URL = process.env.MAC_BRIDGE_URL || 'ws://192.168.52.103:5050/pc-bridge-ws';
+const UNIKEY_SYNC_EXE = path.join(__dirname, 'pc_unikey_sync.exe');
+let dynamicMacBridgeUrl = process.env.MAC_BRIDGE_URL || 'ws://192.168.52.103:5050/pc-bridge-ws';
 
 let wasapiProc = null;
 let wasapiRxBuf = Buffer.alloc(0);
 let wasapiFormat = { rate: 44100, channels: 2 };
 let macBridgeWs = null;
 let macWantsAudio = false;
+
+let unikeySyncProc = null;
+let lastUnikeyVnState = null;
+
+function ensureUnikeySyncWorker() {
+  if (unikeySyncProc && !unikeySyncProc.killed) return unikeySyncProc;
+  if (!fs.existsSync(UNIKEY_SYNC_EXE)) return null;
+  try {
+    const proc = spawn(UNIKEY_SYNC_EXE, [], {
+      windowsHide: true,
+      stdio: ['pipe', 'ignore', 'ignore'],
+    });
+    unikeySyncProc = proc;
+    proc.on('exit', () => {
+      if (unikeySyncProc === proc) unikeySyncProc = null;
+    });
+    proc.on('error', () => {
+      if (unikeySyncProc === proc) unikeySyncProc = null;
+    });
+    return proc;
+  } catch (_) {
+    unikeySyncProc = null;
+    return null;
+  }
+}
+
+function setWindowsUnikeyMode(wantVn) {
+  const flag = wantVn ? 1 : 0;
+  lastUnikeyVnState = Boolean(wantVn);
+  const proc = ensureUnikeySyncWorker();
+  if (proc && proc.stdin && proc.stdin.writable) {
+    try {
+      proc.stdin.write(`${flag}\n`);
+      return;
+    } catch (_) {}
+  }
+  if (fs.existsSync(UNIKEY_SYNC_EXE)) {
+    try {
+      spawn(UNIKEY_SYNC_EXE, [String(flag)], { windowsHide: true, stdio: 'ignore' });
+    } catch (_) {}
+  }
+}
+
+function updateLearnedMacBridgeIp(ip) {
+  const nextUrl = `ws://${ip}:5050/pc-bridge-ws`;
+  if (nextUrl === dynamicMacBridgeUrl) return;
+  dynamicMacBridgeUrl = nextUrl;
+  if (!macBridgeWs || macBridgeWs.readyState !== 1) {
+    if (macBridgeWs) {
+      try { macBridgeWs.close(); } catch (_) {}
+      macBridgeWs = null;
+    }
+    connectOutboundMacBridge();
+  }
+}
 
 function hasLocalFallbackAudioListeners() {
   for (const sess of audioSessions.values()) {
@@ -1432,8 +1510,9 @@ function syncWasapiProcess() {
 
 function connectOutboundMacBridge() {
   if (typeof WebSocket === 'undefined') return;
+  if (macBridgeWs && (macBridgeWs.readyState === 0 || macBridgeWs.readyState === 1)) return;
   try {
-    const ws = new WebSocket(MAC_BRIDGE_URL);
+    const ws = new WebSocket(dynamicMacBridgeUrl);
     macBridgeWs = ws;
     ws.onopen = () => {
       if (macWantsAudio) {
@@ -1452,6 +1531,8 @@ function connectOutboundMacBridge() {
         } else if (msg.cmd === 'wasapi_stop') {
           macWantsAudio = false;
           syncWasapiProcess();
+        } else if (msg.cmd === 'sync_ime') {
+          setWindowsUnikeyMode(Boolean(msg.vn));
         }
       } catch (_) {}
     };

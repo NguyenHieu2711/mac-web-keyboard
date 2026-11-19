@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import logging
+import plistlib
 import re
 import socket
 import ssl
@@ -24,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -3354,12 +3356,13 @@ async def pc_bridge_ws(ws: WebSocket) -> None:
 
 
 _ACTIVE_RDP_3389_PIDS: Set[int] = set()
+_ACTIVE_RDP_PEER_IPS: Set[str] = set()
 _RDP_WATCHER_STARTED: bool = False
 _RDP_WATCHER_READY: bool = False
 
 
 def _refresh_active_rdp_pids_once() -> None:
-    global _ACTIVE_RDP_3389_PIDS, _RDP_WATCHER_READY
+    global _ACTIVE_RDP_3389_PIDS, _ACTIVE_RDP_PEER_IPS, _RDP_WATCHER_READY
     if not IS_MACOS:
         return
     my_pid = None
@@ -3370,10 +3373,12 @@ def _refresh_active_rdp_pids_once() -> None:
     except Exception:
         pass
     found_pids: Set[int] = set()
+    found_ips: Set[str] = set()
+    cur_pid = 0
     for lsof_bin in ("/usr/sbin/lsof", "lsof"):
         try:
             out = subprocess.check_output(
-                [lsof_bin, "-Pan", "-iTCP:3389", "-sTCP:ESTABLISHED", "-Fp"],
+                [lsof_bin, "-Pan", "-iTCP:3389", "-sTCP:ESTABLISHED", "-Fpn"],
                 stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=1.8,
@@ -3382,10 +3387,16 @@ def _refresh_active_rdp_pids_once() -> None:
                 if line.startswith("p"):
                     try:
                         p_val = int(line[1:].strip())
+                        cur_pid = p_val
                         if p_val > 0 and p_val != my_pid:
                             found_pids.add(p_val)
                     except ValueError:
-                        pass
+                        cur_pid = 0
+                elif line.startswith("n") and cur_pid > 0 and cur_pid != my_pid and "->" in line:
+                    rhs = line.split("->", 1)[1].strip()
+                    host_part = rhs.rsplit(":", 1)[0].strip("[]").strip()
+                    if host_part and host_part not in ("127.0.0.1", "::1", "localhost"):
+                        found_ips.add(host_part)
             break
         except FileNotFoundError:
             continue
@@ -3394,6 +3405,10 @@ def _refresh_active_rdp_pids_once() -> None:
         except Exception:
             return
     _ACTIVE_RDP_3389_PIDS = found_pids
+    if found_ips:
+        _ACTIVE_RDP_PEER_IPS = found_ips
+    elif not found_pids:
+        _ACTIVE_RDP_PEER_IPS = set()
     _RDP_WATCHER_READY = True
 
 
@@ -3421,6 +3436,604 @@ def _pid_has_established_rdp_socket(pid: int) -> bool:
     if not _RDP_WATCHER_READY:
         _refresh_active_rdp_pids_once()
     return pid in _ACTIVE_RDP_3389_PIDS
+
+
+_EVKEY_SENSITIVE_VKS: Set[int] = set(list(range(0, 52)) + [53])
+
+
+class MacRdpEvkeySyncBridge:
+    """
+    Đồng bộ 1:1 chế độ Tiếng Việt [V] / Tiếng Anh [E] giữa MacBook (EVKey / OpenKey / Bộ gõ Mac)
+    và máy tính Windows từ xa (UniKeyNT) khi gõ trong Microsoft Remote Desktop / Windows App:
+    1) Khi cửa sổ phiên Remote PC đang active trên Mac: chuyển thẳng phím gõ chữ nguyên bản tới
+       tiến trình RDP qua `CGEventPostToPid` (bỏ qua hook `vk=0` gây lỗi font của EVKey trên Mac
+       nhưng vẫn giữ nguyên biểu tượng [V] / [E] trên thanh Menu Bar của MacBook).
+    2) Theo dõi thời gian thực trạng thái [V] / [E] (hoặc thoát EVKey) trên MacBook và đồng bộ tức thì
+       sang `UniKeyHookSharedMem` trên Windows PC qua cổng `:5051/sync-ime`.
+    """
+
+    def __init__(self) -> None:
+        self.available: bool = False
+        self.active_rdp_pid: int = 0
+        self.mac_vn_mode: bool = True
+        self.ime_pid: int = 0
+        self._last_rdp_pid: int = 0
+        self._bypassed_vks: Set[int] = set()
+        self._tap_loop_ref: Any = None
+        self._tap_gen: int = 0
+        self._last_pushed_vn: Optional[bool] = None
+        self._last_push_at: float = 0.0
+        self._ax_win_attr: Any = None
+        self._ax_title_attr: Any = None
+        self._ax_extras_attr: Any = None
+        self._ax_children_attr: Any = None
+        self._ax_value_attr: Any = None
+        self._ax_desc_attr: Any = None
+        self._carbon_lib: Any = None
+
+        if IS_MACOS:
+            self._init_ax_attrs()
+            self._start_tap_worker()
+            self._start_sync_watcher()
+
+    def _init_ax_attrs(self) -> None:
+        cf = injector._cf_lib
+        if cf is None:
+            return
+        try:
+            self._ax_win_attr = cf.CFStringCreateWithCString(None, b"AXFocusedWindow", 0x08000100)
+            self._ax_title_attr = cf.CFStringCreateWithCString(None, b"AXTitle", 0x08000100)
+            self._ax_extras_attr = cf.CFStringCreateWithCString(None, b"AXExtrasMenuBar", 0x08000100)
+            self._ax_children_attr = cf.CFStringCreateWithCString(None, b"AXChildren", 0x08000100)
+            self._ax_value_attr = cf.CFStringCreateWithCString(None, b"AXValue", 0x08000100)
+            self._ax_desc_attr = cf.CFStringCreateWithCString(None, b"AXDescription", 0x08000100)
+            ax = injector._ax_lib
+            if ax is not None:
+                ax.AXUIElementCreateApplication.restype = ctypes.c_void_p
+                ax.AXUIElementCreateApplication.argtypes = [ctypes.c_int32]
+        except Exception:
+            pass
+        try:
+            carbon = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Carbon.framework/Carbon")
+            carbon.TISCopyCurrentKeyboardInputSource.restype = ctypes.c_void_p
+            carbon.TISCopyCurrentKeyboardInputSource.argtypes = []
+            carbon.TISGetInputSourceProperty.restype = ctypes.c_void_p
+            carbon.TISGetInputSourceProperty.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            self._carbon_lib = carbon
+        except Exception:
+            self._carbon_lib = None
+
+    def _start_tap_worker(self) -> None:
+        self._tap_gen += 1
+        my_gen = self._tap_gen
+
+        def _run_tap() -> None:
+            try:
+                import Quartz  # type: ignore
+
+                q = Quartz
+                mod_chord_mask = (
+                    int(q.kCGEventFlagMaskCommand)
+                    | int(q.kCGEventFlagMaskControl)
+                    | int(q.kCGEventFlagMaskAlternate)
+                )
+                tap_holder: List[Any] = [None]
+
+                def _key_cb(proxy, event_type, event, refcon):
+                    try:
+                        if event_type in (
+                            q.kCGEventTapDisabledByTimeout,
+                            q.kCGEventTapDisabledByUserInput,
+                        ):
+                            if tap_holder[0] is not None:
+                                q.CGEventTapEnable(tap_holder[0], True)
+                            return event
+
+                        user_tag = int(
+                            q.CGEventGetIntegerValueField(event, q.kCGEventSourceUserData)
+                        )
+                        if user_tag == 0x4D4B4232:
+                            return event
+
+                        vk = int(
+                            q.CGEventGetIntegerValueField(event, q.kCGKeyboardEventKeycode)
+                        )
+
+                        if event_type == q.kCGEventKeyUp:
+                            if vk in self._bypassed_vks:
+                                self._bypassed_vks.discard(vk)
+                                t_pid = self.active_rdp_pid or self._last_rdp_pid
+                                if t_pid > 0:
+                                    ev_cp = q.CGEventCreateCopy(event)
+                                    if ev_cp is not None:
+                                        q.CGEventSetIntegerValueField(
+                                            ev_cp, q.kCGEventSourceUserData, 0x4D4B4232
+                                        )
+                                        q.CGEventPostToPid(t_pid, ev_cp)
+                                        return None
+                            return event
+
+                        if event_type == q.kCGEventKeyDown:
+                            t_pid = self.active_rdp_pid
+                            if t_pid <= 0 or vk not in _EVKEY_SENSITIVE_VKS:
+                                return event
+                            flags = int(q.CGEventGetFlags(event))
+                            if (flags & mod_chord_mask) != 0:
+                                return event
+                            ev_cp = q.CGEventCreateCopy(event)
+                            if ev_cp is not None:
+                                q.CGEventSetIntegerValueField(
+                                    ev_cp, q.kCGEventSourceUserData, 0x4D4B4232
+                                )
+                                q.CGEventPostToPid(t_pid, ev_cp)
+                                self._bypassed_vks.add(vk)
+                                return None
+                        return event
+                    except Exception:
+                        return event
+
+                mask = (1 << int(q.kCGEventKeyDown)) | (1 << int(q.kCGEventKeyUp))
+                tap = q.CGEventTapCreate(
+                    q.kCGHIDEventTap,
+                    q.kCGHeadInsertEventTap,
+                    q.kCGEventTapOptionDefault,
+                    mask,
+                    _key_cb,
+                    None,
+                )
+                if tap is None:
+                    return
+                tap_holder[0] = tap
+                self.available = True
+                src = q.CFMachPortCreateRunLoopSource(None, tap, 0)
+                loop_ref = q.CFRunLoopGetCurrent()
+                if my_gen == self._tap_gen:
+                    self._tap_loop_ref = loop_ref
+                q.CFRunLoopAddSource(loop_ref, src, q.kCFRunLoopCommonModes)
+                q.CGEventTapEnable(tap, True)
+                q.CFRunLoopRun()
+                try:
+                    q.CGEventTapEnable(tap, False)
+                except Exception:
+                    pass
+            except Exception as exc:
+                logger.debug("MacRdpEvkeySyncBridge tap error: %s", exc)
+
+        threading.Thread(target=_run_tap, daemon=True).start()
+
+    def _reinsert_tap_ahead_of_ime(self) -> None:
+        try:
+            import Quartz  # type: ignore
+
+            old_loop = self._tap_loop_ref
+            self._tap_loop_ref = None
+            if old_loop is not None:
+                Quartz.CFRunLoopStop(old_loop)
+        except Exception:
+            pass
+        self._start_tap_worker()
+
+    def _cf_str_to_py(self, ptr_val: int) -> str:
+        if not ptr_val or injector._objc is None:
+            return ""
+        try:
+            return str(injector._objc.objc_object(c_void_p=ptr_val) or "")
+        except Exception:
+            return ""
+
+    def _detect_frontmost_rdp_pid(self) -> int:
+        ax = injector._ax_lib
+        cf = injector._cf_lib
+        proc = injector._proc_lib
+        if (
+            ax is None
+            or cf is None
+            or proc is None
+            or not injector._ax_sys_wide
+            or not injector._ax_focused_attr
+        ):
+            return 0
+        app_ref = ctypes.c_void_p()
+        err = ax.AXUIElementCopyAttributeValue(
+            injector._ax_sys_wide, injector._ax_focused_attr, ctypes.byref(app_ref)
+        )
+        if err != 0 or not app_ref.value:
+            return 0
+        try:
+            pid_c = ctypes.c_int32(0)
+            if ax.AXUIElementGetPid(app_ref.value, ctypes.byref(pid_c)) != 0 or pid_c.value <= 0:
+                return 0
+            pid = int(pid_c.value)
+            buf = ctypes.create_string_buffer(4096)
+            n = proc.proc_pidpath(pid, buf, 4096)
+            app_path = buf.value.decode("utf-8", errors="ignore").lower() if n > 0 else ""
+            if not (
+                "microsoft remote desktop" in app_path
+                or "windows app" in app_path
+                or "com.microsoft.rdc" in app_path
+            ):
+                return 0
+            if not _pid_has_established_rdp_socket(pid):
+                return 0
+            if self._ax_win_attr and self._ax_title_attr:
+                win_ref = ctypes.c_void_p()
+                if (
+                    ax.AXUIElementCopyAttributeValue(
+                        app_ref.value, self._ax_win_attr, ctypes.byref(win_ref)
+                    )
+                    == 0
+                    and win_ref.value
+                ):
+                    try:
+                        title_ref = ctypes.c_void_p()
+                        if (
+                            ax.AXUIElementCopyAttributeValue(
+                                win_ref.value, self._ax_title_attr, ctypes.byref(title_ref)
+                            )
+                            == 0
+                            and title_ref.value
+                        ):
+                            try:
+                                w_title = self._cf_str_to_py(title_ref.value).strip().lower()
+                                if w_title and w_title in _RDP_LAUNCHER_TITLES:
+                                    return 0
+                            finally:
+                                cf.CFRelease(title_ref.value)
+                    finally:
+                        cf.CFRelease(win_ref.value)
+            return pid
+        except Exception:
+            return 0
+        finally:
+            cf.CFRelease(app_ref.value)
+
+    def _read_ime_ax_status(self, ime_pid: int) -> Optional[bool]:
+        ax = injector._ax_lib
+        cf = injector._cf_lib
+        if (
+            ax is None
+            or cf is None
+            or injector._objc is None
+            or not self._ax_extras_attr
+            or not self._ax_children_attr
+        ):
+            return None
+        app_ax = ax.AXUIElementCreateApplication(ime_pid)
+        if not app_ax:
+            return None
+        try:
+            bar_ref = ctypes.c_void_p()
+            if (
+                ax.AXUIElementCopyAttributeValue(
+                    app_ax, self._ax_extras_attr, ctypes.byref(bar_ref)
+                )
+                != 0
+                or not bar_ref.value
+            ):
+                return None
+            try:
+                return self._scan_ax_node_for_ve(bar_ref.value, 0)
+            finally:
+                cf.CFRelease(bar_ref.value)
+        except Exception:
+            return None
+        finally:
+            cf.CFRelease(app_ax)
+
+    def _scan_ax_node_for_ve(self, elem_ptr: int, depth: int) -> Optional[bool]:
+        if depth > 3 or not elem_ptr:
+            return None
+        ax = injector._ax_lib
+        cf = injector._cf_lib
+        for attr in (self._ax_title_attr, self._ax_value_attr, self._ax_desc_attr):
+            if not attr:
+                continue
+            val_ref = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(elem_ptr, attr, ctypes.byref(val_ref)) == 0 and val_ref.value:
+                try:
+                    txt = self._cf_str_to_py(val_ref.value).strip()
+                    low = txt.lower()
+                    if txt in ("V", "VN", "VI") or "tiếng việt" in low or "vietnamese" in low:
+                        return True
+                    if txt in ("E", "EN") or "tiếng anh" in low or "english" in low:
+                        return False
+                finally:
+                    cf.CFRelease(val_ref.value)
+        ch_ref = ctypes.c_void_p()
+        if (
+            ax.AXUIElementCopyAttributeValue(elem_ptr, self._ax_children_attr, ctypes.byref(ch_ref))
+            == 0
+            and ch_ref.value
+        ):
+            try:
+                arr = injector._objc.objc_object(c_void_p=ch_ref.value)
+                for item in arr:
+                    res = self._scan_ax_node_for_ve(item.__c_void_p__(), depth + 1)
+                    if res is not None:
+                        return res
+            except Exception:
+                pass
+            finally:
+                cf.CFRelease(ch_ref.value)
+        return None
+
+    def _classify_ime_status_icon(self, ime_pid: int) -> Optional[bool]:
+        q = lens_capturer._quartz
+        objc_mod = lens_capturer._objc
+        if q is None or objc_mod is None:
+            return None
+        try:
+            with objc_mod.autorelease_pool():
+                win_list = q.CGWindowListCopyWindowInfo(
+                    q.kCGWindowListOptionAll, q.kCGNullWindowID
+                )
+                if not win_list:
+                    return None
+                target_wid = 0
+                for w in win_list:
+                    if int(w.get("kCGWindowOwnerPID", 0) or 0) != ime_pid:
+                        continue
+                    layer = int(w.get("kCGWindowLayer", 0) or 0)
+                    if layer < 20:
+                        continue
+                    b = w.get("kCGWindowBounds") or {}
+                    ww = float(b.get("Width", 0.0) or 0.0)
+                    wh = float(b.get("Height", 0.0) or 0.0)
+                    if 12.0 <= ww <= 96.0 and 12.0 <= wh <= 52.0:
+                        target_wid = int(w.get("kCGWindowNumber", 0) or 0)
+                        break
+                if target_wid <= 0:
+                    return None
+
+                cg_img = q.CGWindowListCreateImage(
+                    q.CGRectNull,
+                    q.kCGWindowListOptionIncludingWindow,
+                    target_wid,
+                    q.kCGWindowImageBoundsIgnoreFraming,
+                )
+                if cg_img is None:
+                    return None
+                iw = int(q.CGImageGetWidth(cg_img))
+                ih = int(q.CGImageGetHeight(cg_img))
+                bpr = int(q.CGImageGetBytesPerRow(cg_img))
+                bpp = int(q.CGImageGetBitsPerPixel(cg_img)) // 8
+                if iw < 12 or ih < 12 or bpp < 4:
+                    return None
+                prov = q.CGImageGetDataProvider(cg_img)
+                if prov is None:
+                    return None
+                cf_data = q.CGDataProviderCopyData(prov)
+                if cf_data is None:
+                    return None
+                buf = bytes(cf_data)
+
+                x0, x1 = int(iw * 0.16), max(int(iw * 0.16) + 4, int(iw * 0.84))
+                y0, y1 = int(ih * 0.14), max(int(ih * 0.14) + 4, int(ih * 0.86))
+                alphas: List[int] = []
+                lums: List[int] = []
+                for yy in range(y0, y1):
+                    r_off = yy * bpr
+                    for xx in range(x0, x1):
+                        p = r_off + xx * bpp
+                        if p + 3 < len(buf):
+                            alphas.append(buf[p + 3])
+                            lums.append(buf[p] + buf[p + 1] + buf[p + 2])
+                if not alphas:
+                    return None
+                alphas_sorted = sorted(alphas)
+                med_alpha = alphas_sorted[len(alphas_sorted) // 2]
+
+                fg_coords: List[Tuple[int, int]] = []
+                if med_alpha < 55:
+                    for yy in range(y0, y1):
+                        r_off = yy * bpr
+                        for xx in range(x0, x1):
+                            p = r_off + xx * bpp
+                            if p + 3 < len(buf) and buf[p + 3] >= 105:
+                                fg_coords.append((xx, yy))
+                else:
+                    lums_sorted = sorted(lums)
+                    med_lum = lums_sorted[len(lums_sorted) // 2]
+                    hi_lum = lums_sorted[-1]
+                    lo_lum = lums_sorted[0]
+                    if (hi_lum - med_lum) >= (med_lum - lo_lum):
+                        contrast = hi_lum - med_lum
+                        if contrast < 85:
+                            return None
+                        thresh = med_lum + int(contrast * 0.56)
+                        for yy in range(y0, y1):
+                            r_off = yy * bpr
+                            for xx in range(x0, x1):
+                                p = r_off + xx * bpp
+                                if p + 3 < len(buf) and (buf[p] + buf[p + 1] + buf[p + 2]) >= thresh:
+                                    fg_coords.append((xx, yy))
+                    else:
+                        contrast = med_lum - lo_lum
+                        if contrast < 85:
+                            return None
+                        thresh = med_lum - int(contrast * 0.56)
+                        for yy in range(y0, y1):
+                            r_off = yy * bpr
+                            for xx in range(x0, x1):
+                                p = r_off + xx * bpp
+                                if p + 3 < len(buf) and (buf[p] + buf[p + 1] + buf[p + 2]) <= thresh:
+                                    fg_coords.append((xx, yy))
+
+                if len(fg_coords) < 12:
+                    return None
+                gy0 = min(pt[1] for pt in fg_coords)
+                gy1 = max(pt[1] for pt in fg_coords)
+                gx0 = min(pt[0] for pt in fg_coords)
+                gx1 = max(pt[0] for pt in fg_coords)
+                gh = gy1 - gy0 + 1
+                gw = gx1 - gx0 + 1
+                if gh < 6 or gw < 4:
+                    return None
+
+                rows_map: Dict[int, List[int]] = {}
+                for xx, yy in fg_coords:
+                    rows_map.setdefault(yy, []).append(xx)
+
+                top_y_start = gy0 + int(gh * 0.10)
+                top_y_end = max(top_y_start + 1, gy0 + int(gh * 0.34))
+                top_spans = [
+                    max(rows_map[ry]) - min(rows_map[ry]) + 1
+                    for ry in range(top_y_start, top_y_end + 1)
+                    if ry in rows_map
+                ]
+
+                bot_y_start = gy0 + int(gh * 0.76)
+                bot_y_end = max(bot_y_start + 1, gy0 + int(gh * 0.94))
+                bot_spans = [
+                    max(rows_map[ry]) - min(rows_map[ry]) + 1
+                    for ry in range(bot_y_start, bot_y_end + 1)
+                    if ry in rows_map
+                ]
+
+                if not top_spans or not bot_spans:
+                    return None
+                top_w = float(max(top_spans))
+                bot_w = sum(bot_spans) / float(len(bot_spans))
+                ratio = bot_w / max(1.0, top_w)
+                if ratio < 0.60:
+                    return True
+                if ratio > 0.70:
+                    return False
+                return None
+        except Exception:
+            return None
+
+    def _read_ime_plist_mode(self, bundle_id: str) -> Optional[bool]:
+        if not bundle_id:
+            return None
+        try:
+            plist_path = Path.home() / "Library" / "Preferences" / f"{bundle_id}.plist"
+            if not plist_path.exists():
+                return None
+            data = plistlib.loads(plist_path.read_bytes())
+            if isinstance(data, dict):
+                for key in ("vLanguage", "Language", "Vietnamese", "InputLanguage"):
+                    if key in data:
+                        return bool(int(data[key]))
+        except Exception:
+            pass
+        return None
+
+    def _read_macos_native_vn_input(self) -> bool:
+        if self._carbon_lib is None or injector._objc is None or injector._cf_lib is None:
+            return False
+        src_ptr = self._carbon_lib.TISCopyCurrentKeyboardInputSource()
+        if not src_ptr:
+            return False
+        try:
+            k_id = ctypes.c_void_p.in_dll(self._carbon_lib, "kTISPropertyInputSourceID")
+            prop = self._carbon_lib.TISGetInputSourceProperty(src_ptr, k_id)
+            src_id = self._cf_str_to_py(prop).lower()
+            return any(k in src_id for k in ("vietnamese", "telex", "vni", "viqr"))
+        except Exception:
+            return False
+        finally:
+            injector._cf_lib.CFRelease(src_ptr)
+
+    def _detect_mac_ime_state(self) -> Tuple[int, bool]:
+        objc_mod = lens_capturer._objc
+        if objc_mod is None:
+            return (0, self._read_macos_native_vn_input())
+        ime_pid = 0
+        ime_bundle = ""
+        try:
+            import AppKit  # type: ignore
+
+            with objc_mod.autorelease_pool():
+                apps = AppKit.NSWorkspace.sharedWorkspace().runningApplications()
+                for app_item in apps:
+                    bid = str(app_item.bundleIdentifier() or "")
+                    name = str(app_item.localizedName() or "")
+                    low = f"{bid} {name}".lower()
+                    if "evkey" in low or "openkey" in low:
+                        ime_pid = int(app_item.processIdentifier())
+                        ime_bundle = bid or "com.lamquangminh.evkey"
+                        break
+        except Exception:
+            pass
+
+        if ime_pid <= 0:
+            return (0, self._read_macos_native_vn_input())
+
+        mode = self._read_ime_ax_status(ime_pid)
+        if mode is None:
+            mode = self._classify_ime_status_icon(ime_pid)
+        if mode is None:
+            mode = self._read_ime_plist_mode(ime_bundle)
+        if mode is None:
+            mode = self.mac_vn_mode
+        return (ime_pid, bool(mode))
+
+    def _push_vn_to_pc(self, want_vn: bool) -> None:
+        targets: List[str] = []
+        for ip in sorted(_ACTIVE_RDP_PEER_IPS):
+            if ip not in targets:
+                targets.append(ip)
+        if "192.168.52.230" not in targets:
+            targets.append("192.168.52.230")
+
+        vn_flag = 1 if want_vn else 0
+        pushed_ok = False
+        for ip in targets:
+            url = f"http://{ip}:5051/sync-ime?vn={vn_flag}"
+            try:
+                with urllib.request.urlopen(url, timeout=0.55) as resp:
+                    if resp.status == 200:
+                        pushed_ok = True
+                        break
+            except Exception:
+                continue
+        if pushed_ok:
+            self._last_pushed_vn = want_vn
+            self._last_push_at = time.monotonic()
+
+    def _start_sync_watcher(self) -> None:
+        def _watcher() -> None:
+            last_ime_check_at = 0.0
+            prev_ime_pid = 0
+            while True:
+                time.sleep(0.09)
+                try:
+                    now = time.monotonic()
+                    prev_rdp = self.active_rdp_pid
+                    cur_rdp = self._detect_frontmost_rdp_pid()
+                    self.active_rdp_pid = cur_rdp
+                    if cur_rdp > 0:
+                        self._last_rdp_pid = cur_rdp
+
+                    has_any_rdp = cur_rdp > 0 or bool(_ACTIVE_RDP_3389_PIDS)
+                    ime_interval = 0.16 if has_any_rdp else 0.90
+                    if (cur_rdp > 0 and prev_rdp == 0) or (now - last_ime_check_at >= ime_interval):
+                        last_ime_check_at = now
+                        ime_pid, want_vn = self._detect_mac_ime_state()
+                        self.ime_pid = ime_pid
+                        self.mac_vn_mode = want_vn
+
+                        if ime_pid > 0 and ime_pid != prev_ime_pid:
+                            prev_ime_pid = ime_pid
+                            time.sleep(0.35)
+                            self._reinsert_tap_ahead_of_ime()
+                        elif ime_pid == 0:
+                            prev_ime_pid = 0
+
+                        if has_any_rdp:
+                            just_focused = cur_rdp > 0 and prev_rdp == 0
+                            vn_changed = want_vn != self._last_pushed_vn
+                            heartbeat_due = cur_rdp > 0 and (now - self._last_push_at >= 2.5)
+                            if just_focused or vn_changed or heartbeat_due:
+                                self._push_vn_to_pc(want_vn)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_watcher, daemon=True).start()
+
+
+rdp_evkey_sync = MacRdpEvkeySyncBridge()
 
 
 def find_mac_rdp_window() -> Optional[Dict[str, Any]]:
@@ -3936,10 +4549,12 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.2.7",
+        "version": "2.2.8",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
+        "mac_evkey_vn": rdp_evkey_sync.mac_vn_mode,
+        "rdp_evkey_bypass_pid": rdp_evkey_sync.active_rdp_pid,
         "kb_layout": injector.kb_layout,
         "lens_available": lens_capturer.available,
         "kvm_available": kvm_bridge.available,
