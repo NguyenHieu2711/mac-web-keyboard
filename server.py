@@ -3487,8 +3487,7 @@ def _dispatch_parallel_rdp_input(
             btn_idx = int(data.get("btn", 0))
             cnt = max(1, int(data.get("count", 1)))
             state["held_btn"] = btn_idx
-            if not kvm_bridge.captured:
-                q.CGWarpMouseCursorPosition((sx, sy))
+            q.CGWarpMouseCursorPosition((sx, sy))
             if btn_idx == 2:
                 ev_t, cg_b = q.kCGEventRightMouseDown, q.kCGMouseButtonRight
             elif btn_idx == 1:
@@ -3516,8 +3515,7 @@ def _dispatch_parallel_rdp_input(
             q.CGEventPost(q.kCGHIDEventTap, ev)
         elif mtype == "ptr_move":
             held = int(state.get("held_btn", -1))
-            if not kvm_bridge.captured:
-                q.CGWarpMouseCursorPosition((sx, sy))
+            q.CGWarpMouseCursorPosition((sx, sy))
             if held == 0:
                 ev_t, cg_b = q.kCGEventLeftMouseDragged, q.kCGMouseButtonLeft
             elif held == 2:
@@ -3535,8 +3533,7 @@ def _dispatch_parallel_rdp_input(
             q.CGEventPost(q.kCGHIDEventTap, ev)
         elif mtype == "ptr_wheel":
             _activate_mac_pid_if_needed(pid)
-            if not kvm_bridge.captured:
-                q.CGWarpMouseCursorPosition((sx, sy))
+            q.CGWarpMouseCursorPosition((sx, sy))
             last_wx = float(state.get("last_wheel_sx", -9999.0))
             last_wy = float(state.get("last_wheel_sy", -9999.0))
             if abs(sx - last_wx) > 2.0 or abs(sy - last_wy) > 2.0:
@@ -3588,7 +3585,14 @@ def _dispatch_parallel_rdp_input(
 
 @app.get("/rdp-mode-check")
 async def rdp_mode_check() -> dict:
-    win = await asyncio.to_thread(find_mac_rdp_window)
+    def _probe():
+        win = find_mac_rdp_window()
+        if win is None and IS_MACOS:
+            _refresh_active_rdp_pids_once()
+            win = find_mac_rdp_window()
+        return win
+
+    win = await asyncio.to_thread(_probe)
     return {
         "ok": True,
         "parallel_available": win is not None,
@@ -3611,7 +3615,13 @@ async def close_mac_rdp_session() -> dict:
                         try
                             set wName to (name of w as string)
                             if wName is not in {"PCs", "Workspaces", "Devices", "Apps", "Microsoft Remote Desktop", "Windows App"} then
-                                click (first button of w whose subrole is "AXCloseButton")
+                                try
+                                    if (value of attribute "AXFullScreen" of w) is true then
+                                        set value of attribute "AXFullScreen" of w to false
+                                        delay 0.45
+                                    end if
+                                end try
+                                perform action "AXPress" of (first button of w whose subrole is "AXCloseButton")
                             end if
                         end try
                     end repeat
@@ -3756,7 +3766,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.2.1",
+        "version": "2.2.2",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,

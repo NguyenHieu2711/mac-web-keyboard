@@ -2298,7 +2298,7 @@
   let rdpSession = null;
   let rdpParallelWs = null;
   let rdpActiveEngine = "none"; // "none" | "parallel" | "native"
-  let rdpPreferExclusive = rdpMouseMode !== "mac";
+  let rdpPreferExclusive = false;
   let rdpManualDisconnect = false;
   let rdpConnecting = false;
   let rdpHudExpanded = false;
@@ -3848,25 +3848,24 @@
 
       if (
         rdpDesktopScale !== 100 ||
-        ds.width !== RDP_TARGET_W ||
-        ds.height !== RDP_TARGET_H
+        remoteCanvas.width !== RDP_TARGET_W ||
+        remoteCanvas.height !== RDP_TARGET_H
       ) {
         const activeRef = connectedSession;
         const triggerInitialScale = () => {
-          if (rdpSession !== activeRef) return;
-          try {
-            const curDs = rdpSession.desktopSize();
-            if (curDs.width === RDP_TARGET_W && curDs.height === RDP_TARGET_H) {
-              setRemoteStageAspect(RDP_TARGET_W, RDP_TARGET_H);
-              return;
-            }
-          } catch {
-            // ignore
+          if (rdpSession !== activeRef || !remoteCanvas) return;
+          if (
+            remoteCanvas.width === RDP_TARGET_W &&
+            remoteCanvas.height === RDP_TARGET_H
+          ) {
+            setRemoteStageAspect(RDP_TARGET_W, RDP_TARGET_H);
+            return;
           }
           applyLiveRdpDesktopScale(false);
         };
-        setTimeout(triggerInitialScale, 450);
-        setTimeout(triggerInitialScale, 1350);
+        for (const delayMs of [350, 850, 1500, 2400, 3600, 5000]) {
+          setTimeout(triggerInitialScale, delayMs);
+        }
       }
 
       const handleNativeEnded = async (errObj) => {
@@ -3875,27 +3874,24 @@
         closeRdpAudioWs();
         syncRdpConnectionUI();
         if (!rdpManualDisconnect && kbLayout === "remote") {
-          // 1. Nếu người dùng vừa bật Microsoft Remote Desktop trên MacBook làm phiên Native nhường chỗ -> chuyển mượt sang Song song!
-          await new Promise((r) => setTimeout(r, 420));
-          const chk = await checkMacParallelAvailable();
-          if (chk.available) {
-            rdpPreferExclusive = false;
-            if (rdpMouseMode !== "mac") {
-              rdpMouseMode = "mac";
-              kvmActive = false;
-              pushKvmConfigToServer();
-            }
-            rdpConnecting = true;
-            syncRdpConnectionUI();
-            try {
-              await startParallelRdpSession(chk.macBase);
-              return;
-            } catch {
-              rdpConnecting = false;
+          // 1. Kiểm tra kỹ 2 nhịp xem MacBook vừa mở Microsoft Remote Desktop không -> nếu có thì sang thẳng Song song, tuyệt đối không giành lại cổng :3389!
+          for (const waitMs of [320, 680]) {
+            await new Promise((r) => setTimeout(r, waitMs));
+            const chk = await checkMacParallelAvailable();
+            if (chk.available) {
+              rdpPreferExclusive = false;
+              rdpConnecting = true;
               syncRdpConnectionUI();
+              try {
+                await startParallelRdpSession(chk.macBase);
+                return;
+              } catch {
+                rdpConnecting = false;
+                syncRdpConnectionUI();
+              }
             }
           }
-          // 2. Nếu ngắt mạng / socket tạm thời (`read frame: not enough bytes`) -> tự nối lại ngầm không văng ra màn đăng nhập!
+          // 2. Nếu Mac không mở Remote mà chỉ ngắt mạng tạm thời -> tự nối lại ngầm
           if (!isAuthFailureRdpError(errObj) && canAutoReconnectRdp()) {
             void connectRdpSession();
             return;
@@ -3982,23 +3978,10 @@
     }
     if (rdpMouseMode === "mac") {
       kvmActive = false;
-      syncSmartKvmButtonsUI();
-      updateOverlayCursorVisual();
-      pushKvmConfigToServer();
-      return;
     }
-    // Khi chọn `Dùng ở Điện thoại` hoặc `Nối 2 cửa sổ`: đảm bảo phiên điện thoại chạy độc lập (Native 2248x1080)
-    // để con trỏ Mac và con trỏ Điện thoại tách biệt hoàn toàn 100%, không bao giờ bị giật/nhảy trùng nhau!
-    if (rdpActiveEngine === "parallel") {
-      rdpPreferExclusive = true;
-      syncSmartKvmButtonsUI();
-      pushKvmConfigToServer();
-      switchCoexistMode(true);
-      return;
-    }
-    rdpPreferExclusive = true;
-    syncCoexistButtonUI();
+    // Giữ nguyên kết nối hiện tại (Song song hoặc Độc quyền), tuyệt đối KHÔNG đóng hay đá phiên Remote trên Mac!
     syncSmartKvmButtonsUI();
+    updateOverlayCursorVisual();
     pushKvmConfigToServer();
   }
 
@@ -4744,17 +4727,6 @@
     } else {
       rdpPreferExclusive = !rdpPreferExclusive;
     }
-    // Nếu chuyển về chế độ Song song (phản chiếu cửa sổ Mac) -> tự đặt chuột về riêng Mac để không xung đột 2 con trỏ
-    if (!rdpPreferExclusive && rdpMouseMode !== "mac") {
-      rdpMouseMode = "mac";
-      kvmActive = false;
-      try {
-        localStorage.setItem("mac_kb_rdp_mouse_mode", "mac");
-      } catch {
-        // ignore
-      }
-      pushKvmConfigToServer();
-    }
     syncCoexistButtonUI();
     syncSmartKvmButtonsUI();
     closeParallelRdpWs();
@@ -5053,7 +5025,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.2.1";
+  const BUNDLED_WEB_VERSION = "2.2.2";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();
