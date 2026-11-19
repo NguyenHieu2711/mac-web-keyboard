@@ -130,6 +130,30 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
     }
 }
 
+static NSImage *make_pill_mask(CGFloat radius) {
+    CGFloat dim = radius * 2.0 + 1.0;
+    NSImage *img = [NSImage imageWithSize:NSMakeSize(dim, dim)
+                                  flipped:NO
+                           drawingHandler:^BOOL(NSRect dstRect) {
+        [[NSColor blackColor] setFill];
+        NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:dstRect
+                                                             xRadius:radius
+                                                             yRadius:radius];
+        [path fill];
+        return YES;
+    }];
+    img.capInsets = NSEdgeInsetsMake(radius, radius, radius, radius);
+    img.resizingMode = NSImageResizingModeStretch;
+    return img;
+}
+
+static BOOL dock_is_dark_mode(void) {
+    NSAppearance *app = [NSApp effectiveAppearance];
+    if (!app) return NO;
+    NSAppearanceName best = [app bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
+    return [best isEqualToString:NSAppearanceNameDarkAqua];
+}
+
 @interface SecondaryDockController : NSObject
 @property (nonatomic) CGDirectDisplayID vdispId;
 @property (nonatomic) pid_t selfPid;
@@ -167,22 +191,25 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
                                  NSWindowCollectionBehaviorIgnoresCycle);
     _panel.opaque = NO;
     _panel.backgroundColor = [NSColor clearColor];
-    _panel.hasShadow = YES;
+    // Tắt đổ bóng cửa sổ hình chữ nhật gốc của NSPanel để loại bỏ hoàn toàn viền/quầng đen vuông quanh Dock
+    _panel.hasShadow = NO;
     _panel.ignoresMouseEvents = NO;
     _panel.hidesOnDeactivate = NO;
     _panel.becomesKeyOnlyIfNeeded = YES;
     _panel.releasedWhenClosed = NO;
 
     _bgView = [[NSVisualEffectView alloc] initWithFrame:initRect];
-    _bgView.material = NSVisualEffectMaterialHUDWindow;
+    // Kính mờ chuẩn macOS Dock / SmartRightDock (tự đồng bộ Light/Dark của hệ thống, không dùng HUD đen đặc)
+    _bgView.material = NSVisualEffectMaterialPopover;
     _bgView.blendingMode = NSVisualEffectBlendingModeBehindWindow;
     _bgView.state = NSVisualEffectStateActive;
     _bgView.autoresizingMask = (NSViewWidthSizable | NSViewHeightSizable);
+    _bgView.maskImage = make_pill_mask(13.0);
     _bgView.wantsLayer = YES;
-    _bgView.layer.cornerRadius = 15.0;
+    _bgView.layer.cornerRadius = 13.0;
     _bgView.layer.masksToBounds = YES;
-    _bgView.layer.borderWidth = 1.0;
-    _bgView.layer.borderColor = [[NSColor colorWithWhite:1.0 alpha:0.16] CGColor];
+    _bgView.layer.borderWidth = 0.75;
+    _bgView.layer.borderColor = [[NSColor colorWithWhite:1.0 alpha:0.42] CGColor];
     _panel.contentView = _bgView;
     return self;
 }
@@ -330,8 +357,9 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
     self.appOrder = nextOrder;
     self.appState = appsByPid;
 
-    NSMutableString *sig = [NSMutableString stringWithFormat:@"%.0f,%.0f,%.0f:",
-                            scr.frame.origin.x, scr.frame.origin.y, scr.frame.size.width];
+    BOOL isDark = dock_is_dark_mode();
+    NSMutableString *sig = [NSMutableString stringWithFormat:@"%.0f,%.0f,%.0f:%d:",
+                            scr.frame.origin.x, scr.frame.origin.y, scr.frame.size.width, isDark ? 1 : 0];
     for (NSNumber *pidNum in self.appOrder) {
         NSDictionary *st = appsByPid[pidNum];
         [sig appendFormat:@"%@:%d%d,", pidNum, [st[@"visible"] boolValue], [st[@"active"] boolValue]];
@@ -342,24 +370,28 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
         NSArray<NSView *> *oldSubs = [self.bgView.subviews copy];
         for (NSView *sv in oldSubs) [sv removeFromSuperview];
 
-        CGFloat dockW = 96.0;
-        CGFloat dockH = 26.0;
+        CGFloat dockW = 64.0;
+        CGFloat dockH = 16.0;
+        CGFloat radius = 7.0;
         if (self.appOrder.count == 0) {
-            self.bgView.layer.cornerRadius = 11.0;
-            NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect((dockW - 32.0) * 0.5, (dockH - 2.5) * 0.5, 32.0, 2.5)];
+            self.panel.alphaValue = 0.65;
+            NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect((dockW - 24.0) * 0.5, (dockH - 2.0) * 0.5, 24.0, 2.0)];
             bar.wantsLayer = YES;
-            bar.layer.cornerRadius = 1.25;
-            bar.layer.backgroundColor = [[NSColor colorWithWhite:1.0 alpha:0.28] CGColor];
+            bar.layer.cornerRadius = 1.0;
+            bar.layer.backgroundColor = isDark
+                ? [[NSColor colorWithWhite:1.0 alpha:0.32] CGColor]
+                : [[NSColor colorWithWhite:0.15 alpha:0.26] CGColor];
             [self.bgView addSubview:bar];
         } else {
-            self.bgView.layer.cornerRadius = 13.0;
+            self.panel.alphaValue = 0.96;
+            radius = 13.0;
             NSUInteger count = self.appOrder.count;
-            CGFloat itemStep = 38.0;
+            CGFloat itemStep = 36.0;
             CGFloat maxW = MAX(120.0, scr.frame.size.width - 48.0);
-            NSUInteger maxItems = (NSUInteger)MAX(1, floor((maxW - 16.0) / itemStep));
+            NSUInteger maxItems = (NSUInteger)MAX(1, floor((maxW - 14.0) / itemStep));
             if (count > maxItems) count = maxItems;
-            dockW = 16.0 + count * itemStep;
-            dockH = 44.0;
+            dockW = 14.0 + count * itemStep;
+            dockH = 42.0;
 
             for (NSUInteger i = 0; i < count; i++) {
                 NSNumber *pidNum = self.appOrder[i];
@@ -368,8 +400,8 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
                 BOOL isVis = [st[@"visible"] boolValue];
                 BOOL isAct = [st[@"active"] boolValue];
 
-                CGFloat bx = 8.0 + i * itemStep + 2.0;
-                NSButton *btn = [[NSButton alloc] initWithFrame:NSMakeRect(bx, 8.0, 34.0, 31.0)];
+                CGFloat bx = 7.0 + i * itemStep + 2.0;
+                NSButton *btn = [[NSButton alloc] initWithFrame:NSMakeRect(bx, 7.5, 32.0, 30.0)];
                 btn.bordered = NO;
                 btn.title = @"";
                 btn.bezelStyle = NSBezelStyleRegularSquare;
@@ -383,16 +415,18 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
                 NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
                 if (rapp && rapp.icon) {
                     NSImage *ico = [rapp.icon copy];
-                    ico.size = NSMakeSize(28.0, 28.0);
+                    ico.size = NSMakeSize(26.0, 26.0);
                     btn.image = ico;
                 }
                 [self.bgView addSubview:btn];
 
                 if (isVis) {
-                    NSView *dot = [[NSView alloc] initWithFrame:NSMakeRect(bx + 15.25, 2.5, 3.5, 3.5)];
+                    NSView *dot = [[NSView alloc] initWithFrame:NSMakeRect(bx + 14.25, 2.25, 3.5, 3.5)];
                     dot.wantsLayer = YES;
                     dot.layer.cornerRadius = 1.75;
-                    dot.layer.backgroundColor = [[NSColor colorWithWhite:1.0 alpha:(isAct ? 0.92 : 0.38)] CGColor];
+                    dot.layer.backgroundColor = isDark
+                        ? [[NSColor colorWithWhite:1.0 alpha:(isAct ? 0.90 : 0.36)] CGColor]
+                        : [[NSColor colorWithWhite:0.12 alpha:(isAct ? 0.72 : 0.28)] CGColor];
                     [self.bgView addSubview:dot];
                 }
             }
@@ -400,7 +434,14 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
 
         CGFloat dockX = scr.frame.origin.x + (scr.frame.size.width - dockW) * 0.5;
         CGFloat dockY = scr.frame.origin.y + 6.0;
+        self.bgView.maskImage = make_pill_mask(radius);
+        self.bgView.layer.cornerRadius = radius;
+        self.bgView.layer.borderColor = isDark
+            ? [[NSColor colorWithWhite:1.0 alpha:0.20] CGColor]
+            : [[NSColor colorWithWhite:1.0 alpha:0.48] CGColor];
         [self.panel setFrame:NSMakeRect(dockX, dockY, dockW, dockH) display:YES];
+        self.bgView.frame = NSMakeRect(0, 0, dockW, dockH);
+        [self.panel invalidateShadow];
     }
     [self.panel orderFrontRegardless];
 }
