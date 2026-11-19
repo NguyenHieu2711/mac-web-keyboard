@@ -153,17 +153,46 @@ namespace MacWebKeyboard
             public double RelH;
         }
 
+        private sealed class TimedSnapshot
+        {
+            public DateTime CapturedUtc;
+            public string Sig;
+            public int SecCount;
+            public Dictionary<long, WindowSlot> Layout;
+        }
+
         private static readonly object StateLock = new object();
         private static IntPtr _defaultDesktop = IntPtr.Zero;
         private static string _lastSeenSig = "";
         private static string _lastStable2MonSig = "";
         private static DateTime _lastSigChangedAt = DateTime.UtcNow;
         private static Dictionary<long, WindowSlot> _saved2MonLayout = new Dictionary<long, WindowSlot>();
+        private static readonly List<TimedSnapshot> _history = new List<TimedSnapshot>();
+        private static DateTime _dropQuarantineSince = DateTime.MinValue;
+        private static int _dropQuarantineTargetSec = -1;
         private static bool _restorePending = false;
         private static int _restoreGen = 0;
         private static string _lastRestoreSummary = "";
         private static string _lastDiag = "";
+        private static readonly List<string> _events = new List<string>();
         private static DateTime _lastStatusWriteAt = DateTime.MinValue;
+
+        private static void AddEventLocked(string msg)
+        {
+            _events.Add(string.Format("{0:HH:mm:ss} {1}", DateTime.Now, msg));
+            if (_events.Count > 12) _events.RemoveAt(0);
+        }
+
+        private static int CountSecondary(Dictionary<long, WindowSlot> map)
+        {
+            if (map == null) return 0;
+            int n = 0;
+            foreach (var kv in map)
+            {
+                if (kv.Value.IsSecondary) n++;
+            }
+            return n;
+        }
 
         private static long GetExStyle(IntPtr hWnd)
         {
@@ -386,7 +415,7 @@ namespace MacWebKeyboard
             return v;
         }
 
-        private static bool MoveWindowToTargetScreen(WindowSlot slot, Screen targetScreen, Screen otherScreen)
+        private static bool MoveWindowToTargetScreen(WindowSlot slot, Screen targetScreen)
         {
             IntPtr hWnd = new IntPtr(slot.Hwnd);
             if (!IsWindow(hWnd) || !IsWindowVisible(hWnd) || IsHungAppWindow(hWnd)) return false;
@@ -425,7 +454,6 @@ namespace MacWebKeyboard
 
             if (curMin)
             {
-                // Giữ nguyên trạng thái thu nhỏ nhưng cập nhật tọa độ mở lại về đúng màn đích
                 wp.rcNormalPosition = new RECT { Left = nx, Top = ny, Right = nx + nw, Bottom = ny + nh };
                 SetWindowPlacement(hWnd, ref wp);
                 return true;
@@ -445,11 +473,42 @@ namespace MacWebKeyboard
                 return true;
             }
 
-            // Gọi 2 lần để tự khóa chuẩn kích thước khi chuyển giữa 2 màn có DPI scale khác nhau (Per-Monitor DPI)
             SetWindowPos(hWnd, IntPtr.Zero, nx, ny, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
-            Thread.Sleep(20);
+            Thread.Sleep(25);
             SetWindowPos(hWnd, IntPtr.Zero, nx, ny, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
             return true;
+        }
+
+        private static void RollbackToPreTeardownSnapshotLocked(DateTime nowUtc)
+        {
+            // Nếu trước lúc đổi màn/RDP <= 2.5s Windows kịp đẩy app sang màn chính,
+            // lùi lại lấy đúng bản snapshot sạch trước khi Windows phá bố cục!
+            TimedSnapshot best = null;
+            for (int i = _history.Count - 1; i >= 0; i--)
+            {
+                TimedSnapshot snap = _history[i];
+                if (snap.SecCount > 0 && (nowUtc - snap.CapturedUtc).TotalSeconds >= 2.2)
+                {
+                    best = snap;
+                    break;
+                }
+            }
+            if (best == null)
+            {
+                for (int i = _history.Count - 1; i >= 0; i--)
+                {
+                    if (_history[i].SecCount > 0)
+                    {
+                        best = _history[i];
+                        break;
+                    }
+                }
+            }
+            if (best != null && best.SecCount > CountSecondary(_saved2MonLayout))
+            {
+                _saved2MonLayout = best.Layout;
+                AddEventLocked("ROLLBACK sec=" + best.SecCount);
+            }
         }
 
         private static void TriggerRestoreAsync(int gen, string newSig)
@@ -463,7 +522,7 @@ namespace MacWebKeyboard
                 try
                 {
                     int totalMoved = 0;
-                    int[] delaysMs = new int[] { 1050, 1250 };
+                    int[] delaysMs = new int[] { 1000, 1200, 1800 };
                     for (int pass = 0; pass < delaysMs.Length; pass++)
                     {
                         Thread.Sleep(delaysMs[pass]);
@@ -490,10 +549,9 @@ namespace MacWebKeyboard
                         {
                             WindowSlot slot = kv.Value;
                             Screen target = slot.IsSecondary ? sec : pri;
-                            Screen other = slot.IsSecondary ? pri : sec;
                             try
                             {
-                                if (MoveWindowToTargetScreen(slot, target, other))
+                                if (MoveWindowToTargetScreen(slot, target))
                                     movedThisPass++;
                             }
                             catch
@@ -509,9 +567,12 @@ namespace MacWebKeyboard
                         {
                             _lastStable2MonSig = newSig;
                             _lastSigChangedAt = DateTime.UtcNow;
+                            _dropQuarantineSince = DateTime.MinValue;
+                            _dropQuarantineTargetSec = -1;
                             _restorePending = false;
                             _lastRestoreSummary = string.Format("restored={0} at {1:HH:mm:ss} sig={2}",
                                 totalMoved, DateTime.Now, newSig);
+                            AddEventLocked("RESTORE_DONE moved=" + totalMoved);
                         }
                     }
                     WriteStatusFile(true);
@@ -540,27 +601,38 @@ namespace MacWebKeyboard
 
             lock (StateLock)
             {
-                if (!string.Equals(sig, _lastSeenSig, StringComparison.Ordinal) || fromSessionEvent)
+                bool sigChanged = !string.Equals(sig, _lastSeenSig, StringComparison.Ordinal);
+                if (sigChanged || fromSessionEvent)
                 {
+                    if (sigChanged)
+                    {
+                        AddEventLocked("TOPO " + (_lastSeenSig.Length > 0 ? _lastSeenSig.Substring(0, 1) : "0") + "->" + all.Length);
+                    }
+                    else if (fromSessionEvent)
+                    {
+                        AddEventLocked("SESSION_REATTACH mon=" + all.Length);
+                    }
+
+                    // Trước khi đổi topo/session, đảm bảo không dùng bản snapshot bị Windows làm rỗng ngay trước đó
+                    RollbackToPreTeardownSnapshotLocked(now);
+                    _dropQuarantineSince = DateTime.MinValue;
+                    _dropQuarantineTargetSec = -1;
+
                     _lastSeenSig = sig;
                     _lastSigChangedAt = now;
 
                     if (all.Length >= 2 && pri != null && sec != null)
                     {
-                        bool hasSavedSec = false;
-                        foreach (var kv in _saved2MonLayout)
-                        {
-                            if (kv.Value.IsSecondary) { hasSavedSec = true; break; }
-                        }
-
+                        int savedSec = CountSecondary(_saved2MonLayout);
                         if (!string.IsNullOrEmpty(_lastStable2MonSig) &&
                             (fromSessionEvent || !string.Equals(sig, _lastStable2MonSig, StringComparison.Ordinal)) &&
-                            hasSavedSec)
+                            savedSec > 0)
                         {
                             _restorePending = true;
                             _restoreGen++;
                             restoreGenLocal = _restoreGen;
                             needRestore = true;
+                            AddEventLocked("SCHEDULE_RESTORE sec=" + savedSec);
                         }
                         else if (string.IsNullOrEmpty(_lastStable2MonSig))
                         {
@@ -569,6 +641,8 @@ namespace MacWebKeyboard
                             if (initCur.Count > 0)
                             {
                                 _saved2MonLayout = initCur;
+                                int initSec = CountSecondary(initCur);
+                                _history.Add(new TimedSnapshot { CapturedUtc = now, Sig = sig, SecCount = initSec, Layout = initCur });
                             }
                         }
                     }
@@ -581,14 +655,52 @@ namespace MacWebKeyboard
                 }
                 else if (all.Length >= 2 && pri != null && sec != null && !_restorePending)
                 {
-                    // Chỉ cập nhật snapshot khi cấu hình 2 màn hình đã ổn định >= 2.8 giây
                     if ((now - _lastSigChangedAt).TotalSeconds >= 2.8 || _saved2MonLayout.Count == 0)
                     {
                         var cur = CaptureCurrentLayout(pri, sec);
                         if (cur.Count > 0)
                         {
-                            _saved2MonLayout = cur;
-                            _lastStable2MonSig = sig;
+                            int curSec = CountSecondary(cur);
+                            int savedSec = CountSecondary(_saved2MonLayout);
+
+                            if (curSec > 0)
+                            {
+                                _history.Add(new TimedSnapshot
+                                {
+                                    CapturedUtc = now,
+                                    Sig = sig,
+                                    SecCount = curSec,
+                                    Layout = cur,
+                                });
+                                while (_history.Count > 24) _history.RemoveAt(0);
+                            }
+
+                            // CHỐNG ĐÈ RÁC TRƯỚC KHI NGẮT MÀN HÌNH:
+                            // Nếu số app ở Màn phụ tụt đột ngột về 0 -> giữ cách ly 10 giây ổn định mới chấp nhận!
+                            // Nếu tụt một phần (ví dụ 2 -> 1) -> giữ cách ly 4 giây ổn định mới chấp nhận!
+                            if (savedSec > 0 && curSec < savedSec)
+                            {
+                                double requiredSec = (curSec == 0) ? 10.0 : 4.0;
+                                if (_dropQuarantineTargetSec != curSec || _dropQuarantineSince == DateTime.MinValue)
+                                {
+                                    _dropQuarantineTargetSec = curSec;
+                                    _dropQuarantineSince = now;
+                                }
+                                else if ((now - _dropQuarantineSince).TotalSeconds >= requiredSec)
+                                {
+                                    _saved2MonLayout = cur;
+                                    _lastStable2MonSig = sig;
+                                    _dropQuarantineSince = DateTime.MinValue;
+                                    _dropQuarantineTargetSec = -1;
+                                }
+                            }
+                            else
+                            {
+                                _dropQuarantineSince = DateTime.MinValue;
+                                _dropQuarantineTargetSec = -1;
+                                _saved2MonLayout = cur;
+                                _lastStable2MonSig = sig;
+                            }
                         }
                     }
                 }
@@ -614,7 +726,7 @@ namespace MacWebKeyboard
         private static void WriteStatusFile(bool force)
         {
             DateTime now = DateTime.UtcNow;
-            if (!force && (now - _lastStatusWriteAt).TotalSeconds < 6.0) return;
+            if (!force && (now - _lastStatusWriteAt).TotalSeconds < 4.0) return;
             _lastStatusWriteAt = now;
             try
             {
@@ -654,6 +766,12 @@ namespace MacWebKeyboard
                         if (i > 0) sb.Append(", ");
                         sb.Append("\"").Append(EscapeJson(secNames[i])).Append("\"");
                     }
+                    sb.Append("],\n  \"events\": [");
+                    for (int i = 0; i < _events.Count; i++)
+                    {
+                        if (i > 0) sb.Append(", ");
+                        sb.Append("\"").Append(EscapeJson(_events[i])).Append("\"");
+                    }
                     sb.Append("]\n}\n");
                 }
                 File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
@@ -671,7 +789,6 @@ namespace MacWebKeyboard
             {
                 if (!createdNew) return;
 
-                // Luôn gắn trực tiếp vào desktop tương tác thật (WinSta0\Default) kể cả khi khởi chạy ngầm
                 try
                 {
                     IntPtr hDesk = OpenDesktop("Default", 0, false, 0x01FF);
@@ -689,7 +806,6 @@ namespace MacWebKeyboard
                     try { SetProcessDPIAware(); } catch { }
                 }
 
-                // Khởi tạo ngay snapshot ban đầu
                 CheckTopologyAndSnapshot(true, false);
 
                 SystemEvents.DisplaySettingsChanged += (s, e) => CheckTopologyAndSnapshot(true, false);
