@@ -1393,7 +1393,7 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (cleanPath === '/health') {
-    let webVer = '2.3.6';
+    let webVer = '2.3.7';
     let etag = '';
     try {
       const b = getLiveWebBundle();
@@ -1403,7 +1403,7 @@ const server = http.createServer((req, res) => {
     const payload = JSON.stringify({
       ok: true,
       service: 'pc-rdp-gateway',
-      version: '2.3.6',
+      version: '2.3.7',
       web_version: webVer,
       unikey_vn: lastUnikeyVnState,
       etag,

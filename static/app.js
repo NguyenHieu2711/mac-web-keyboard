@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.6";
+  const BUNDLED_BOOT_VER = "2.3.7";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -4259,15 +4259,21 @@
           return;
         }
         macExtDisplayActive = true;
-        await startParallelRdpSession(macBase, "/mac-virtual-display-ws");
+        try {
+          await startParallelRdpSession(macBase, "/mac-virtual-display-ws");
+        } catch {
+          await new Promise((r) => setTimeout(r, 450));
+          await startParallelRdpSession(macBase, "/mac-virtual-display-ws");
+        }
       } else {
         macExtDisplayActive = false;
         setRdpStatus("Đã tắt Màn phụ #2 — MacBook về 1 màn hình.", false);
         if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
       }
-    } catch {
+    } catch (err) {
       macExtDisplayActive = false;
-      setRdpStatus("Không gọi được MacBook (:5050) để bật/tắt Màn phụ.", false);
+      const errDetail = err && err.message ? ` (${err.message})` : "";
+      setRdpStatus(`Không kết nối được Màn phụ trên MacBook${errDetail}`, false);
       if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
     } finally {
       macExtDisplayBusy = false;
@@ -5464,7 +5470,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.6";
+  const BUNDLED_WEB_VERSION = "2.3.7";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();

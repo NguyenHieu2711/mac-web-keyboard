@@ -4564,16 +4564,26 @@ async def mac_virtual_display_toggle(req: Request) -> dict:
             st = mac_vdisp.start(logical_w=logical_w, logical_h=logical_h, hidpi=hidpi)
         else:
             st = mac_vdisp.stop()
-        rdp_refresh: Dict[str, Any] = {"rdp_was_open": bool(was_rdp), "rdp_reconnected": False}
+        # Trả kết quả NGAY (~0.5s) để Điện thoại nối WebSocket tức thì không bao giờ timeout;
+        # việc tự làm mới Windows App RDP chạy nền song song ngay sau đó!
+        rdp_refresh: Dict[str, Any] = {"rdp_was_open": bool(was_rdp), "rdp_reconnecting_async": False}
         if st.get("ok") and auto_reconnect and was_rdp is not None:
             _RDP_PID_TCP_CACHE.clear()
             _ACTIVE_RDP_3389_PIDS.clear()
-            rdp_refresh = mac_vdisp.auto_refresh_windows_app_session(
-                was_rdp_info=was_rdp,
-                find_rdp_fn=find_mac_rdp_window,
-                quartz=injector._quartz,
-                expect_second_monitor=want_enable,
-            )
+            rdp_refresh["rdp_reconnecting_async"] = True
+
+            def _bg_refresh() -> None:
+                try:
+                    mac_vdisp.auto_refresh_windows_app_session(
+                        was_rdp_info=was_rdp,
+                        find_rdp_fn=find_mac_rdp_window,
+                        quartz=injector._quartz,
+                        expect_second_monitor=want_enable,
+                    )
+                except Exception:
+                    pass
+
+            threading.Thread(target=_bg_refresh, daemon=True).start()
         st = mac_vdisp.status(injector._quartz)
         st["rdp_refresh"] = rdp_refresh
         return st
@@ -4721,7 +4731,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.3.6",
+        "version": "2.3.7",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,

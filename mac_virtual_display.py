@@ -81,12 +81,41 @@ static void handle_sig(int sig) {
     g_should_exit = 1;
 }
 
-static void position_display_right_of_main(CGDirectDisplayID vdispId) {
+static void select_best_hidpi_mode(CGDirectDisplayID vdispId, NSUInteger logicalW, NSUInteger logicalH, unsigned int wantHiDPI) {
+    NSDictionary *opts = @{ (__bridge id)kCGDisplayShowDuplicateLowResolutionModes: @YES };
+    CFArrayRef modes = CGDisplayCopyAllDisplayModes(vdispId, (__bridge CFDictionaryRef)opts);
+    if (!modes) return;
+    CGDisplayModeRef best = NULL;
+    CFIndex cnt = CFArrayGetCount(modes);
+    for (CFIndex i = 0; i < cnt; i++) {
+        CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+        size_t w = CGDisplayModeGetWidth(m);
+        size_t h = CGDisplayModeGetHeight(m);
+        size_t pw = CGDisplayModeGetPixelWidth(m);
+        size_t ph = CGDisplayModeGetPixelHeight(m);
+        if (w == logicalW && h == logicalH) {
+            if (wantHiDPI && pw == logicalW * 2 && ph == logicalH * 2) {
+                best = m;
+                break;
+            }
+            if (!best) best = m;
+        }
+    }
+    if (best) {
+        CGDisplaySetDisplayMode(vdispId, best, NULL);
+    }
+    CFRelease(modes);
+}
+
+static void position_display_left_of_main(CGDirectDisplayID vdispId) {
     CGDirectDisplayID mainId = CGMainDisplayID();
     if (vdispId == 0 || vdispId == mainId) return;
     CGRect mainBounds = CGDisplayBounds(mainId);
-    int32_t targetX = (int32_t)(mainBounds.origin.x + mainBounds.size.width);
-    int32_t targetY = (int32_t)(mainBounds.origin.y);
+    CGRect vBounds = CGDisplayBounds(vdispId);
+    if (vBounds.size.width < 64 || vBounds.size.height < 64) return;
+    // Đặt màn hình phụ ở BÊN TRÁI màn chính MacBook (di chuột sang trái để sang Điện thoại), căn giữa chiều dọc
+    int32_t targetX = (int32_t)(mainBounds.origin.x - vBounds.size.width);
+    int32_t targetY = (int32_t)(mainBounds.origin.y + (mainBounds.size.height - vBounds.size.height) * 0.5);
 
     CGDisplayConfigRef cfg = NULL;
     if (CGBeginDisplayConfiguration(&cfg) == kCGErrorSuccess && cfg != NULL) {
@@ -179,7 +208,9 @@ int main(int argc, const char * argv[]) {
 
         CGDirectDisplayID did = vdisp.displayID;
         usleep(180000);
-        position_display_right_of_main(did);
+        select_best_hidpi_mode(did, logicalW, logicalH, wantHiDPI);
+        usleep(120000);
+        position_display_left_of_main(did);
         usleep(120000);
 
         CGRect b = CGDisplayBounds(did);
@@ -225,8 +256,8 @@ class MacVirtualDisplayManager:
         self._hidpi: bool = True
         self._last_error: str = ""
         self._cache_dir = Path.home() / ".cache" / "mac-web-keyboard"
-        self._bin_path = self._cache_dir / "mac_vdisp_helper_v1"
-        self._src_path = self._cache_dir / "mac_vdisp_helper_v1.m"
+        self._bin_path = self._cache_dir / "mac_vdisp_helper_v2"
+        self._src_path = self._cache_dir / "mac_vdisp_helper_v2.m"
         atexit.register(self.stop)
 
     def _ensure_helper_binary(self) -> Tuple[bool, str]:
