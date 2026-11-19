@@ -1206,7 +1206,20 @@ function getLiveWebBundle() {
 
 const PREVIEW_HELPER_PORT = Number(process.env.PC_PREVIEW_PORT || 5052);
 const CONSOLE_STREAMER_EXE = path.join(__dirname, 'pc_console_streamer.exe');
+const DISPLAY_LAYOUT_GUARD_EXE = path.join(__dirname, 'pc_display_layout_guard.exe');
 const pcParallelClients = new Set();
+
+function tryStartDisplayLayoutGuard() {
+  if (!fs.existsSync(DISPLAY_LAYOUT_GUARD_EXE)) return;
+  try {
+    const p = spawn(DISPLAY_LAYOUT_GUARD_EXE, [], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    p.unref();
+  } catch (_) {}
+}
 
 function tryStartConsoleStreamer() {
   if (!fs.existsSync(CONSOLE_STREAMER_EXE)) return;
@@ -1705,5 +1718,6 @@ server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   const ips = getLanIps().map((x) => `${x.ip}:${LISTEN_PORT}`).join(', ');
   console.log(`[PC-RDP-Gateway] Listening on ${LISTEN_HOST}:${LISTEN_PORT} (${ips})`);
   tryStartConsoleStreamer();
+  tryStartDisplayLayoutGuard();
   connectOutboundMacBridge();
 });
