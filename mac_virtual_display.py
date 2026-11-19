@@ -184,13 +184,15 @@ static BOOL dock_is_dark_mode(void) {
     _appState = [NSMutableDictionary dictionary];
     _lastSig = @"";
 
-    NSRect initRect = NSMakeRect(0, 0, 120, 36);
+    NSRect initRect = NSMakeRect(0, 0, 42, 120);
     _panel = [[NSPanel alloc] initWithContentRect:initRect
                                         styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
                                           backing:NSBackingStoreBuffered
                                             defer:NO];
-    _panel.level = NSFloatingWindowLevel;
+    // Ngang tầng Dock gốc / SmartRightDock (layer 20) + FullScreenAuxiliary để LUÔN nổi trên cả app Full Screen (Remote Desktop)
+    _panel.level = (NSWindowLevel)CGWindowLevelForKey(kCGDockWindowLevelKey);
     _panel.collectionBehavior = (NSWindowCollectionBehaviorCanJoinAllSpaces |
+                                 NSWindowCollectionBehaviorFullScreenAuxiliary |
                                  NSWindowCollectionBehaviorStationary |
                                  NSWindowCollectionBehaviorIgnoresCycle);
     _panel.opaque = NO;
@@ -235,6 +237,7 @@ static BOOL dock_is_dark_mode(void) {
     BOOL isVis = info ? [info[@"visible"] boolValue] : YES;
     BOOL isTop = info ? [info[@"top"] boolValue] : NO;
     BOOL hasMain = info ? [info[@"hasMain"] boolValue] : NO;
+    BOOL isFs = info ? [info[@"isFs"] boolValue] : NO;
     unsigned int winId = info ? [info[@"winId"] unsignedIntValue] : 0;
     NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
 
@@ -248,6 +251,9 @@ static BOOL dock_is_dark_mode(void) {
         }
         fprintf(stdout, "DOCK_ACTIVATE %d %u\n", (int)pid, winId);
         fflush(stdout);
+    } else if (isFs && hasMain) {
+        // App Full Screen trải cả 2 màn (như Remote Desktop): không ẩn để tránh tắt nhầm màn MacBook
+        return;
     } else {
         if (winId > 0) self.knownWins[@(winId)] = @(pid);
         self.minGraceUntil[@(pid)] = @(CFAbsoluteTimeGetCurrent() + 0.65);
@@ -339,6 +345,7 @@ static BOOL dock_is_dark_mode(void) {
         }
 
         BOOL effectiveVisible = (trackedVisible && !inMinGrace && !rapp.isHidden);
+        BOOL isFsWin = NO;
         if (trackedVisible) {
             // Ghi nhớ lâu dài winId đã từng mở trên Màn phụ #2 để khi ẩn/thu nhỏ icon LUÔN giữ nguyên trên Dock phụ!
             self.knownWins[winIdNum] = @(pid);
@@ -347,6 +354,7 @@ static BOOL dock_is_dark_mode(void) {
                 if (topVdispPid == 0) topVdispPid = pid;
                 if (wb.size.width >= vb.size.width - 4.0 && wb.size.height >= vb.size.height - 4.0) {
                     hasFullscreen = YES;
+                    isFsWin = YES;
                 }
             }
         }
@@ -362,6 +370,7 @@ static BOOL dock_is_dark_mode(void) {
                 @"top": @(isTop),
                 @"active": @(isAct),
                 @"hasMain": @NO,
+                @"isFs": @(isFsWin),
             }];
             appsByPid[pidNum] = entry;
         } else if (effectiveVisible && ![entry[@"visible"] boolValue]) {
@@ -369,6 +378,7 @@ static BOOL dock_is_dark_mode(void) {
             entry[@"visible"] = @YES;
             entry[@"top"] = @(isTop);
             entry[@"active"] = @(isAct);
+            entry[@"isFs"] = @(isFsWin);
         }
     }
 
@@ -425,12 +435,9 @@ static BOOL dock_is_dark_mode(void) {
         }
     }
 
-    if (hasFullscreen) {
-        [self.panel orderOut:nil];
-        return;
-    }
+    (void)hasFullscreen;
 
-    // Giữ thứ tự icon ổn định trái -> phải, chỉ thêm mới hoặc bỏ app đã rời màn phụ
+    // Giữ thứ tự icon ổn định trên -> dưới ở mép PHẢI Màn phụ, luôn nổi kể cả khi đang Full Screen (Remote Desktop)
     NSMutableArray<NSNumber *> *nextOrder = [NSMutableArray array];
     for (NSNumber *pidNum in self.appOrder) {
         if (appsByPid[pidNum]) [nextOrder addObject:pidNum];
@@ -443,8 +450,8 @@ static BOOL dock_is_dark_mode(void) {
     self.appState = appsByPid;
 
     BOOL isDark = dock_is_dark_mode();
-    NSMutableString *sig = [NSMutableString stringWithFormat:@"%.0f,%.0f,%.0f:%d:",
-                            scr.frame.origin.x, scr.frame.origin.y, scr.frame.size.width, isDark ? 1 : 0];
+    NSMutableString *sig = [NSMutableString stringWithFormat:@"%.0f,%.0f,%.0f,%.0f:%d:",
+                            scr.frame.origin.x, scr.frame.origin.y, scr.frame.size.width, scr.frame.size.height, isDark ? 1 : 0];
     for (NSNumber *pidNum in self.appOrder) {
         NSDictionary *st = appsByPid[pidNum];
         [sig appendFormat:@"%@:%d%d,", pidNum, [st[@"visible"] boolValue], [st[@"active"] boolValue]];
@@ -455,12 +462,12 @@ static BOOL dock_is_dark_mode(void) {
         NSArray<NSView *> *oldSubs = [self.bgView.subviews copy];
         for (NSView *sv in oldSubs) [sv removeFromSuperview];
 
-        CGFloat dockW = 64.0;
-        CGFloat dockH = 16.0;
+        CGFloat dockW = 16.0;
+        CGFloat dockH = 56.0;
         CGFloat radius = 7.0;
         if (self.appOrder.count == 0) {
-            self.panel.alphaValue = 0.65;
-            NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect((dockW - 24.0) * 0.5, (dockH - 2.0) * 0.5, 24.0, 2.0)];
+            self.panel.alphaValue = 0.55;
+            NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect((dockW - 2.0) * 0.5, (dockH - 22.0) * 0.5, 2.0, 22.0)];
             bar.wantsLayer = YES;
             bar.layer.cornerRadius = 1.0;
             bar.layer.backgroundColor = isDark
@@ -468,15 +475,15 @@ static BOOL dock_is_dark_mode(void) {
                 : [[NSColor colorWithWhite:0.15 alpha:0.26] CGColor];
             [self.bgView addSubview:bar];
         } else {
-            self.panel.alphaValue = 0.96;
+            self.panel.alphaValue = 0.92;
             radius = 13.0;
             NSUInteger count = self.appOrder.count;
             CGFloat itemStep = 36.0;
-            CGFloat maxW = MAX(120.0, scr.frame.size.width - 48.0);
-            NSUInteger maxItems = (NSUInteger)MAX(1, floor((maxW - 14.0) / itemStep));
+            CGFloat maxH = MAX(120.0, scr.frame.size.height - 48.0);
+            NSUInteger maxItems = (NSUInteger)MAX(1, floor((maxH - 14.0) / itemStep));
             if (count > maxItems) count = maxItems;
-            dockW = 14.0 + count * itemStep;
-            dockH = 42.0;
+            dockW = 42.0;
+            dockH = 14.0 + count * itemStep;
 
             for (NSUInteger i = 0; i < count; i++) {
                 NSNumber *pidNum = self.appOrder[i];
@@ -485,8 +492,9 @@ static BOOL dock_is_dark_mode(void) {
                 BOOL isVis = [st[@"visible"] boolValue];
                 BOOL isAct = [st[@"active"] boolValue];
 
-                CGFloat bx = 7.0 + i * itemStep + 2.0;
-                NSButton *btn = [[NSButton alloc] initWithFrame:NSMakeRect(bx, 7.5, 32.0, 30.0)];
+                // Xếp dọc từ trên xuống dưới (AppKit y=0 ở đáy)
+                CGFloat by = dockH - 7.0 - (CGFloat)(i + 1) * itemStep + 3.0;
+                NSButton *btn = [[NSButton alloc] initWithFrame:NSMakeRect(4.0, by, 32.0, 30.0)];
                 btn.bordered = NO;
                 btn.title = @"";
                 btn.bezelStyle = NSBezelStyleRegularSquare;
@@ -496,7 +504,6 @@ static BOOL dock_is_dark_mode(void) {
                 btn.tag = (NSInteger)pid;
                 btn.target = self;
                 btn.action = @selector(onIconClick:);
-                // Giữ nguyên icon rõ ràng kể cả khi đang thu nhỏ để dễ bấm phóng lại trực tiếp trên Màn phụ
                 btn.alphaValue = isVis ? 1.0 : 0.82;
                 NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
                 if (rapp && rapp.icon) {
@@ -506,7 +513,8 @@ static BOOL dock_is_dark_mode(void) {
                 }
                 [self.bgView addSubview:btn];
 
-                NSView *dot = [[NSView alloc] initWithFrame:NSMakeRect(bx + 14.25, 2.25, 3.5, 3.5)];
+                // Chấm trạng thái gọn sát mép phải icon (đồng bộ kiểu Dock dọc bên phải)
+                NSView *dot = [[NSView alloc] initWithFrame:NSMakeRect(dockW - 5.5, by + 13.25, 3.5, 3.5)];
                 dot.wantsLayer = YES;
                 dot.layer.cornerRadius = 1.75;
                 CGFloat dotAlpha = isVis ? (isAct ? 0.90 : 0.50) : 0.22;
@@ -517,8 +525,9 @@ static BOOL dock_is_dark_mode(void) {
             }
         }
 
-        CGFloat dockX = scr.frame.origin.x + (scr.frame.size.width - dockW) * 0.5;
-        CGFloat dockY = scr.frame.origin.y + 6.0;
+        // Đặt dọc ở mép PHẢI Màn phụ, căn giữa theo chiều dọc (không đè thanh Taskbar đáy của Windows RDP)
+        CGFloat dockX = scr.frame.origin.x + scr.frame.size.width - dockW - 4.0;
+        CGFloat dockY = scr.frame.origin.y + (scr.frame.size.height - dockH) * 0.5;
         self.bgView.maskImage = make_pill_mask(radius);
         self.bgView.layer.cornerRadius = radius;
         self.bgView.layer.borderColor = isDark
