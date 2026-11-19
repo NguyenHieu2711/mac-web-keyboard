@@ -4795,9 +4795,13 @@ async def mac_virtual_display_toggle(req: Request) -> dict:
             mac_vdisp.start(logical_w=logical_w, logical_h=logical_h, hidpi=hidpi)
             trigger_smart_rdp_multimon_sync(enable_multimon=True, upgrade_running=True)
         else:
-            _, _, was_2mon = _rdp_probe_vdisp_state()
+            _, sess_before, was_2mon = _rdp_probe_vdisp_state()
             mac_vdisp.stop()
-            trigger_smart_rdp_multimon_sync(enable_multimon=False, upgrade_running=False, downgrade_running=was_2mon)
+            trigger_smart_rdp_multimon_sync(
+                enable_multimon=False,
+                upgrade_running=False,
+                downgrade_running=bool(was_2mon or sess_before),
+            )
         return mac_vdisp.status(injector._quartz)
 
     return await asyncio.to_thread(_run_toggle)
@@ -4833,9 +4837,13 @@ def _schedule_orphan_vdisp_shutdown(delay_sec: float = 15.0) -> None:
         if _ACTIVE_MAC_EXT_WS_COUNT <= 0 and mac_vdisp is not None and mac_vdisp.is_active():
             try:
                 logger.info("Không còn điện thoại kết nối Màn phụ Mac sau %.0fs -> tự hủy màn ảo & kéo app về MacBook.", delay_sec)
-                _, _, was_2mon = _rdp_probe_vdisp_state()
+                _, sess_before, was_2mon = _rdp_probe_vdisp_state()
                 mac_vdisp.stop()
-                trigger_smart_rdp_multimon_sync(enable_multimon=False, upgrade_running=False, downgrade_running=was_2mon)
+                trigger_smart_rdp_multimon_sync(
+                    enable_multimon=False,
+                    upgrade_running=False,
+                    downgrade_running=bool(was_2mon or sess_before),
+                )
             except Exception:
                 pass
 
@@ -5835,13 +5843,15 @@ def _detect_boot_git_sha() -> str:
 
 _SERVER_BOOT_SHA: str = _detect_boot_git_sha()
 _RDP_RECONNECT_UNTIL: float = 0.0
-_LAST_MULTIMON_UPGRADE_AT: float = 0.0
+_LAST_2MON_SYNC_AT: float = 0.0
+_LAST_1MON_SYNC_AT: float = 0.0
 _LAST_DOWNGRADED_1MON_PID: int = 0
 _SMART_MULTIMON_LOCK = threading.Lock()
 _RDP_CLOSER_DIAG: Dict[str, Any] = {
     "sessions": [],
     "on_screen_main": False,
     "launcher_seen": False,
+    "sec_display_active": False,
     "closed_count": 0,
     "jumped_count": 0,
     "last_action": "",
@@ -5908,6 +5918,50 @@ def _find_live_mrd_pids() -> List[int]:
     return sorted(pids)
 
 
+def _get_secondary_mac_display_bounds(quartz: Any = None) -> Optional[Dict[str, float]]:
+    """Nhận diện MỌI màn hình phụ mở rộng đang kết nối với MacBook (Màn phụ Mac ảo hoặc màn phụ điện thoại/ngoài bất kỳ, bỏ qua Mirror)."""
+    if not IS_MACOS:
+        return None
+    q = quartz if quartz is not None else injector._quartz
+    if q is None:
+        try:
+            import Quartz as q  # type: ignore
+        except Exception:
+            return None
+    if mac_vdisp is not None and mac_vdisp.is_active():
+        vb = mac_vdisp.get_bounds(q)
+        if vb is not None:
+            return vb
+    try:
+        res = q.CGGetActiveDisplayList(8, None, None)
+        if isinstance(res, tuple) and len(res) == 3:
+            err, dlist, cnt = res
+            if err == 0 and dlist and int(cnt) > 1:
+                for did in list(dlist)[: int(cnt)]:
+                    did_i = int(did)
+                    if did_i <= 0 or bool(q.CGDisplayIsMain(did_i)):
+                        continue
+                    try:
+                        if int(q.CGDisplayMirrorsDisplay(did_i)) != 0:
+                            continue
+                    except Exception:
+                        pass
+                    b = q.CGDisplayBounds(did_i)
+                    w = float(b.size.width)
+                    h = float(b.size.height)
+                    if w >= 200.0 and h >= 200.0:
+                        return {
+                            "display_id": did_i,
+                            "x": float(b.origin.x),
+                            "y": float(b.origin.y),
+                            "w": w,
+                            "h": h,
+                        }
+    except Exception:
+        pass
+    return None
+
+
 def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bool:
     """Kiểm tra trực tiếp qua bookmark export xem --retina (forcehidpioptimizations=1), --dynamicdisplay (dynamic resolution=1), hoặc --scaling (smart sizing=0) đã chuẩn chưa."""
     if not IS_MACOS or not bookmarks:
@@ -5926,7 +5980,7 @@ def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bo
             return False
         has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
         has_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
-        zero_w_in_1mon = (mac_vdisp is None or not mac_vdisp.is_active()) and bool(re.search(r"desktopwidth:i:0\b", ex_txt, re.IGNORECASE))
+        zero_w_in_1mon = (_get_secondary_mac_display_bounds(None) is None) and bool(re.search(r"desktopwidth:i:0\b", ex_txt, re.IGNORECASE))
         return (not has_retina) or (not has_dyn) or zero_w_in_1mon
     except Exception:
         return False
@@ -6020,7 +6074,7 @@ def _rdp_probe_vdisp_state() -> Tuple[int, List[str], bool]:
             return 0, [], False
     import objc  # type: ignore
 
-    vb = mac_vdisp.get_bounds(q) if (mac_vdisp is not None and mac_vdisp.is_active()) else None
+    vb = _get_secondary_mac_display_bounds(q)
     launcher_set = {
         "microsoft remote desktop", "windows app", "connection center",
         "devices", "pcs", "workspaces", "remote desktop",
@@ -6053,7 +6107,7 @@ def _rdp_probe_vdisp_state() -> Tuple[int, List[str], bool]:
             wh = float(wb.get("Height", 0))
             wname = str(w.get("kCGWindowName", "") or "").strip()
             wl = wname.lower()
-            if not wname or ww < 500.0 or wh < 300.0:
+            if not wname or ww < 320.0 or wh < 220.0:
                 continue
             if wl in launcher_set or any(k in wl for k in dialog_kw):
                 continue
@@ -6623,14 +6677,15 @@ def trigger_smart_rdp_multimon_sync(
     downgrade_running: bool = False,
     repair_clamped: bool = False,
 ) -> None:
-    """Điều phối thông minh 1 màn <-> 2 màn hai chiều cho Microsoft Remote Desktop (luôn giữ Retina + Dynamic Display):
-    - Tắt Màn phụ Mac hoặc thu nhỏ khỏi Full-Screen: tự chuyển phiên về 1 màn cửa sổ Retina 1512x944 khít 100% màn MacBook!
-    - Bật Màn phụ Mac hoặc phóng Full-Screen: tự chuyển phiên sang 2 màn Retina Full-Screen, đẩy Obsidian sang ĐT!"""
+    """Điều phối thông minh 1 màn <-> 2 màn theo topology màn hình thật của MacBook (KHÔNG cần bật Full-Screen trước):
+    - Chỉ 1 màn hình MacBook: Remote Desktop chạy bình thường ở mọi cỡ cửa sổ (giữ Retina + Dynamic Display).
+    - Kết nối điện thoại làm màn phụ (1 -> 2 màn): nếu Remote đang mở ở MacBook (bất kỳ cỡ cửa sổ nào), tự động tắt đi mở lại (reload) sang 2 màn để đẩy Obsidian sang điện thoại.
+    - Ngắt màn phụ điện thoại (2 -> 1 màn): tự động reload phiên về lại 1 cửa sổ MacBook chuẩn Retina."""
     if not IS_MACOS:
         return
 
     def _worker() -> None:
-        global _RDP_RECONNECT_UNTIL, _LAST_MULTIMON_UPGRADE_AT
+        global _RDP_RECONNECT_UNTIL, _LAST_2MON_SYNC_AT, _LAST_1MON_SYNC_AT
 
         try:
             with _SMART_MULTIMON_LOCK:
@@ -6644,17 +6699,13 @@ def trigger_smart_rdp_multimon_sync(
                     if not need_downgrade and repair_clamped and sess:
                         if _bookmark_needs_retina_or_dyn_repair(bookmarks):
                             need_downgrade = True
-                        else:
-                            ok_m, cw, ch = _apply_full_mac_window_bounds(rpid, sess[0])
-                            if ok_m and ch >= 880.0 and 400.0 < cw <= 1492.0:
-                                need_downgrade = True
                     _RDP_CLOSER_DIAG["worker_trace"] += f"|rpid={rpid},sess={len(sess)},nd={int(need_downgrade)}"
 
                     if need_downgrade and sess:
                         now_d = time.monotonic()
-                        if (now_d - _LAST_MULTIMON_UPGRADE_AT) < 4.5:
+                        if (now_d - _LAST_1MON_SYNC_AT) < 3.5:
                             return
-                        _LAST_MULTIMON_UPGRADE_AT = now_d
+                        _LAST_1MON_SYNC_AT = now_d
                         target_sess = sess[0] if sess else default_title
                         _RDP_RECONNECT_UNTIL = time.monotonic() + 14.0
                         try:
@@ -6662,6 +6713,7 @@ def trigger_smart_rdp_multimon_sync(
                             _restart_mrd_and_connect(enable_multimon=False, target_sess=target_sess)
                             _RDP_CLOSER_DIAG["last_reconnect"] = f"downgraded_1mon:{target_sess}@{time.strftime('%H:%M:%S')}"
                         finally:
+                            _LAST_1MON_SYNC_AT = time.monotonic()
                             _RDP_RECONNECT_UNTIL = time.monotonic() + 2.5
                         return
 
@@ -6669,7 +6721,8 @@ def trigger_smart_rdp_multimon_sync(
                     if not sess:
                         need_bmk_fix = (_RDP_CLOSER_DIAG.get("multimon_bookmark") is not False) or _bookmark_needs_retina_or_dyn_repair(bookmarks)
                         if need_bmk_fix:
-                            if _find_live_mrd_pids():
+                            had_live = bool(_find_live_mrd_pids())
+                            if had_live:
                                 _quit_mrd_cleanly()
                             sync_mrd_bookmark_multimon(False)
                             _RDP_CLOSER_DIAG["last_reconnect"] = f"set_1mon@{time.strftime('%H:%M:%S')}"
@@ -6687,24 +6740,29 @@ def trigger_smart_rdp_multimon_sync(
                     return
 
                 now_m = time.monotonic()
-                if (now_m - _LAST_MULTIMON_UPGRADE_AT) < 5.0:
+                if (now_m - _LAST_2MON_SYNC_AT) < 3.5:
                     return
-                _LAST_MULTIMON_UPGRADE_AT = now_m
+                _LAST_2MON_SYNC_AT = now_m
 
-                # Chờ Phone Display đăng ký xong với WindowServer
-                for _ in range(12):
-                    if mac_vdisp is not None and mac_vdisp.is_active():
+                # Chờ màn hình phụ (Màn phụ Mac hoặc màn phụ ĐT bất kỳ) đăng ký xong với WindowServer
+                for _ in range(14):
+                    if _get_secondary_mac_display_bounds(None) is not None:
                         break
                     time.sleep(0.15)
-                time.sleep(0.55)
-                if mac_vdisp is None or not mac_vdisp.is_active():
+                time.sleep(0.45)
+                if _get_secondary_mac_display_bounds(None) is None:
                     return
 
                 rpid, sess, has_vdisp = _rdp_probe_vdisp_state()
                 if not sess:
-                    if _find_live_mrd_pids():
+                    had_live_mrd = bool(_find_live_mrd_pids())
+                    if had_live_mrd:
                         _quit_mrd_cleanly()
                     sync_mrd_bookmark_multimon(True)
+                    if had_live_mrd:
+                        _, app_name = _get_mrd_cli_info()
+                        if app_name:
+                            subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     _RDP_CLOSER_DIAG["last_reconnect"] = f"ready_2mon_no_sess@{time.strftime('%H:%M:%S')}"
                     return
                 if has_vdisp and not _bookmark_needs_retina_or_dyn_repair(bookmarks):
@@ -6717,6 +6775,7 @@ def trigger_smart_rdp_multimon_sync(
                     _restart_mrd_and_connect(enable_multimon=True, target_sess=target_sess)
                     _RDP_CLOSER_DIAG["last_reconnect"] = f"upgraded_2mon:{target_sess}@{time.strftime('%H:%M:%S')}"
                 finally:
+                    _LAST_2MON_SYNC_AT = time.monotonic()
                     _RDP_RECONNECT_UNTIL = time.monotonic() + 2.5
         except Exception as w_exc:
             _RDP_CLOSER_DIAG["last_err"] = f"smart_worker:{repr(w_exc)[:140]}"
@@ -6790,14 +6849,39 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
         prev_front_pid = 0
         jump_attempt_idx = 0
         prev_had_sessions = False
-        was_windowed_session = False
+        prev_sec_disp: Optional[bool] = None
+        sec_disp_flip_at: float = 0.0
 
         while True:
             time.sleep(poll_sec)
             try:
+                q = injector._quartz
+                if q is not None:
+                    cur_sec_disp = (_get_secondary_mac_display_bounds(q) is not None)
+                    _RDP_CLOSER_DIAG["sec_display_active"] = cur_sec_disp
+                    if prev_sec_disp is None:
+                        prev_sec_disp = cur_sec_disp
+                    elif cur_sec_disp != prev_sec_disp:
+                        if sec_disp_flip_at <= 0.0:
+                            sec_disp_flip_at = time.monotonic()
+                        elif (time.monotonic() - sec_disp_flip_at) >= 0.30:
+                            prev_sec_disp = cur_sec_disp
+                            sec_disp_flip_at = 0.0
+                            if cur_sec_disp:
+                                # Vừa kết nối điện thoại làm màn hình phụ (1 màn -> 2 màn) -> tự reload phiên Remote đang mở!
+                                trigger_smart_rdp_multimon_sync(enable_multimon=True, upgrade_running=True)
+                            else:
+                                # Vừa ngắt màn hình phụ điện thoại (2 màn -> 1 màn) -> tự reload phiên Remote về lại 1 cửa sổ MacBook!
+                                trigger_smart_rdp_multimon_sync(
+                                    enable_multimon=False,
+                                    upgrade_running=False,
+                                    downgrade_running=True,
+                                )
+                    else:
+                        sec_disp_flip_at = 0.0
+
                 if time.monotonic() < _RDP_RECONNECT_UNTIL:
                     continue
-                q = injector._quartz
                 if q is None or mac_vdisp is None or not mac_vdisp._init_ax_libs():
                     continue
 
@@ -6872,7 +6956,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                             all_has_dialog = True
                         elif wname_l in launcher_titles:
                             all_has_launcher = True
-                        elif wname_raw and ww >= 500.0 and wh >= 300.0:
+                        elif wname_raw and ww >= 320.0 and wh >= 220.0:
                             rdp_pid = pid_w
                             if wname_l not in session_titles_lower:
                                 session_titles_lower.add(wname_l)
@@ -6911,10 +6995,9 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                 _RDP_CLOSER_DIAG["launcher_seen"] = bool(all_has_launcher or all_has_unnamed_big)
 
                 if not session_titles:
-                    if prev_had_sessions and (mac_vdisp is None or not mac_vdisp.is_active()):
+                    if prev_had_sessions and (_get_secondary_mac_display_bounds(q) is None):
                         trigger_smart_rdp_multimon_sync(enable_multimon=False, upgrade_running=False)
                     prev_had_sessions = False
-                    was_windowed_session = False
                     session_first_seen_at = 0.0
                     continue
                 prev_had_sessions = True
@@ -7201,21 +7284,11 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                     if has_fs_session:
                         _LAST_DOWNGRADED_1MON_PID = 0
                     if has_squished_2mon_window and not ax_has_dialog and rdp_pid != _LAST_DOWNGRADED_1MON_PID:
-                        was_windowed_session = False
                         trigger_smart_rdp_multimon_sync(
                             enable_multimon=False,
                             upgrade_running=False,
                             downgrade_running=True,
                         )
-                    elif has_windowed_session:
-                        was_windowed_session = True
-                    elif has_fs_session and was_windowed_session:
-                        was_windowed_session = False
-                        # Người dùng vừa bấm nút xanh phóng Full-Screen từ cửa sổ thường khi Màn phụ Mac đang BẬT -> tự nâng lên 2 màn!
-                        if mac_vdisp is not None and mac_vdisp.is_active():
-                            _, _, hv_now = _rdp_probe_vdisp_state()
-                            if not hv_now:
-                                trigger_smart_rdp_multimon_sync(enable_multimon=True, upgrade_running=True)
 
                     # Khi PC Hieu đang ở cửa sổ thường (fs=0): tự bật Fit Session to Window nếu bị bỏ tích để không bị phóng to 2x cắt màn hình!
                     if (
@@ -7277,7 +7350,12 @@ if __name__ == "__main__":
     check_macos_screen_recording(prompt=True)
     start_notification_auto_dismisser(max_seconds=4.0)
     start_clipboard_retina_normalizer(poll_sec=0.25)
-    trigger_smart_rdp_multimon_sync(enable_multimon=False, upgrade_running=False, repair_clamped=True)
+    _init_has_2mon = (_get_secondary_mac_display_bounds(None) is not None)
+    trigger_smart_rdp_multimon_sync(
+        enable_multimon=_init_has_2mon,
+        upgrade_running=_init_has_2mon,
+        repair_clamped=(not _init_has_2mon),
+    )
     start_rdp_launcher_auto_closer(poll_sec=0.15)
     start_git_auto_updater(check_every_sec=45.0)
     banner_ips = detect_network_ips()
