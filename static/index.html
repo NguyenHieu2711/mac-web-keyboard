@@ -673,8 +673,8 @@
           </div>
         </div>
 
-        <!-- Menu điều khiển hợp nhất chia 2 phần rõ ràng: Cảm ứng | Chuột (MacBook / Điện thoại / Cả 2 màn hình) -->
-        <div class="remote-mode-wrap">
+        <!-- Menu điều khiển hợp nhất chia 2 phần rõ ràng: Cảm ứng | Chuột (chỉ dành cho Remote PC) -->
+        <div id="remote-control-wrap" class="remote-mode-wrap">
           <button type="button" id="btn-remote-control" class="remote-pill-btn">
             <span id="lbl-remote-control" class="remote-btn-content"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg><span>Cảm ứng</span></span>
             <svg class="hud-caret-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -702,6 +702,7 @@
         </div>
 
         <button type="button" id="btn-remote-coexist" class="remote-pill-btn is-active"><span class="remote-btn-content"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="8" height="16" rx="1.5"/><rect x="13" y="4" width="8" height="16" rx="1.5"/></svg><span>Song song</span></span></button>
+        <button type="button" id="btn-mac-ext-touch" class="remote-pill-btn is-active"><span class="remote-btn-content"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg><span id="lbl-mac-ext-touch">Cảm ứng</span></span></button>
         <button type="button" id="btn-mac-ext-display" class="remote-pill-btn"><span class="remote-btn-content"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="12" height="12" rx="1.5"/><rect x="16" y="7" width="6" height="11" rx="1.5"/><path d="M6 20h4"/></svg><span id="lbl-mac-ext-display">Màn phụ</span></span></button>
 
         <!-- Tỉ lệ hiển thị sắc nét (HiDPI Scale cho màn điện thoại) -->

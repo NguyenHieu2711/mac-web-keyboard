@@ -72,6 +72,8 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_SERVER_HOST = "server_host"
         private const val KEY_TRACKPAD_SPEED = "trackpad_speed"
         private const val KEY_OTA_WEB_VERSION = "ota_web_version"
+        private const val KEY_INITIAL_SETUP_DONE = "initial_setup_done"
+        private const val DEFAULT_SERVER_HOST = "192.168.52.103:5050"
         private const val DEFAULT_TRACKPAD_SPEED = 1.6f
         private const val LOCAL_KEYBOARD_URL = "http://appassets.androidplatform.net/assets/index.html"
     }
@@ -398,8 +400,10 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    if (getSavedServerHost().isBlank()) {
-                        showServerConfigDialog(isFirstLaunch = true)
+                    val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    val setupDone = prefs.getBoolean(KEY_INITIAL_SETUP_DONE, false)
+                    if (!setupDone && getSavedServerHost().isBlank()) {
+                        saveServerHost(DEFAULT_SERVER_HOST)
                     }
                 }
             }
@@ -482,7 +486,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun getSavedServerHost(): String {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getString(KEY_SERVER_HOST, "")?.trim().orEmpty()
+        return prefs.getString(KEY_SERVER_HOST, "")?.trim().orEmpty().ifBlank { DEFAULT_SERVER_HOST }
     }
 
     private fun getSavedTrackpadSpeed(): Float {
@@ -610,11 +614,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveServerHost(rawHost: String) {
-        val cleaned = rawHost.trim()
+        val cleaned = rawHost.trim().ifBlank { DEFAULT_SERVER_HOST }
         val prev = getSavedServerHost()
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_SERVER_HOST, cleaned)
+            .putBoolean(KEY_INITIAL_SETUP_DONE, true)
             .apply()
 
         if (cleaned != prev) {

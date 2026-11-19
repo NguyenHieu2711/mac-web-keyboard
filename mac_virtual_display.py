@@ -1,5 +1,5 @@
 """
-mac_virtual_display.py — Màn hình phụ #2 gốc macOS (CGVirtualDisplay) bật/tắt theo yêu cầu
+mac_virtual_display.py — Màn hình phụ #2 gốc macOS (CGVirtualDisplay) + Per-Monitor Dock
 cho app bàn phím ảo mac-web-keyboard.
 
 Tính năng:
@@ -7,15 +7,19 @@ Tính năng:
 - Khi bật từ Điện thoại: tự biên dịch (1 lần, cache trong ~/.cache) helper Objective-C
   sử dụng API CGVirtualDisplay gốc của macOS (không cần root/kext/app thứ 3),
   tạo màn hình phụ #2 chuẩn tỉ lệ Điện thoại (1798x864 @ 2x HiDPI = 2248:1080),
-  đặt gọn bên phải màn chính MacBook.
-- Tự động đóng & kết nối lại phiên Windows App / Microsoft Remote Desktop đang chạy
-  để Windows tự bung ra đúng 2 màn (Màn 1 = MacBook, Màn 2 = Điện thoại) không cần bấm tay.
-- Khi tắt (hoặc thoát server.py): hủy màn ảo ngay lập tức, không bao giờ để lại màn ma.
+  đặt gọn bên TRÁI màn chính MacBook.
+- Dock riêng cho Màn hình phụ #2 (cơ chế giống Windows 11 2 màn hình):
+  + Màn chính MacBook giữ nguyên Dock macOS hiển thị đầy đủ app.
+  + Màn phụ #2 hiện thanh Dock mờ kính riêng, CHỈ hiển thị các ứng dụng đang mở trên màn phụ #2;
+    click icon để đưa cửa sổ lên/thu nhỏ, tự ẩn khi có ứng dụng toàn màn hình (như Windows App).
+- Hoạt động độc lập 100% với Windows App / Remote PC (không đóng/kích cửa sổ app khác).
+- Khi tắt (hoặc thoát server.py): hủy màn ảo & Dock phụ ngay lập tức, không bao giờ để lại màn ma.
 """
 
 from __future__ import annotations
 
 import atexit
+import ctypes
 import os
 import shutil
 import signal
@@ -25,13 +29,15 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 IS_MACOS = sys.platform == "darwin"
 
 MAC_VDISP_HELPER_SRC = r"""
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <dispatch/dispatch.h>
 #import <stdio.h>
 #import <stdlib.h>
@@ -123,6 +129,288 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
         CGCompleteDisplayConfiguration(cfg, kCGConfigureForSession);
     }
 }
+
+@interface SecondaryDockController : NSObject
+@property (nonatomic) CGDirectDisplayID vdispId;
+@property (nonatomic) pid_t selfPid;
+@property (nonatomic, strong) NSPanel *panel;
+@property (nonatomic, strong) NSVisualEffectView *bgView;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *knownWins;
+@property (nonatomic, strong) NSMutableArray<NSNumber *> *appOrder;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSDictionary *> *appState;
+@property (nonatomic, copy) NSString *lastSig;
+- (instancetype)initWithDisplayID:(CGDirectDisplayID)did;
+- (void)refresh;
+- (void)shutdown;
+@end
+
+@implementation SecondaryDockController
+
+- (instancetype)initWithDisplayID:(CGDirectDisplayID)did {
+    self = [super init];
+    if (!self) return nil;
+    _vdispId = did;
+    _selfPid = getpid();
+    _knownWins = [NSMutableDictionary dictionary];
+    _appOrder = [NSMutableArray array];
+    _appState = [NSMutableDictionary dictionary];
+    _lastSig = @"";
+
+    NSRect initRect = NSMakeRect(0, 0, 120, 36);
+    _panel = [[NSPanel alloc] initWithContentRect:initRect
+                                        styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
+                                          backing:NSBackingStoreBuffered
+                                            defer:NO];
+    _panel.level = NSFloatingWindowLevel;
+    _panel.collectionBehavior = (NSWindowCollectionBehaviorCanJoinAllSpaces |
+                                 NSWindowCollectionBehaviorStationary |
+                                 NSWindowCollectionBehaviorIgnoresCycle);
+    _panel.opaque = NO;
+    _panel.backgroundColor = [NSColor clearColor];
+    _panel.hasShadow = YES;
+    _panel.ignoresMouseEvents = NO;
+    _panel.hidesOnDeactivate = NO;
+    _panel.becomesKeyOnlyIfNeeded = YES;
+    _panel.releasedWhenClosed = NO;
+
+    _bgView = [[NSVisualEffectView alloc] initWithFrame:initRect];
+    _bgView.material = NSVisualEffectMaterialHUDWindow;
+    _bgView.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+    _bgView.state = NSVisualEffectStateActive;
+    _bgView.autoresizingMask = (NSViewWidthSizable | NSViewHeightSizable);
+    _bgView.wantsLayer = YES;
+    _bgView.layer.cornerRadius = 15.0;
+    _bgView.layer.masksToBounds = YES;
+    _bgView.layer.borderWidth = 1.0;
+    _bgView.layer.borderColor = [[NSColor colorWithWhite:1.0 alpha:0.16] CGColor];
+    _panel.contentView = _bgView;
+    return self;
+}
+
+- (NSScreen *)targetScreen {
+    for (NSScreen *scr in [NSScreen screens]) {
+        NSNumber *num = scr.deviceDescription[@"NSScreenNumber"];
+        if (num && (CGDirectDisplayID)[num unsignedIntValue] == self.vdispId) {
+            return scr;
+        }
+    }
+    return nil;
+}
+
+- (void)onIconClick:(NSButton *)sender {
+    pid_t pid = (pid_t)sender.tag;
+    if (pid <= 0) return;
+    NSDictionary *info = self.appState[@(pid)];
+    BOOL isVis = info ? [info[@"visible"] boolValue] : YES;
+    BOOL isAct = info ? [info[@"active"] boolValue] : NO;
+    unsigned int winId = info ? [info[@"winId"] unsignedIntValue] : 0;
+    NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+
+    if (!isVis || !isAct) {
+        if (rapp) {
+            [rapp unhide];
+            [rapp activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+        }
+        fprintf(stdout, "DOCK_ACTIVATE %d %u\n", (int)pid, winId);
+        fflush(stdout);
+    } else {
+        fprintf(stdout, "DOCK_MINIMIZE %d %u\n", (int)pid, winId);
+        fflush(stdout);
+    }
+}
+
+- (void)refresh {
+    if (self.vdispId == 0 || !self.panel) return;
+    CGRect vb = CGDisplayBounds(self.vdispId);
+    NSScreen *scr = [self targetScreen];
+    if (!scr || vb.size.width < 64 || vb.size.height < 64) {
+        [self.panel orderOut:nil];
+        return;
+    }
+
+    CFArrayRef allList = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID
+    );
+    if (!allList) return;
+
+    NSArray *wins = (__bridge_transfer NSArray *)allList;
+    BOOL hasFullscreen = NO;
+    NSMutableSet<NSNumber *> *aliveWinIds = [NSMutableSet set];
+    NSMutableDictionary<NSNumber *, NSMutableDictionary *> *appsByPid = [NSMutableDictionary dictionary];
+    NSRunningApplication *frontApp = [[NSWorkspace sharedWorkspace] frontmostApplication];
+    pid_t frontPid = frontApp ? frontApp.processIdentifier : 0;
+    pid_t topVdispPid = 0;
+
+    for (NSDictionary *w in wins) {
+        NSInteger layer = [w[(id)kCGWindowLayer] integerValue];
+        if (layer != 0) continue;
+        pid_t pid = (pid_t)[w[(id)kCGWindowOwnerPID] intValue];
+        if (pid <= 0 || pid == self.selfPid) continue;
+        NSNumber *winIdNum = w[(id)kCGWindowNumber];
+        if (!winIdNum) continue;
+        [aliveWinIds addObject:winIdNum];
+
+        NSDictionary *bDict = w[(id)kCGWindowBounds];
+        if (!bDict) continue;
+        CGRect wb = CGRectZero;
+        if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)bDict, &wb)) continue;
+        if (wb.size.width < 140.0 || wb.size.height < 90.0) continue;
+
+        CGFloat cx = wb.origin.x + wb.size.width * 0.5;
+        CGFloat cy = wb.origin.y + wb.size.height * 0.5;
+        BOOL inVdisp = (cx >= vb.origin.x && cx < (vb.origin.x + vb.size.width) &&
+                        cy >= vb.origin.y && cy < (vb.origin.y + vb.size.height));
+        BOOL isOnscreen = [w[(id)kCGWindowIsOnscreen] boolValue];
+        double alpha = [w[(id)kCGWindowAlpha] doubleValue];
+
+        if (!inVdisp) {
+            if (self.knownWins[winIdNum]) {
+                [self.knownWins removeObjectForKey:winIdNum];
+            }
+            continue;
+        }
+
+        NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+        if (!rapp || rapp.activationPolicy != NSApplicationActivationPolicyRegular) continue;
+
+        BOOL trackedVisible = (isOnscreen && alpha > 0.05);
+        BOOL trackedMinimized = (!isOnscreen && self.knownWins[winIdNum] != nil);
+        if (!trackedVisible && !trackedMinimized) continue;
+
+        if (trackedVisible) {
+            self.knownWins[winIdNum] = @(pid);
+            if (topVdispPid == 0) topVdispPid = pid;
+            if (wb.size.width >= vb.size.width - 4.0 && wb.size.height >= vb.size.height - 4.0) {
+                hasFullscreen = YES;
+            }
+        }
+
+        NSNumber *pidNum = @(pid);
+        NSMutableDictionary *entry = appsByPid[pidNum];
+        if (!entry) {
+            entry = [NSMutableDictionary dictionaryWithDictionary:@{
+                @"winId": winIdNum,
+                @"visible": @(trackedVisible),
+                @"active": @(trackedVisible && pid == frontPid && pid == topVdispPid),
+            }];
+            appsByPid[pidNum] = entry;
+        } else if (trackedVisible && ![entry[@"visible"] boolValue]) {
+            entry[@"winId"] = winIdNum;
+            entry[@"visible"] = @YES;
+            entry[@"active"] = @(pid == frontPid && pid == topVdispPid);
+        }
+    }
+
+    // Dọn các cửa sổ đã đóng khỏi bộ nhớ theo dõi
+    NSArray<NSNumber *> *knownKeys = [self.knownWins allKeys];
+    for (NSNumber *wid in knownKeys) {
+        if (![aliveWinIds containsObject:wid]) {
+            [self.knownWins removeObjectForKey:wid];
+        }
+    }
+
+    if (hasFullscreen) {
+        [self.panel orderOut:nil];
+        return;
+    }
+
+    // Giữ thứ tự icon ổn định trái -> phải, chỉ thêm mới hoặc bỏ app đã rời màn phụ
+    NSMutableArray<NSNumber *> *nextOrder = [NSMutableArray array];
+    for (NSNumber *pidNum in self.appOrder) {
+        if (appsByPid[pidNum]) [nextOrder addObject:pidNum];
+    }
+    NSArray<NSNumber *> *sortedNew = [[appsByPid allKeys] sortedArrayUsingSelector:@selector(compare:)];
+    for (NSNumber *pidNum in sortedNew) {
+        if (![nextOrder containsObject:pidNum]) [nextOrder addObject:pidNum];
+    }
+    self.appOrder = nextOrder;
+    self.appState = appsByPid;
+
+    NSMutableString *sig = [NSMutableString stringWithFormat:@"%.0f,%.0f,%.0f:",
+                            scr.frame.origin.x, scr.frame.origin.y, scr.frame.size.width];
+    for (NSNumber *pidNum in self.appOrder) {
+        NSDictionary *st = appsByPid[pidNum];
+        [sig appendFormat:@"%@:%d%d,", pidNum, [st[@"visible"] boolValue], [st[@"active"] boolValue]];
+    }
+
+    if (![sig isEqualToString:self.lastSig]) {
+        self.lastSig = sig;
+        NSArray<NSView *> *oldSubs = [self.bgView.subviews copy];
+        for (NSView *sv in oldSubs) [sv removeFromSuperview];
+
+        CGFloat dockW = 120.0;
+        CGFloat dockH = 34.0;
+        if (self.appOrder.count == 0) {
+            self.bgView.layer.cornerRadius = 14.0;
+            NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect((dockW - 38.0) * 0.5, (dockH - 3.0) * 0.5, 38.0, 3.0)];
+            bar.wantsLayer = YES;
+            bar.layer.cornerRadius = 1.5;
+            bar.layer.backgroundColor = [[NSColor colorWithWhite:1.0 alpha:0.28] CGColor];
+            [self.bgView addSubview:bar];
+        } else {
+            self.bgView.layer.cornerRadius = 16.0;
+            NSUInteger count = self.appOrder.count;
+            CGFloat itemStep = 48.0;
+            CGFloat maxW = MAX(140.0, scr.frame.size.width - 48.0);
+            NSUInteger maxItems = (NSUInteger)MAX(1, floor((maxW - 20.0) / itemStep));
+            if (count > maxItems) count = maxItems;
+            dockW = 20.0 + count * itemStep;
+            dockH = 54.0;
+
+            for (NSUInteger i = 0; i < count; i++) {
+                NSNumber *pidNum = self.appOrder[i];
+                pid_t pid = (pid_t)[pidNum intValue];
+                NSDictionary *st = appsByPid[pidNum];
+                BOOL isVis = [st[@"visible"] boolValue];
+                BOOL isAct = [st[@"active"] boolValue];
+
+                CGFloat bx = 10.0 + i * itemStep + 3.0;
+                NSButton *btn = [[NSButton alloc] initWithFrame:NSMakeRect(bx, 9.0, 42.0, 40.0)];
+                btn.bordered = NO;
+                btn.title = @"";
+                btn.bezelStyle = NSBezelStyleRegularSquare;
+                btn.buttonType = NSButtonTypeMomentaryChange;
+                btn.imagePosition = NSImageOnly;
+                btn.imageScaling = NSImageScaleProportionallyUpOrDown;
+                btn.tag = (NSInteger)pid;
+                btn.target = self;
+                btn.action = @selector(onIconClick:);
+                btn.alphaValue = isVis ? 1.0 : 0.45;
+                NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+                if (rapp && rapp.icon) {
+                    NSImage *ico = [rapp.icon copy];
+                    ico.size = NSMakeSize(36.0, 36.0);
+                    btn.image = ico;
+                }
+                [self.bgView addSubview:btn];
+
+                if (isVis) {
+                    NSView *dot = [[NSView alloc] initWithFrame:NSMakeRect(bx + 19.0, 3.0, 4.0, 4.0)];
+                    dot.wantsLayer = YES;
+                    dot.layer.cornerRadius = 2.0;
+                    dot.layer.backgroundColor = [[NSColor colorWithWhite:1.0 alpha:(isAct ? 0.92 : 0.38)] CGColor];
+                    [self.bgView addSubview:dot];
+                }
+            }
+        }
+
+        CGFloat dockX = scr.frame.origin.x + (scr.frame.size.width - dockW) * 0.5;
+        CGFloat dockY = scr.frame.origin.y + 8.0;
+        [self.panel setFrame:NSMakeRect(dockX, dockY, dockW, dockH) display:YES];
+    }
+    [self.panel orderFrontRegardless];
+}
+
+- (void)shutdown {
+    if (self.panel) {
+        [self.panel orderOut:nil];
+        [self.panel close];
+        self.panel = nil;
+    }
+}
+
+@end
 
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
@@ -222,6 +510,19 @@ int main(int argc, const char * argv[]) {
                 b.origin.x, b.origin.y, b.size.width, b.size.height);
         fflush(stdout);
 
+        // Khởi tạo AppKit Accessory + Dock riêng cho Màn hình phụ #2 (không hiện icon thừa trên Dock chính)
+        SecondaryDockController *dockCtrl = nil;
+        @try {
+            NSApplication *app = [NSApplication sharedApplication];
+            [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+            [app finishLaunching];
+            dockCtrl = [[SecondaryDockController alloc] initWithDisplayID:did];
+            [dockCtrl refresh];
+        } @catch (NSException *ex) {
+            (void)ex;
+            dockCtrl = nil;
+        }
+
         // Theo dõi stdin EOF để tự hủy màn ảo nếu server.py thoát đột ngột
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
             char buf[64];
@@ -231,11 +532,36 @@ int main(int argc, const char * argv[]) {
             g_should_exit = 1;
         });
 
+        CFAbsoluteTime lastDockRefresh = 0.0;
         while (!g_should_exit) {
             @autoreleasepool {
-                [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                         beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
+                if (dockCtrl) {
+                    NSEvent *ev = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                                     untilDate:[NSDate dateWithTimeIntervalSinceNow:0.06]
+                                                        inMode:NSDefaultRunLoopMode
+                                                       dequeue:YES];
+                    if (ev) {
+                        [NSApp sendEvent:ev];
+                        [NSApp updateWindows];
+                    }
+                    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+                    if ((now - lastDockRefresh) >= 0.35) {
+                        lastDockRefresh = now;
+                        @try {
+                            [dockCtrl refresh];
+                        } @catch (NSException *ex) {
+                            (void)ex;
+                        }
+                    }
+                } else {
+                    [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                             beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
+                }
             }
+        }
+        if (dockCtrl) {
+            [dockCtrl shutdown];
+            dockCtrl = nil;
         }
         vdisp = nil;
     }
@@ -244,8 +570,16 @@ int main(int argc, const char * argv[]) {
 """
 
 
+class _CGPoint(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+
+class _CGSize(ctypes.Structure):
+    _fields_ = [("w", ctypes.c_double), ("h", ctypes.c_double)]
+
+
 class MacVirtualDisplayManager:
-    """Quản lý vòng đời Màn hình phụ #2 trên macOS + tự refresh Windows App RDP."""
+    """Quản lý vòng đời Màn hình phụ #2 gốc macOS + Per-Monitor Dock (độc lập với Remote PC / Windows App)."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -256,9 +590,160 @@ class MacVirtualDisplayManager:
         self._hidpi: bool = True
         self._last_error: str = ""
         self._cache_dir = Path.home() / ".cache" / "mac-web-keyboard"
-        self._bin_path = self._cache_dir / "mac_vdisp_helper_v2"
-        self._src_path = self._cache_dir / "mac_vdisp_helper_v2.m"
+        self._bin_path = self._cache_dir / "mac_vdisp_helper_v3"
+        self._src_path = self._cache_dir / "mac_vdisp_helper_v3.m"
+        self._ax_lib: Any = None
+        self._cf_lib: Any = None
+        self._ax_ready: bool = False
         atexit.register(self.stop)
+
+    def _init_ax_libs(self) -> bool:
+        if self._ax_ready or not IS_MACOS:
+            return self._ax_ready
+        try:
+            ax = ctypes.cdll.LoadLibrary(
+                "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+            )
+            cf = ctypes.cdll.LoadLibrary(
+                "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+            )
+            cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+            cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+            cf.CFRelease.argtypes = [ctypes.c_void_p]
+            cf.CFRelease.restype = None
+            cf.CFArrayGetCount.argtypes = [ctypes.c_void_p]
+            cf.CFArrayGetCount.restype = ctypes.c_long
+            cf.CFArrayGetValueAtIndex.argtypes = [ctypes.c_void_p, ctypes.c_long]
+            cf.CFArrayGetValueAtIndex.restype = ctypes.c_void_p
+            cf.CFBooleanGetValue.argtypes = [ctypes.c_void_p]
+            cf.CFBooleanGetValue.restype = ctypes.c_bool
+
+            ax.AXUIElementCreateApplication.argtypes = [ctypes.c_int32]
+            ax.AXUIElementCreateApplication.restype = ctypes.c_void_p
+            ax.AXUIElementCopyAttributeValue.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            ax.AXUIElementCopyAttributeValue.restype = ctypes.c_int32
+            ax.AXUIElementSetAttributeValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            ax.AXUIElementSetAttributeValue.restype = ctypes.c_int32
+            ax.AXUIElementPerformAction.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            ax.AXUIElementPerformAction.restype = ctypes.c_int32
+            ax.AXValueGetValue.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p]
+            ax.AXValueGetValue.restype = ctypes.c_bool
+
+            self._ax_lib = ax
+            self._cf_lib = cf
+            self._ax_ready = True
+        except Exception:
+            self._ax_ready = False
+        return self._ax_ready
+
+    def _ax_handle_dock_action(self, action: str, pid: int) -> None:
+        if pid <= 0 or not self._init_ax_libs():
+            return
+        bounds = self.get_bounds()
+        if not bounds:
+            return
+        bx, by, bw, bh = bounds["x"], bounds["y"], bounds["w"], bounds["h"]
+        ax = self._ax_lib
+        cf = self._cf_lib
+        kCFStringEncodingUTF8 = 0x08000100
+
+        def _cfstr(s: str) -> ctypes.c_void_p:
+            return cf.CFStringCreateWithCString(None, s.encode("utf-8"), kCFStringEncodingUTF8)
+
+        app_ax = ax.AXUIElementCreateApplication(int(pid))
+        if not app_ax:
+            return
+        s_wins = _cfstr("AXWindows")
+        s_pos = _cfstr("AXPosition")
+        s_size = _cfstr("AXSize")
+        s_min = _cfstr("AXMinimized")
+        s_raise = _cfstr("AXRaise")
+        try:
+            wins_ref = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wins_ref)) != 0 or not wins_ref.value:
+                return
+            try:
+                cnt = cf.CFArrayGetCount(wins_ref.value)
+                kTrue = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
+                kFalse = ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value
+                for i in range(cnt):
+                    w_ax = cf.CFArrayGetValueAtIndex(wins_ref.value, i)
+                    if not w_ax:
+                        continue
+                    pos_ref = ctypes.c_void_p()
+                    size_ref = ctypes.c_void_p()
+                    in_vdisp = False
+                    if (
+                        ax.AXUIElementCopyAttributeValue(w_ax, s_pos, ctypes.byref(pos_ref)) == 0
+                        and pos_ref.value
+                        and ax.AXUIElementCopyAttributeValue(w_ax, s_size, ctypes.byref(size_ref)) == 0
+                        and size_ref.value
+                    ):
+                        pt = _CGPoint()
+                        sz = _CGSize()
+                        ok_p = ax.AXValueGetValue(pos_ref.value, 1, ctypes.byref(pt))
+                        ok_s = ax.AXValueGetValue(size_ref.value, 2, ctypes.byref(sz))
+                        cf.CFRelease(pos_ref.value)
+                        cf.CFRelease(size_ref.value)
+                        if ok_p and ok_s and sz.w >= 120 and sz.h >= 80:
+                            cx = pt.x + sz.w * 0.5
+                            cy = pt.y + sz.h * 0.5
+                            in_vdisp = (bx <= cx < bx + bw) and (by <= cy < by + bh)
+                    else:
+                        if pos_ref.value:
+                            cf.CFRelease(pos_ref.value)
+                        if size_ref.value:
+                            cf.CFRelease(size_ref.value)
+
+                    if not in_vdisp:
+                        continue
+
+                    min_ref = ctypes.c_void_p()
+                    is_min = False
+                    if ax.AXUIElementCopyAttributeValue(w_ax, s_min, ctypes.byref(min_ref)) == 0 and min_ref.value:
+                        is_min = bool(cf.CFBooleanGetValue(min_ref.value))
+                        cf.CFRelease(min_ref.value)
+
+                    if action == "activate":
+                        if is_min:
+                            ax.AXUIElementSetAttributeValue(w_ax, s_min, kFalse)
+                        ax.AXUIElementPerformAction(w_ax, s_raise)
+                        break
+                    elif action == "minimize" and not is_min:
+                        ax.AXUIElementSetAttributeValue(w_ax, s_min, kTrue)
+                        break
+            finally:
+                cf.CFRelease(wins_ref.value)
+        except Exception:
+            pass
+        finally:
+            cf.CFRelease(app_ax)
+            for s_ref in (s_wins, s_pos, s_size, s_min, s_raise):
+                if s_ref:
+                    cf.CFRelease(s_ref)
+
+    def _stdout_reader_loop(self, proc: subprocess.Popen) -> None:
+        try:
+            if proc.stdout is None:
+                return
+            for raw in proc.stdout:
+                line = (raw or "").strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] in ("DOCK_ACTIVATE", "DOCK_MINIMIZE"):
+                    try:
+                        pid = int(parts[1])
+                    except Exception:
+                        continue
+                    act = "activate" if parts[0] == "DOCK_ACTIVATE" else "minimize"
+                    self._ax_handle_dock_action(act, pid)
+        except Exception:
+            pass
 
     def _ensure_helper_binary(self) -> Tuple[bool, str]:
         if not IS_MACOS:
@@ -288,6 +773,10 @@ class MacVirtualDisplayManager:
                 "Foundation",
                 "-framework",
                 "CoreGraphics",
+                "-framework",
+                "AppKit",
+                "-framework",
+                "QuartzCore",
                 str(self._src_path),
                 "-o",
                 str(self._bin_path),
@@ -436,6 +925,7 @@ class MacVirtualDisplayManager:
             self._logical_h = lh
             self._hidpi = hd
             self._last_error = ""
+            threading.Thread(target=self._stdout_reader_loop, args=(proc,), daemon=True).start()
             return self.status()
 
     def stop(self) -> Dict[str, Any]:
@@ -530,236 +1020,3 @@ class MacVirtualDisplayManager:
                 )
         except Exception:
             return None
-
-    def has_rdp_window_on_virtual_display(self, quartz: Any) -> bool:
-        """Kiểm tra Windows App đã có cửa sổ phiên phủ lên màn hình phụ #2 chưa."""
-        bounds = self.get_bounds(quartz)
-        if bounds is None or quartz is None:
-            return False
-        vx, vy, vw, vh = bounds["x"], bounds["y"], bounds["w"], bounds["h"]
-        try:
-            opt = getattr(quartz, "kCGWindowListOptionOnScreenOnly", 1) | getattr(
-                quartz, "kCGWindowListExcludeDesktopElements", 16
-            )
-            wins = quartz.CGWindowListCopyWindowInfo(opt, 0) or []
-            for w in wins:
-                owner = str(w.get("kCGWindowOwnerName", "") or "").lower()
-                if "windows app" not in owner and "microsoft remote desktop" not in owner:
-                    continue
-                wb = w.get("kCGWindowBounds") or {}
-                wx = float(wb.get("X", 0))
-                wy = float(wb.get("Y", 0))
-                ww = float(wb.get("Width", 0))
-                wh = float(wb.get("Height", 0))
-                if ww < 300 or wh < 200:
-                    continue
-                cx = wx + ww * 0.5
-                cy = wy + wh * 0.5
-                if vx <= cx <= (vx + vw) and vy <= cy <= (vy + vh):
-                    return True
-        except Exception:
-            pass
-        return False
-
-    def auto_refresh_windows_app_session(
-        self,
-        was_rdp_info: Optional[Dict[str, Any]],
-        find_rdp_fn: Callable[[], Optional[Dict[str, Any]]],
-        quartz: Any = None,
-        expect_second_monitor: bool = True,
-    ) -> Dict[str, Any]:
-        """
-        Tự động đóng & kết nối lại phiên Windows App / Microsoft Remote Desktop
-        nếu người dùng đang remote PC sẵn trên MacBook, để RDP tự nhận 2 màn (hoặc quay lại 1 màn)
-        mà không phải tự đóng mở tay.
-        """
-        if not IS_MACOS or not was_rdp_info:
-            return {"rdp_was_open": False, "rdp_reconnected": False}
-
-        # Nếu vừa bật màn phụ và Windows App tự bung sang màn #2 luôn thì không cần reconnect!
-        if expect_second_monitor:
-            time.sleep(0.55)
-            if self.has_rdp_window_on_virtual_display(quartz):
-                return {"rdp_was_open": True, "rdp_reconnected": True, "dynamic": True}
-
-        saved_title = str(was_rdp_info.get("title", "") or "").strip()
-        safe_title = saved_title.replace("\\", "\\\\").replace('"', '\\"')
-
-        # Bước 1: Đóng cửa sổ phiên đang mở (giữ nguyên cửa sổ chính Devices/PCs của Windows App)
-        close_script = r'''
-        tell application "System Events"
-            repeat with procName in {"Windows App", "Microsoft Remote Desktop"}
-                if exists process procName then
-                    tell process procName
-                        repeat with w in (every window)
-                            try
-                                set wName to (name of w as string)
-                                if wName is not in {"PCs", "Workspaces", "Devices", "Apps", "Microsoft Remote Desktop", "Windows App"} then
-                                    try
-                                        if (value of attribute "AXFullScreen" of w) is true then
-                                            set value of attribute "AXFullScreen" of w to false
-                                            delay 0.38
-                                        end if
-                                    end try
-                                    perform action "AXPress" of (first button of w whose subrole is "AXCloseButton")
-                                end if
-                            end try
-                        end repeat
-                    end tell
-                end if
-            end repeat
-        end tell
-        '''
-        try:
-            subprocess.run(
-                ["osascript", "-e", close_script],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=3.5,
-            )
-        except Exception:
-            pass
-
-        # Chờ Windows App đóng phiên cũ & ổn định danh sách màn hình macOS
-        time.sleep(0.85)
-
-        # Bước 2: Tự kích hoạt lại kết nối PC đã lưu trong cửa sổ chính Windows App
-        # Ưu tiên: bấm menu Connections -> Connect, hoặc nhấn double-click / Enter vào thẻ PC khớp tên
-        reconnect_script = f'''
-        set targetTitle to "{safe_title}"
-        tell application "System Events"
-            repeat with procName in {{"Windows App", "Microsoft Remote Desktop"}}
-                if exists process procName then
-                    tell process procName
-                        set frontmost to true
-                        delay 0.25
-                        -- Đảm bảo cửa sổ chính Devices/PCs hiện lên
-                        if (count of windows) is 0 then
-                            try
-                                keystroke "1" using command down
-                                delay 0.35
-                            end try
-                        end if
-                        -- Thử bấm qua Menu Bar (Connections -> Connect hoặc File -> Connect)
-                        set didConnect to false
-                        try
-                            if exists menu "Connections" of menu bar 1 then
-                                tell menu "Connections" of menu bar 1
-                                    if exists menu item "Connect" then
-                                        if enabled of menu item "Connect" is true then
-                                            click menu item "Connect"
-                                            set didConnect to true
-                                        end if
-                                    end if
-                                end tell
-                            end if
-                        end try
-                        if not didConnect then
-                            -- Tìm thẻ PC trong cửa sổ chính và kích hoạt bằng Enter / AXConfirm / AXPress
-                            try
-                                set mainWin to window 1
-                                set allElems to entire contents of mainWin
-                                repeat with el in allElems
-                                    try
-                                        set elRole to (role of el as string)
-                                        if elRole is in {{"AXGroup", "AXCell", "AXRow", "AXButton", "AXStaticText"}} then
-                                            set elDesc to ""
-                                            try
-                                                set elDesc to (name of el as string)
-                                            end try
-                                            if elDesc is "" then
-                                                try
-                                                    set elDesc to (value of el as string)
-                                                end try
-                                            end if
-                                            if elDesc is "" then
-                                                try
-                                                    set elDesc to (description of el as string)
-                                                end try
-                                            end if
-                                            if (targetTitle is not "" and elDesc contains targetTitle) or (elDesc contains "192.168.") or (elDesc contains "DESKTOP-") then
-                                                try
-                                                    set p to position of el
-                                                    set sz to size of el
-                                                    set cx to ((item 1 of p) + ((item 1 of sz) / 2))
-                                                    set cy to ((item 2 of p) + ((item 2 of sz) / 2))
-                                                    if cx > 0 and cy > 0 then
-                                                        return "CLICK " & (cx as integer) & " " & (cy as integer)
-                                                    end if
-                                                end try
-                                                try
-                                                    set focused of el to true
-                                                end try
-                                                try
-                                                    perform action "AXPress" of el
-                                                    delay 0.12
-                                                    perform action "AXPress" of el
-                                                    set didConnect to true
-                                                    exit repeat
-                                                end try
-                                            end if
-                                        end if
-                                    end try
-                                end repeat
-                            end try
-                        end if
-                        if not didConnect then
-                            -- Fallback cuối: nhấn Return trong cửa sổ Devices/PCs (nếu thẻ PC đang được chọn sẵn)
-                            try
-                                key code 36
-                                delay 0.12
-                                key code 36
-                            end try
-                        end if
-                    end tell
-                    exit repeat
-                end if
-            end repeat
-        end tell
-        '''
-        try:
-            proc_out = subprocess.run(
-                ["osascript", "-e", reconnect_script],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=4.5,
-            )
-            out_txt = (proc_out.stdout or "").strip()
-            if out_txt.startswith("CLICK ") and quartz is not None:
-                cparts = out_txt.split()
-                if len(cparts) >= 3:
-                    cx, cy = float(cparts[1]), float(cparts[2])
-                    quartz.CGWarpMouseCursorPosition((cx, cy))
-                    time.sleep(0.05)
-                    for click_idx in (1, 2):
-                        ev_dn = quartz.CGEventCreateMouseEvent(
-                            None, quartz.kCGEventLeftMouseDown, (cx, cy), quartz.kCGMouseButtonLeft
-                        )
-                        quartz.CGEventSetIntegerValueField(ev_dn, quartz.kCGMouseEventClickState, click_idx)
-                        quartz.CGEventPost(quartz.kCGHIDEventTap, ev_dn)
-                        ev_up = quartz.CGEventCreateMouseEvent(
-                            None, quartz.kCGEventLeftMouseUp, (cx, cy), quartz.kCGMouseButtonLeft
-                        )
-                        quartz.CGEventSetIntegerValueField(ev_up, quartz.kCGMouseEventClickState, click_idx)
-                        quartz.CGEventPost(quartz.kCGHIDEventTap, ev_up)
-                        time.sleep(0.04)
-        except Exception:
-            pass
-
-        # Chờ tối đa 3.2s xác nhận cửa sổ RDP mới đã mở lại
-        reconnected = False
-        deadline = time.monotonic() + 3.2
-        while time.monotonic() < deadline:
-            time.sleep(0.3)
-            if find_rdp_fn() is not None:
-                reconnected = True
-                break
-
-        return {
-            "rdp_was_open": True,
-            "rdp_reconnected": reconnected,
-            "on_virtual_display": self.has_rdp_window_on_virtual_display(quartz)
-            if expect_second_monitor
-            else False,
-        }

@@ -4384,50 +4384,6 @@ async def rdp_mode_check() -> dict:
     }
 
 
-@app.post("/close-mac-rdp-session")
-@app.get("/close-mac-rdp-session")
-async def close_mac_rdp_session() -> dict:
-    if not IS_MACOS:
-        return {"ok": False}
-    script = '''
-    tell application "System Events"
-        repeat with procName in {"Microsoft Remote Desktop", "Windows App"}
-            if exists process procName then
-                tell process procName
-                    repeat with w in (every window)
-                        try
-                            set wName to (name of w as string)
-                            if wName is not in {"PCs", "Workspaces", "Devices", "Apps", "Microsoft Remote Desktop", "Windows App"} then
-                                try
-                                    if (value of attribute "AXFullScreen" of w) is true then
-                                        set value of attribute "AXFullScreen" of w to false
-                                        delay 0.45
-                                    end if
-                                end try
-                                perform action "AXPress" of (first button of w whose subrole is "AXCloseButton")
-                            end if
-                        end try
-                    end repeat
-                end tell
-            end if
-        end repeat
-    end tell
-    '''
-    try:
-        await asyncio.to_thread(
-            subprocess.run,
-            ["osascript", "-e", script],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=2.5,
-        )
-    except Exception:
-        pass
-    _RDP_PID_TCP_CACHE.clear()
-    _ACTIVE_RDP_3389_PIDS.clear()
-    return {"ok": True}
-
-
 @app.websocket("/rdp-parallel-ws")
 async def rdp_parallel_ws(ws: WebSocket) -> None:
     global _ACTIVE_RDP_WS_COUNT
@@ -4553,47 +4509,24 @@ async def mac_virtual_display_toggle(req: Request) -> dict:
     except Exception:
         body = {}
     want_enable = bool(body.get("enable", not mac_vdisp.is_active()))
-    auto_reconnect = bool(body.get("auto_reconnect_rdp", True))
     logical_w = int(body.get("logical_w", 1798) or 1798)
     logical_h = int(body.get("logical_h", 864) or 864)
     hidpi = bool(body.get("hidpi", True))
 
     def _run_toggle() -> dict:
-        was_rdp = find_mac_rdp_window()
+        # Màn phụ Mac là tính năng tách biệt hoàn toàn với Windows App / Remote PC:
+        # CHỈ tạo hoặc hủy màn hình ảo macOS, tuyệt đối KHÔNG đóng/kích lại Windows App!
         if want_enable:
-            st = mac_vdisp.start(logical_w=logical_w, logical_h=logical_h, hidpi=hidpi)
+            mac_vdisp.start(logical_w=logical_w, logical_h=logical_h, hidpi=hidpi)
         else:
-            st = mac_vdisp.stop()
-        # Trả kết quả NGAY (~0.5s) để Điện thoại nối WebSocket tức thì không bao giờ timeout;
-        # việc tự làm mới Windows App RDP chạy nền song song ngay sau đó!
-        rdp_refresh: Dict[str, Any] = {"rdp_was_open": bool(was_rdp), "rdp_reconnecting_async": False}
-        if st.get("ok") and auto_reconnect and was_rdp is not None:
-            _RDP_PID_TCP_CACHE.clear()
-            _ACTIVE_RDP_3389_PIDS.clear()
-            rdp_refresh["rdp_reconnecting_async"] = True
-
-            def _bg_refresh() -> None:
-                try:
-                    mac_vdisp.auto_refresh_windows_app_session(
-                        was_rdp_info=was_rdp,
-                        find_rdp_fn=find_mac_rdp_window,
-                        quartz=injector._quartz,
-                        expect_second_monitor=want_enable,
-                    )
-                except Exception:
-                    pass
-
-            threading.Thread(target=_bg_refresh, daemon=True).start()
-        st = mac_vdisp.status(injector._quartz)
-        st["rdp_refresh"] = rdp_refresh
-        return st
+            mac_vdisp.stop()
+        return mac_vdisp.status(injector._quartz)
 
     return await asyncio.to_thread(_run_toggle)
 
 
 @app.websocket("/mac-virtual-display-ws")
 async def mac_virtual_display_ws(ws: WebSocket) -> None:
-    global _ACTIVE_RDP_WS_COUNT
     await ws.accept()
     if mac_vdisp is None or not IS_MACOS:
         try:
@@ -4603,30 +4536,133 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
             pass
         return
 
-    _ACTIVE_RDP_WS_COUNT += 1
-    audio_q: asyncio.Queue = asyncio.Queue()
-    _PC_WASAPI_CLIENTS.add(audio_q)
-    await _push_pc_bridge_cmd()
-    if _PC_WASAPI_FMT:
-        try:
-            await ws.send_text(json.dumps({"type": "spk_format", **_PC_WASAPI_FMT}))
-        except Exception:
-            pass
-
     running = True
     cur_bounds: Dict[str, Any] = {}
     input_state: Dict[str, Any] = {"held_btn": -1}
+    ws_send_lock = asyncio.Lock()
 
-    async def _audio_sender() -> None:
+    async def _safe_send_bytes(data: bytes) -> None:
+        async with ws_send_lock:
+            await ws.send_bytes(data)
+
+    async def _safe_send_text(text: str) -> None:
+        async with ws_send_lock:
+            await ws.send_text(text)
+
+    def _get_mac_cursor_xy() -> Optional[Tuple[float, float]]:
+        q = injector._quartz
+        if q is None:
+            return None
+        objc_mod = getattr(lens_capturer, "_objc", None)
+        try:
+            if objc_mod is not None:
+                with objc_mod.autorelease_pool():
+                    ev = q.CGEventCreate(None)
+                    if ev is None:
+                        return None
+                    loc = q.CGEventGetLocation(ev)
+                    return (float(loc.x), float(loc.y))
+            ev = q.CGEventCreate(None)
+            if ev is None:
+                return None
+            loc = q.CGEventGetLocation(ev)
+            return (float(loc.x), float(loc.y))
+        except Exception:
+            return None
+
+    def _is_inside_vdisp(px: float, py: float, b: Dict[str, Any]) -> bool:
+        bx = float(b["content_x"])
+        by = float(b["content_y"])
+        bw = float(b["content_w"])
+        bh = float(b["content_h"])
+        return (bx <= px < bx + bw) and (by <= py < by + bh)
+
+    def _dispatch_mac_ext_touch(b: Dict[str, Any], data: Dict[str, Any], state: Dict[str, Any]) -> None:
+        """Tách biệt cảm ứng trên Màn phụ với con trỏ chuột MacBook:
+        Nếu chuột vật lý đang ở màn chính MacBook, chạm/cuộn trên điện thoại xong sẽ tự trả
+        con trỏ về đúng vị trí cũ trên MacBook để không bao giờ bị cướp chuột."""
+        q = injector._quartz
+        mtype = str(data.get("type", ""))
+        if q is not None and mtype == "ptr_down":
+            cur_xy = _get_mac_cursor_xy()
+            if cur_xy is not None and not _is_inside_vdisp(cur_xy[0], cur_xy[1], b):
+                state["restore_pos"] = cur_xy
+                state["touch_busy"] = True
+            else:
+                state["restore_pos"] = None
+        elif q is not None and mtype == "ptr_wheel":
+            if not state.get("wheel_restore_pos"):
+                cur_xy = _get_mac_cursor_xy()
+                if cur_xy is not None and not _is_inside_vdisp(cur_xy[0], cur_xy[1], b):
+                    state["wheel_restore_pos"] = cur_xy
+                    state["touch_busy"] = True
+            state["last_wheel_at"] = time.monotonic()
+
+        _dispatch_parallel_rdp_input(b, data, state)
+
+        if q is not None and mtype == "ptr_up":
+            rpos = state.pop("restore_pos", None)
+            if rpos is not None:
+                time.sleep(0.015)
+                try:
+                    q.CGWarpMouseCursorPosition(rpos)
+                except Exception:
+                    pass
+                state["touch_busy"] = False
+
+    async def _cursor_sender() -> None:
+        q = injector._quartz
+        if q is None:
+            return
+        last_vis: Optional[bool] = None
+        last_rx = -1.0
+        last_ry = -1.0
         try:
             while running:
-                item = await audio_q.get()
-                if item is None:
-                    break
-                if isinstance(item, bytes):
-                    await ws.send_bytes(item)
-                elif isinstance(item, str):
-                    await ws.send_text(item)
+                # Tự trả con trỏ về MacBook sau khi ngón tay dừng cuộn trên màn phụ (~160ms)
+                wpos = input_state.get("wheel_restore_pos")
+                if wpos is not None and (time.monotonic() - float(input_state.get("last_wheel_at", 0.0))) >= 0.16:
+                    input_state.pop("wheel_restore_pos", None)
+                    try:
+                        q.CGWarpMouseCursorPosition(wpos)
+                    except Exception:
+                        pass
+                    if not input_state.get("restore_pos"):
+                        input_state["touch_busy"] = False
+
+                b = cur_bounds
+                if b and b.get("content_w", 0) > 0 and b.get("content_h", 0) > 0:
+                    if input_state.get("touch_busy"):
+                        if last_vis is not False:
+                            last_vis = False
+                            await _safe_send_text('{"type":"cursor","vis":false}')
+                    else:
+                        cur_xy = _get_mac_cursor_xy()
+                        if cur_xy is not None:
+                            mx, my = cur_xy
+                            bx = float(b["content_x"])
+                            by = float(b["content_y"])
+                            bw = float(b["content_w"])
+                            bh = float(b["content_h"])
+                            inside = (bx <= mx < bx + bw) and (by <= my < by + bh)
+                            if inside:
+                                rx = max(0.0, min(1.0, (mx - bx) / bw))
+                                ry = max(0.0, min(1.0, (my - by) / bh))
+                                if (
+                                    last_vis is not True
+                                    or abs(rx - last_rx) >= 0.0005
+                                    or abs(ry - last_ry) >= 0.0005
+                                ):
+                                    last_vis = True
+                                    last_rx = rx
+                                    last_ry = ry
+                                    await _safe_send_text(
+                                        f'{{"type":"cursor","vis":true,"rx":{rx:.4f},"ry":{ry:.4f}}}'
+                                    )
+                            elif last_vis is not False:
+                                last_vis = False
+                                await _safe_send_text('{"type":"cursor","vis":false}')
+                await asyncio.sleep(0.016)
         except Exception:
             pass
 
@@ -4655,7 +4691,7 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
                         if missing_since is None:
                             missing_since = now
                         elif (now - missing_since) >= 1.2:
-                            await ws.send_text('{"type":"vdisp_ended","reason":"disabled"}')
+                            await _safe_send_text('{"type":"vdisp_ended","reason":"disabled"}')
                             break
                         await asyncio.sleep(0.12)
                         continue
@@ -4672,14 +4708,14 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
                     if pkt != prev_pkt or (now - last_sent_at) >= 1.4:
                         prev_pkt = pkt
                         last_sent_at = now
-                        await ws.send_bytes(pkt)
+                        await _safe_send_bytes(pkt)
                     await asyncio.sleep(0.045)
                 else:
                     await asyncio.sleep(0.1)
         except Exception:
             pass
 
-    a_task = asyncio.create_task(_audio_sender())
+    c_task = asyncio.create_task(_cursor_sender())
     v_task = asyncio.create_task(_video_sender())
     try:
         while True:
@@ -4690,21 +4726,14 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
                 continue
             if cur_bounds:
                 await asyncio.to_thread(
-                    _dispatch_parallel_rdp_input, cur_bounds, data, input_state
+                    _dispatch_mac_ext_touch, cur_bounds, data, input_state
                 )
     except Exception:
         pass
     finally:
-        _ACTIVE_RDP_WS_COUNT = max(0, _ACTIVE_RDP_WS_COUNT - 1)
         running = False
-        _PC_WASAPI_CLIENTS.discard(audio_q)
-        try:
-            audio_q.put_nowait(None)
-        except Exception:
-            pass
-        a_task.cancel()
+        c_task.cancel()
         v_task.cancel()
-        await _push_pc_bridge_cmd()
         try:
             await ws.close()
         except Exception:
@@ -4731,7 +4760,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.3.8",
+        "version": "2.3.9",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,

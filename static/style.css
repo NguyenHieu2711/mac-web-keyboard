@@ -69,12 +69,14 @@ body:not([data-layout="remote"]):not([data-layout="mac_ext"]) .remote-shell {
 
 /* Tách biệt hoàn toàn giao diện Màn phụ Mac và Remote PC */
 body[data-layout="mac_ext"] #remote-login-overlay,
+body[data-layout="mac_ext"] #remote-control-wrap,
 body[data-layout="mac_ext"] #btn-remote-coexist,
 body[data-layout="mac_ext"] #remote-scale-wrap,
 body[data-layout="mac_ext"] #btn-remote-cfg {
   display: none !important;
 }
 
+body[data-layout="remote"] #btn-mac-ext-touch,
 body[data-layout="remote"] #btn-mac-ext-display,
 body[data-layout="remote"] #mac-ext-overlay {
   display: none !important;
