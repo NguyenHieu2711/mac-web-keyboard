@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -16,7 +17,9 @@ namespace MacWebKeyboard
 {
     internal static class PcConsoleStreamer
     {
-        private const int LISTEN_PORT = 5052;
+        private const int CONSOLE_LISTEN_PORT = 5052;
+        private const int CHILD_LISTEN_PORT = 5053;
+        private static bool _isChildSession = false;
         private const int INPUT_MOUSE = 0;
         private const int INPUT_KEYBOARD = 1;
 
@@ -46,6 +49,9 @@ namespace MacWebKeyboard
 
         [DllImport("kernel32.dll")]
         private static extern uint WTSGetActiveConsoleSessionId();
+
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        private static extern bool WTSGetChildSessionId(out uint pSessionId);
 
         [DllImport("wtsapi32.dll", SetLastError = true)]
         private static extern bool WTSQuerySessionInformationW(
@@ -166,8 +172,41 @@ namespace MacWebKeyboard
             _jpegParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 88L);
         }
 
+        private static bool DetectIsChildSession()
+        {
+            try
+            {
+                int mySid = Process.GetCurrentProcess().SessionId;
+                uint childSid = 0xFFFFFFFF;
+                if (WTSGetChildSessionId(out childSid) && childSid != 0xFFFFFFFF && (int)childSid == mySid)
+                {
+                    return true;
+                }
+                // Fallback: nếu phiên hiện tại khác console session và là phiên RDP cục bộ từ ChildHost
+                uint consoleSid = WTSGetActiveConsoleSessionId();
+                if (consoleSid != 0xFFFFFFFF && mySid != (int)consoleSid)
+                {
+                    IntPtr buf;
+                    int bytes;
+                    // WTSClientName = 10 -> Child session loopback thường có client name là chính hostname
+                    if (WTSQuerySessionInformationW(IntPtr.Zero, (uint)mySid, 10, out buf, out bytes) && buf != IntPtr.Zero)
+                    {
+                        string cliName = Marshal.PtrToStringUni(buf) ?? "";
+                        WTSFreeMemory(buf);
+                        if (string.Equals(cliName.Trim(), Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
         private static bool IsConsoleActiveAndUnlocked()
         {
+            if (_isChildSession) return true;
             try
             {
                 uint cid = WTSGetActiveConsoleSessionId();
@@ -525,6 +564,7 @@ namespace MacWebKeyboard
                         bool active = IsConsoleActiveAndUnlocked();
                         Size sz = GetPrimaryScreenSize();
                         string reply = "{\"ok\":true,\"active\":" + (active ? "true" : "false") +
+                                       ",\"child\":" + (_isChildSession ? "true" : "false") +
                                        ",\"width\":" + sz.Width + ",\"height\":" + sz.Height + "}\n";
                         byte[] rb = Encoding.UTF8.GetBytes(reply);
                         ns.Write(rb, 0, rb.Length);
@@ -620,10 +660,13 @@ namespace MacWebKeyboard
                 return 2;
             }
 
+            _isChildSession = DetectIsChildSession();
+            int bindPort = _isChildSession ? CHILD_LISTEN_PORT : CONSOLE_LISTEN_PORT;
+
             TcpListener listener = null;
             try
             {
-                listener = new TcpListener(IPAddress.Loopback, LISTEN_PORT);
+                listener = new TcpListener(IPAddress.Loopback, bindPort);
                 listener.Start();
             }
             catch

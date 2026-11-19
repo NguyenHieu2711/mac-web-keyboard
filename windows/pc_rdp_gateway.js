@@ -1198,10 +1198,18 @@ function getLiveWebBundle() {
 }
 
 const PREVIEW_HELPER_PORT = Number(process.env.PC_PREVIEW_PORT || 5052);
+const CHILD_PREVIEW_PORT = Number(process.env.PC_CHILD_PREVIEW_PORT || 5053);
 const CONSOLE_STREAMER_EXE = path.join(__dirname, 'pc_console_streamer.exe');
+const CHILD_HOST_EXE = path.join(__dirname, 'pc_child_host.exe');
 const pcParallelClients = new Set();
 
 function tryStartConsoleStreamer() {
+  if (fs.existsSync(CHILD_HOST_EXE)) {
+    try {
+      const ch = spawn(CHILD_HOST_EXE, [], { detached: true, stdio: 'ignore' });
+      ch.unref();
+    } catch (_) {}
+  }
   if (!fs.existsSync(CONSOLE_STREAMER_EXE)) return;
   try {
     const p = spawn(CONSOLE_STREAMER_EXE, [], {
@@ -1212,15 +1220,15 @@ function tryStartConsoleStreamer() {
   } catch (_) {}
 }
 
-function probeLocalPreviewHelper(cb) {
+function probeSinglePreviewPort(port, cb) {
   let done = false;
   const finish = (val) => {
     if (done) return;
     done = true;
     cb(val);
   };
-  const sock = net.createConnection({ host: '127.0.0.1', port: PREVIEW_HELPER_PORT });
-  sock.setTimeout(380);
+  const sock = net.createConnection({ host: '127.0.0.1', port });
+  sock.setTimeout(360);
   let rx = '';
   sock.on('connect', () => {
     sock.write('PROBE\n');
@@ -1230,7 +1238,9 @@ function probeLocalPreviewHelper(cb) {
     const nl = rx.indexOf('\n');
     if (nl >= 0) {
       try {
-        finish(JSON.parse(rx.slice(0, nl).trim()));
+        const parsed = JSON.parse(rx.slice(0, nl).trim());
+        parsed.port = port;
+        finish(parsed);
       } catch (_) {
         finish(null);
       }
@@ -1249,66 +1259,82 @@ function probeLocalPreviewHelper(cb) {
   });
 }
 
+function probeLocalPreviewHelper(cb) {
+  // Ưu tiên cổng 5053 (Child Session độc lập 2248x1080 @ 125% tách biệt 100% khỏi Mac/PC chính!)
+  probeSinglePreviewPort(CHILD_PREVIEW_PORT, (childInfo) => {
+    if (childInfo && childInfo.active) {
+      cb(childInfo);
+      return;
+    }
+    probeSinglePreviewPort(PREVIEW_HELPER_PORT, (mainInfo) => {
+      cb(mainInfo || childInfo);
+    });
+  });
+}
+
 function handlePcParallelWebSocket(wsConn) {
-  const upstream = net.createConnection({ host: '127.0.0.1', port: PREVIEW_HELPER_PORT });
-  upstream.setNoDelay(true);
-  let rxBuf = Buffer.alloc(0);
-  let closed = false;
+  probeLocalPreviewHelper((info) => {
+    const targetPort = info && info.port ? info.port : PREVIEW_HELPER_PORT;
+    const upstream = net.createConnection({ host: '127.0.0.1', port: targetPort });
+    upstream.setNoDelay(true);
+    let rxBuf = Buffer.alloc(0);
+    let closed = false;
 
-  const cleanup = () => {
-    if (closed) return;
-    closed = true;
-    if (pcParallelClients.delete(wsConn)) {
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      if (pcParallelClients.delete(wsConn)) {
+        syncWasapiProcess();
+      }
+      try { upstream.destroy(); } catch (_) {}
+      try { wsConn.close(); } catch (_) {}
+    };
+
+    upstream.on('connect', () => {
+      pcParallelClients.add(wsConn);
       syncWasapiProcess();
-    }
-    try { upstream.destroy(); } catch (_) {}
-    try { wsConn.close(); } catch (_) {}
-  };
+      try {
+        wsConn.sendText(JSON.stringify({ type: 'spk_format', ...wasapiFormat }));
+      } catch (_) {}
+      upstream.write('STREAM\n');
+    });
 
-  upstream.on('connect', () => {
-    pcParallelClients.add(wsConn);
-    syncWasapiProcess();
-    try {
-      wsConn.sendText(JSON.stringify({ type: 'spk_format', ...wasapiFormat }));
-    } catch (_) {}
-    upstream.write('STREAM\n');
-  });
-
-  upstream.on('data', (chunk) => {
-    rxBuf = rxBuf.length === 0 ? chunk : Buffer.concat([rxBuf, chunk]);
-    while (rxBuf.length >= 4) {
-      const fLen = rxBuf.readUInt32BE(0);
-      if (fLen === 0 || fLen > 6 * 1024 * 1024) {
-        cleanup();
-        return;
+    upstream.on('data', (chunk) => {
+      rxBuf = rxBuf.length === 0 ? chunk : Buffer.concat([rxBuf, chunk]);
+      while (rxBuf.length >= 4) {
+        const fLen = rxBuf.readUInt32BE(0);
+        if (fLen === 0 || fLen > 6 * 1024 * 1024) {
+          cleanup();
+          return;
+        }
+        if (rxBuf.length < 4 + fLen) break;
+        const body = rxBuf.subarray(4, 4 + fLen);
+        rxBuf = rxBuf.subarray(4 + fLen);
+        if (body[0] === 0x20) {
+          try {
+            wsConn.sendText(body.subarray(1).toString('utf8'));
+          } catch (_) {}
+        } else {
+          try {
+            wsConn.sendBinary(body);
+          } catch (_) {}
+        }
       }
-      if (rxBuf.length < 4 + fLen) break;
-      const body = rxBuf.subarray(4, 4 + fLen);
-      rxBuf = rxBuf.subarray(4 + fLen);
-      if (body[0] === 0x20) {
-        try {
-          wsConn.sendText(body.subarray(1).toString('utf8'));
-        } catch (_) {}
-      } else {
-        try {
-          wsConn.sendBinary(body);
-        } catch (_) {}
-      }
-    }
-  });
+    });
 
-  upstream.on('error', cleanup);
-  upstream.on('close', cleanup);
+    upstream.on('error', cleanup);
+    upstream.on('close', cleanup);
 
-  wsConn.on('message', ({ opcode, payload }) => {
-    if (opcode === 0x1 && !closed && upstream.writable) {
-      const txt = payload.toString('utf8').replace(/[\r\n]+/g, ' ').trim();
-      if (txt) {
-        try { upstream.write(txt + '\n'); } catch (_) {}
+    wsConn.on('message', ({ opcode, payload }) => {
+      if (opcode === 0x1 && !closed && upstream.writable) {
+        const txt = payload.toString('utf8').replace(/[\r\n]+/g, ' ').trim();
+        if (txt) {
+          try { upstream.write(txt + '\n'); } catch (_) {}
+        }
       }
-    }
+    });
+    wsConn.on('close', cleanup);
   });
-  wsConn.on('close', cleanup);
 }
 
 const server = http.createServer((req, res) => {
@@ -1344,21 +1370,23 @@ const server = http.createServer((req, res) => {
   }
   if (cleanPath === '/rdp-mode-check') {
     probeLocalPreviewHelper((info) => {
+      const isChild = Boolean(info && info.child);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(
         JSON.stringify({
           ok: true,
-          source: 'pc',
+          source: isChild ? 'pc_child' : 'pc',
+          independent: isChild,
           parallel_available: Boolean(info && info.active),
           streamer_ready: Boolean(info && info.ok),
-          window: info && info.active ? { width: info.width || 1920, height: info.height || 1080 } : null,
+          window: info && info.active ? { width: info.width || 2248, height: info.height || 1080 } : null,
         })
       );
     });
     return;
   }
   if (cleanPath === '/health') {
-    let webVer = '2.3.2';
+    let webVer = '2.3.3';
     let etag = '';
     try {
       const b = getLiveWebBundle();
@@ -1368,7 +1396,7 @@ const server = http.createServer((req, res) => {
     const payload = JSON.stringify({
       ok: true,
       service: 'pc-rdp-gateway',
-      version: '2.3.2',
+      version: '2.3.3',
       web_version: webVer,
       unikey_vn: lastUnikeyVnState,
       etag,
