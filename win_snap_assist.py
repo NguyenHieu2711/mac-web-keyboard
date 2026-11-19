@@ -1285,6 +1285,7 @@ class DesktopGridController(Foundation.NSObject):
         self.drag_start_pt: Optional[Tuple[float, float]] = None
         self.grab_offset: Tuple[float, float] = (0.0, 0.0)
         self.drag_moved = False
+        self.last_tap_pt: Optional[Tuple[float, float]] = None
 
         self.read_script = Foundation.NSAppleScript.alloc().initWithSource_(
             'tell application "Finder"\n'
@@ -1343,6 +1344,7 @@ class DesktopGridController(Foundation.NSObject):
             if etype == Quartz.kCGEventLeftMouseDown:
                 if self._is_clicking_desktop(qx, qy):
                     self.drag_start_pt = (qx, qy)
+                    self.last_tap_pt = (qx, qy)
                     self.dragging_desktop = True
                     self.drag_moved = False
                     best_nm = None
@@ -1364,20 +1366,40 @@ class DesktopGridController(Foundation.NSObject):
                     self.dragging_desktop = False
                     self.drag_icon = None
                     self.drag_start_pt = None
+                    self.last_tap_pt = None
                     self.drag_moved = False
 
             elif etype == Quartz.kCGEventLeftMouseDragged:
                 if self.dragging_desktop and self.drag_start_pt is not None:
-                    if (
-                        abs(qx - self.drag_start_pt[0]) > 5.0
-                        or abs(qy - self.drag_start_pt[1]) > 5.0
-                    ):
-                        self.drag_moved = True
+                    if not self.drag_moved:
+                        if (
+                            abs(qx - self.drag_start_pt[0]) > 7.0
+                            or abs(qy - self.drag_start_pt[1]) > 7.0
+                        ):
+                            self.drag_moved = True
+                        else:
+                            self.last_tap_pt = (qx, qy)
                     if self.drag_moved and self.drag_icon is not None:
                         dx, dy = self.grab_offset
                         c, r = self.to_cell(qx - dx, qy - dy)
                         gx, gy = self.to_px(c, r)
                         self._show_preview_at(gx, gy)
+                        sx = float(gx) + dx
+                        sy = float(gy) + dy
+                        snap_pt = Quartz.CGPointMake(sx, sy)
+                        Quartz.CGEventSetLocation(event, snap_pt)
+                        if self.last_tap_pt is not None:
+                            Quartz.CGEventSetIntegerValueField(
+                                event,
+                                Quartz.kCGMouseEventDeltaX,
+                                int(round(sx - self.last_tap_pt[0])),
+                            )
+                            Quartz.CGEventSetIntegerValueField(
+                                event,
+                                Quartz.kCGMouseEventDeltaY,
+                                int(round(sy - self.last_tap_pt[1])),
+                            )
+                        self.last_tap_pt = (sx, sy)
 
             elif etype == Quartz.kCGEventLeftMouseUp:
                 was_drag = self.dragging_desktop and self.drag_moved
@@ -1393,20 +1415,24 @@ class DesktopGridController(Foundation.NSObject):
                     if icon_nm is not None:
                         tc, tr = self.to_cell(qx - dx, qy - dy)
                         gx, gy = self.to_px(tc, tr)
-                        snap_pt = Quartz.CGPointMake(
-                            float(gx) + dx, float(gy) + dy
-                        )
-                        drag_ev = Quartz.CGEventCreateMouseEvent(
-                            None,
-                            Quartz.kCGEventLeftMouseDragged,
-                            snap_pt,
-                            Quartz.kCGMouseButtonLeft,
-                        )
-                        if drag_ev is not None:
-                            Quartz.CGEventTapPostEvent(proxy, drag_ev)
+                        sx = float(gx) + dx
+                        sy = float(gy) + dy
+                        snap_pt = Quartz.CGPointMake(sx, sy)
                         Quartz.CGEventSetLocation(event, snap_pt)
+                        if self.last_tap_pt is not None:
+                            Quartz.CGEventSetIntegerValueField(
+                                event,
+                                Quartz.kCGMouseEventDeltaX,
+                                int(round(sx - self.last_tap_pt[0])),
+                            )
+                            Quartz.CGEventSetIntegerValueField(
+                                event,
+                                Quartz.kCGMouseEventDeltaY,
+                                int(round(sy - self.last_tap_pt[1])),
+                            )
+                    self.last_tap_pt = None
                     Foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                        0.02, self, "snapTimer:", None, False
+                        0.01, self, "snapTimer:", None, False
                     )
         except Exception:
             pass
@@ -1561,7 +1587,8 @@ class DesktopGridController(Foundation.NSObject):
             if (
                 nm in self.last_px
                 and self.last_px[nm] == (x, y)
-                and (x, y) == (gx, gy)
+                and abs(x - gx) <= 2
+                and abs(y - gy) <= 2
                 and (c, r) not in occupied
             ):
                 stationary.append((nm, x, y, (c, r)))
@@ -1607,9 +1634,12 @@ class DesktopGridController(Foundation.NSObject):
         cur_map = {nm: (x, y) for nm, x, y in current_items}
         for nm, cell in new_cells.items():
             gx, gy = self.to_px(cell[0], cell[1])
+            cx, cy = cur_map.get(nm, (0, 0))
             self.last_cells[nm] = cell
-            self.last_px[nm] = (gx, gy)
-            if cur_map.get(nm) != (gx, gy):
+            if abs(cx - gx) <= 2 and abs(cy - gy) <= 2:
+                self.last_px[nm] = (cx, cy)
+            else:
+                self.last_px[nm] = (gx, gy)
                 safe_nm = nm.replace("\\", "\\\\").replace('"', '\\"')
                 cmds.append(
                     f'set desktop position of item "{safe_nm}" of desktop to {{{gx}, {gy}}}'
