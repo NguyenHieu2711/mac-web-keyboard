@@ -4552,18 +4552,35 @@ async def mac_virtual_display_diag() -> dict:
                         })
                 out["displays"] = disps
                 ov_wins = []
+                rdp_wins = []
+                srd_pid = 0
                 wlist = q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionOnScreenOnly, q.kCGNullWindowID) or []
                 for w in wlist:
                     ly = int(w.get("kCGWindowLayer", 0))
                     owner = str(w.get("kCGWindowOwnerName", "") or "")
+                    pid_w = int(w.get("kCGWindowOwnerPID", 0) or 0)
                     wb = w.get("kCGWindowBounds") or {}
                     ww = float(wb.get("Width", 0))
                     wh = float(wb.get("Height", 0))
-                    if ly >= 15 or "dock" in owner.lower() or "sidebar" in owner.lower() or "menubar" in owner.lower():
+                    ol = owner.lower()
+                    if "smartrightdock" in ol or "alwaysdock" in ol or "docky" in ol:
+                        srd_pid = pid_w
+                    if ("remote desktop" in ol or "windows app" in ol) and ww >= 80 and wh >= 30:
+                        rdp_wins.append({
+                            "owner": owner,
+                            "pid": pid_w,
+                            "layer": ly,
+                            "name": str(w.get("kCGWindowName", "") or "")[:40],
+                            "x": float(wb.get("X", 0)),
+                            "y": float(wb.get("Y", 0)),
+                            "w": ww,
+                            "h": wh,
+                        })
+                    if ly >= 15 or "dock" in ol or "sidebar" in ol or "menubar" in ol:
                         if ww >= 20 and wh >= 20:
                             ov_wins.append({
                                 "owner": owner,
-                                "pid": int(w.get("kCGWindowOwnerPID", 0) or 0),
+                                "pid": pid_w,
                                 "layer": ly,
                                 "name": str(w.get("kCGWindowName", "") or "")[:40],
                                 "x": float(wb.get("X", 0)),
@@ -4572,6 +4589,80 @@ async def mac_virtual_display_diag() -> dict:
                                 "h": wh,
                             })
                 out["overlay_windows"] = ov_wins[:40]
+                out["rdp_windows"] = rdp_wins[:20]
+                if srd_pid > 0 and mac_vdisp is not None and mac_vdisp._init_ax_libs():
+                    import ctypes
+                    import objc  # type: ignore
+                    from mac_virtual_display import _CGPoint, _CGSize
+
+                    ax = mac_vdisp._ax_lib
+                    cf = mac_vdisp._cf_lib
+                    _s = lambda st: cf.CFStringCreateWithCString(None, st.encode("utf-8"), 0x08000100)
+                    _p = lambda pv: str(objc.objc_object(c_void_p=pv) or "") if pv else ""
+                    s_wins, s_ch, s_role, s_title, s_desc, s_help, s_ident, s_pos, s_size = (
+                        _s("AXWindows"), _s("AXChildren"), _s("AXRole"), _s("AXTitle"),
+                        _s("AXDescription"), _s("AXHelp"), _s("AXIdentifier"), _s("AXPosition"), _s("AXSize"),
+                    )
+                    srd_items = []
+                    def _walk(el, depth=0):
+                        if not el or depth > 5 or len(srd_items) >= 40:
+                            return
+                        def _gs(attr):
+                            r = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(el, attr, ctypes.byref(r)) == 0 and r.value:
+                                val = _p(r.value)
+                                cf.CFRelease(r.value)
+                                return val
+                            return ""
+                        role = _gs(s_role)
+                        title = _gs(s_title)
+                        desc = _gs(s_desc)
+                        hlp = _gs(s_help)
+                        ident = _gs(s_ident)
+                        pr, sr = ctypes.c_void_p(), ctypes.c_void_p()
+                        px = py = pw = ph = 0.0
+                        if (
+                            ax.AXUIElementCopyAttributeValue(el, s_pos, ctypes.byref(pr)) == 0 and pr.value
+                            and ax.AXUIElementCopyAttributeValue(el, s_size, ctypes.byref(sr)) == 0 and sr.value
+                        ):
+                            pt, sz = _CGPoint(), _CGSize()
+                            if ax.AXValueGetValue(pr.value, 1, ctypes.byref(pt)):
+                                px, py = pt.x, pt.y
+                            if ax.AXValueGetValue(sr.value, 2, ctypes.byref(sz)):
+                                pw, ph = sz.w, sz.h
+                        if pr.value:
+                            cf.CFRelease(pr.value)
+                        if sr.value:
+                            cf.CFRelease(sr.value)
+                        if depth > 0:
+                            srd_items.append({
+                                "d": depth, "role": role, "title": title[:40],
+                                "desc": desc[:40], "help": hlp[:40], "ident": ident[:40],
+                                "x": round(px, 1), "y": round(py, 1), "w": round(pw, 1), "h": round(ph, 1),
+                            })
+                        cr = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(el, s_ch, ctypes.byref(cr)) == 0 and cr.value:
+                            try:
+                                for idx in range(min(30, cf.CFArrayGetCount(cr.value))):
+                                    _walk(cf.CFArrayGetValueAtIndex(cr.value, idx), depth + 1)
+                            finally:
+                                cf.CFRelease(cr.value)
+                    app_ax = ax.AXUIElementCreateApplication(srd_pid)
+                    if app_ax:
+                        try:
+                            wr = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wr)) == 0 and wr.value:
+                                try:
+                                    for idx in range(min(4, cf.CFArrayGetCount(wr.value))):
+                                        _walk(cf.CFArrayGetValueAtIndex(wr.value, idx), 0)
+                                finally:
+                                    cf.CFRelease(wr.value)
+                        finally:
+                            cf.CFRelease(app_ax)
+                    for sr_k in (s_wins, s_ch, s_role, s_title, s_desc, s_help, s_ident, s_pos, s_size):
+                        if sr_k:
+                            cf.CFRelease(sr_k)
+                    out["smart_dock_ax"] = srd_items
         except Exception as e:
             out["displays_err"] = str(e)
         return out

@@ -631,6 +631,9 @@ class MacVirtualDisplayManager:
         self._dock_icons: list = []
         self._vdisp_only_apps: Dict[str, int] = {}
         self._min_vdisp_pids: set = set()
+        self._vdisp_seen_pids: set = set()
+        self._custom_dock_pid: int = 0
+        self._custom_dock_anchor: Optional[Tuple[float, float]] = None
         self._vdisp_bounds_cache: Optional[Dict[str, float]] = None
         self._vdisp_has_fullscreen: bool = False
         self._tap_loop_ref: Any = None
@@ -1099,6 +1102,9 @@ class MacVirtualDisplayManager:
                                 ax.AXUIElementSetAttributeValue(w_ax, s_min, kFalse)
                             ax.AXUIElementPerformAction(w_ax, s_raise)
                         rapp.activateWithOptions_(2)
+                    # Giữ SmartRightDock / Docky khóa chặt ở mép phải MacBook, không để nhảy sang Màn phụ
+                    for delay_s in (0.06, 0.22):
+                        threading.Timer(delay_s, self._pin_custom_dock_to_main).start()
                 finally:
                     cf.CFRelease(wins_ref.value)
             finally:
@@ -1106,6 +1112,98 @@ class MacVirtualDisplayManager:
                 for s_ref in (s_wins, s_pos, s_size, s_min, s_fs, s_raise):
                     if s_ref:
                         cf.CFRelease(s_ref)
+        except Exception:
+            pass
+
+    def _pin_custom_dock_to_main(self, quartz: Any = None) -> None:
+        """Giữ thanh Dock dọc bên phải (SmartRightDock / AlwaysDock / Docky) luôn neo trên màn chính MacBook,
+        tự động kéo về vị trí cũ nếu nó nhảy sang Màn phụ #2 khi kích hoạt app trên Màn phụ."""
+        if not IS_MACOS or not self._init_ax_libs() or not self.is_active():
+            return
+        try:
+            q = quartz
+            if q is None:
+                import Quartz as q  # type: ignore
+            import objc  # type: ignore
+
+            bounds = self._vdisp_bounds_cache or self.get_bounds(q)
+            if not bounds:
+                return
+            bx, by, bw, bh = bounds["x"], bounds["y"], bounds["w"], bounds["h"]
+            mb = q.CGDisplayBounds(q.CGMainDisplayID())
+            mw, mh = float(mb.size.width), float(mb.size.height)
+
+            cd_pid = 0
+            drifted = False
+            win_w = 48.0
+            win_h = 340.0
+            with objc.autorelease_pool():
+                wlist = q.CGWindowListCopyWindowInfo(
+                    q.kCGWindowListOptionOnScreenOnly,
+                    q.kCGNullWindowID,
+                ) or []
+                for w in wlist:
+                    owner = str(w.get("kCGWindowOwnerName", "") or "").lower()
+                    if "smartrightdock" not in owner and "alwaysdock" not in owner and "docky" not in owner:
+                        continue
+                    wb = w.get("kCGWindowBounds") or {}
+                    ww = float(wb.get("Width", 0))
+                    wh = float(wb.get("Height", 0))
+                    if ww < 20.0 or wh < 40.0:
+                        continue
+                    wx = float(wb.get("X", 0))
+                    wy = float(wb.get("Y", 0))
+                    cd_pid = int(w.get("kCGWindowOwnerPID", 0) or 0)
+                    win_w, win_h = ww, wh
+                    cx = wx + ww * 0.5
+                    cy = wy + wh * 0.5
+                    if (0.0 <= cx < mw) and (0.0 <= cy < mh):
+                        self._custom_dock_anchor = (wx, wy)
+                        self._custom_dock_pid = cd_pid
+                    elif (wx < 0.0) or ((bx <= cx < bx + bw) and (by <= cy < by + bh)):
+                        drifted = True
+                        self._custom_dock_pid = cd_pid
+                        break
+
+            if not drifted or cd_pid <= 0:
+                return
+
+            ax = self._ax_lib
+            cf = self._cf_lib
+            s_wins = cf.CFStringCreateWithCString(None, b"AXWindows", 0x08000100)
+            s_pos = cf.CFStringCreateWithCString(None, b"AXPosition", 0x08000100)
+            app_ax = ax.AXUIElementCreateApplication(cd_pid)
+            try:
+                if not app_ax:
+                    return
+                wr = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wr)) != 0 or not wr.value:
+                    return
+                try:
+                    anchor = self._custom_dock_anchor or (
+                        max(0.0, mw - win_w - 3.0),
+                        max(40.0, (mh - win_h) * 0.5),
+                    )
+                    pt = _CGPoint(float(anchor[0]), float(anchor[1]))
+                    pv = ax.AXValueCreate(1, ctypes.byref(pt))
+                    if pv:
+                        try:
+                            n_w = cf.CFArrayGetCount(wr.value)
+                            for i in range(min(4, n_w)):
+                                w_ax = cf.CFArrayGetValueAtIndex(wr.value, i)
+                                if w_ax:
+                                    ax.AXUIElementSetAttributeValue(w_ax, s_pos, pv)
+                        finally:
+                            cf.CFRelease(pv)
+                finally:
+                    cf.CFRelease(wr.value)
+            finally:
+                if app_ax:
+                    cf.CFRelease(app_ax)
+                if s_wins:
+                    cf.CFRelease(s_wins)
+                if s_pos:
+                    cf.CFRelease(s_pos)
         except Exception:
             pass
 
@@ -1143,50 +1241,76 @@ class MacVirtualDisplayManager:
                 except Exception:
                     return ""
 
-            # 1. Xác định các app đang nằm RIÊNG trên Màn phụ #2 (không có cửa sổ trên màn chính MacBook)
+            # 1. Xác định các app đang nằm RIÊNG trên Màn phụ #2 + vị trí SmartRightDock/Docky trên MacBook
+            custom_dock_pid = 0
+            custom_dock_drifted = False
             with objc.autorelease_pool():
                 wins = q.CGWindowListCopyWindowInfo(
                     q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements,
                     q.kCGNullWindowID,
                 ) or []
                 vdisp_pids: set = set(self._min_vdisp_pids)
+                vdisp_onscreen_pids: set = set()
                 main_pids: set = set()
                 has_fs = False
                 for w in wins:
-                    if int(w.get("kCGWindowLayer", -1)) != 0:
-                        continue
+                    ly = int(w.get("kCGWindowLayer", -1))
+                    owner_l = str(w.get("kCGWindowOwnerName", "") or "").lower()
                     pid = int(w.get("kCGWindowOwnerPID", 0) or 0)
                     if pid <= 0 or pid == os.getpid():
                         continue
                     wb = w.get("kCGWindowBounds") or {}
                     ww = float(wb.get("Width", 0))
                     wh = float(wb.get("Height", 0))
-                    if ww < 140 or wh < 90:
-                        continue
                     wx = float(wb.get("X", 0))
                     wy = float(wb.get("Y", 0))
-                    cx = wx + ww * 0.5
-                    cy = wy + wh * 0.5
                     onscr = bool(w.get("kCGWindowIsOnscreen", False))
                     alpha = float(w.get("kCGWindowAlpha", 1.0) or 0.0)
+
+                    # Theo dõi thanh Dock dọc bên phải (SmartRightDock / AlwaysDock / Docky)
+                    if ("smartrightdock" in owner_l or "alwaysdock" in owner_l or "docky" in owner_l):
+                        if onscr and ww >= 20.0 and wh >= 40.0:
+                            custom_dock_pid = pid
+                            self._custom_dock_pid = pid
+                            cx_d = wx + ww * 0.5
+                            cy_d = wy + wh * 0.5
+                            if (0.0 <= cx_d < mw) and (0.0 <= cy_d < mh):
+                                self._custom_dock_anchor = (wx, wy)
+                            elif (wx < 0.0) or ((bx <= cx_d < bx + bw) and (by <= cy_d < by + bh)):
+                                custom_dock_drifted = True
+                        continue
+
+                    if ly != 0:
+                        continue
+                    if ww < 140 or wh < 90:
+                        continue
+                    cx = wx + ww * 0.5
+                    cy = wy + wh * 0.5
                     if (bx <= cx < bx + bw) and (by <= cy < by + bh):
                         if onscr and alpha > 0.05:
                             vdisp_pids.add(pid)
+                            vdisp_onscreen_pids.add(pid)
                             if ww >= bw - 4.0 and wh >= bh - 4.0:
                                 has_fs = True
+                        elif (not onscr) and (pid in self._vdisp_seen_pids):
+                            # Giữ theo dõi app bị thu nhỏ bằng nút vàng trên Màn phụ #2
+                            vdisp_pids.add(pid)
                     elif (0.0 <= cx < mw) and (0.0 <= cy < mh):
                         if onscr and alpha > 0.05:
                             main_pids.add(pid)
                 self._vdisp_has_fullscreen = has_fs
+                self._vdisp_seen_pids = (self._vdisp_seen_pids | vdisp_onscreen_pids) - main_pids
 
                 only_vdisp_pids = vdisp_pids - main_pids
                 vdisp_name_map: Dict[str, int] = {}
                 dock_pid = 0
                 apps = AppKit.NSWorkspace.sharedWorkspace().runningApplications() or []
+                alive_pids = set()
                 for rapp in apps:
                     try:
                         bid = str(rapp.bundleIdentifier() or "")
                         rpid = int(rapp.processIdentifier())
+                        alive_pids.add(rpid)
                         if bid == "com.apple.dock":
                             dock_pid = rpid
                             continue
@@ -1194,6 +1318,8 @@ class MacVirtualDisplayManager:
                             lname = str(rapp.localizedName() or "").strip().lower()
                             if lname:
                                 vdisp_name_map[lname] = rpid
+                            if bid:
+                                vdisp_name_map[bid.strip().lower()] = rpid
                             burl = rapp.bundleURL()
                             if burl is not None:
                                 bpath = str(burl.path() or "")
@@ -1202,91 +1328,154 @@ class MacVirtualDisplayManager:
                                     vdisp_name_map[bstem] = rpid
                     except Exception:
                         continue
+                self._vdisp_seen_pids &= alive_pids
+                self._min_vdisp_pids &= alive_pids
                 self._vdisp_only_apps = vdisp_name_map
 
-            # 2. Đọc tọa độ các icon ứng dụng trên thanh Dock của MacBook (cache trong RAM để EventTap chạy 0.005ms)
-            if dock_pid <= 0 or not self._vdisp_only_apps:
+            if custom_dock_drifted:
+                self._pin_custom_dock_to_main(q)
+
+            # 2. Đọc tọa độ các icon trên CẢ Dock gốc macOS LẪN SmartRightDock/Docky (cache trong RAM)
+            if (dock_pid <= 0 and custom_dock_pid <= 0) or not self._vdisp_only_apps:
                 self._dock_icons = []
                 return
+
+            s_wins = _cfstr("AXWindows")
             s_ch = _cfstr("AXChildren")
             s_role = _cfstr("AXRole")
             s_sub = _cfstr("AXSubrole")
             s_title = _cfstr("AXTitle")
+            s_desc = _cfstr("AXDescription")
+            s_help = _cfstr("AXHelp")
+            s_ident = _cfstr("AXIdentifier")
             s_pos = _cfstr("AXPosition")
             s_size = _cfstr("AXSize")
-            dock_ax = ax.AXUIElementCreateApplication(dock_pid)
             new_icons = []
+
+            def _match_vdisp_label(*labels: str) -> str:
+                for raw in labels:
+                    s = (raw or "").strip().lower()
+                    if not s:
+                        continue
+                    if s in self._vdisp_only_apps:
+                        return s
+                for raw in labels:
+                    s = (raw or "").strip().lower()
+                    if len(s) < 3:
+                        continue
+                    for k in self._vdisp_only_apps:
+                        if len(k) >= 4 and (k in s or s in k):
+                            return k
+                return ""
+
+            def _get_ax_str(el_ref: Any, attr_ref: Any) -> str:
+                r = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(el_ref, attr_ref, ctypes.byref(r)) == 0 and r.value:
+                    val = _cf_to_py(r.value)
+                    cf.CFRelease(r.value)
+                    return val
+                return ""
+
+            def _get_ax_rect(el_ref: Any) -> Optional[Tuple[float, float, float, float]]:
+                p_ref = ctypes.c_void_p()
+                sz_ref = ctypes.c_void_p()
+                ok_all = False
+                pt = _CGPoint()
+                sz = _CGSize()
+                if (
+                    ax.AXUIElementCopyAttributeValue(el_ref, s_pos, ctypes.byref(p_ref)) == 0
+                    and p_ref.value
+                    and ax.AXUIElementCopyAttributeValue(el_ref, s_size, ctypes.byref(sz_ref)) == 0
+                    and sz_ref.value
+                ):
+                    ok_all = bool(
+                        ax.AXValueGetValue(p_ref.value, 1, ctypes.byref(pt))
+                        and ax.AXValueGetValue(sz_ref.value, 2, ctypes.byref(sz))
+                    )
+                if p_ref.value:
+                    cf.CFRelease(p_ref.value)
+                if sz_ref.value:
+                    cf.CFRelease(sz_ref.value)
+                if ok_all and sz.w > 8 and sz.h > 8:
+                    return (pt.x, pt.y, sz.w, sz.h)
+                return None
+
             try:
-                if not dock_ax:
-                    return
-                ch_ref = ctypes.c_void_p()
-                if ax.AXUIElementCopyAttributeValue(dock_ax, s_ch, ctypes.byref(ch_ref)) != 0 or not ch_ref.value:
-                    return
-                try:
-                    n_top = cf.CFArrayGetCount(ch_ref.value)
-                    for i in range(n_top):
-                        el = cf.CFArrayGetValueAtIndex(ch_ref.value, i)
-                        if not el:
-                            continue
-                        r_ref = ctypes.c_void_p()
-                        role_s = ""
-                        if ax.AXUIElementCopyAttributeValue(el, s_role, ctypes.byref(r_ref)) == 0 and r_ref.value:
-                            role_s = _cf_to_py(r_ref.value)
-                            cf.CFRelease(r_ref.value)
-                        if role_s != "AXList":
-                            continue
-                        items_ref = ctypes.c_void_p()
-                        if ax.AXUIElementCopyAttributeValue(el, s_ch, ctypes.byref(items_ref)) != 0 or not items_ref.value:
-                            continue
+                # 2A. Quét Dock gốc macOS (com.apple.dock)
+                if dock_pid > 0:
+                    dock_ax = ax.AXUIElementCreateApplication(dock_pid)
+                    if dock_ax:
                         try:
-                            n_items = cf.CFArrayGetCount(items_ref.value)
-                            for j in range(n_items):
-                                item = cf.CFArrayGetValueAtIndex(items_ref.value, j)
-                                if not item:
-                                    continue
-                                sub_ref = ctypes.c_void_p()
-                                sub_s = ""
-                                if ax.AXUIElementCopyAttributeValue(item, s_sub, ctypes.byref(sub_ref)) == 0 and sub_ref.value:
-                                    sub_s = _cf_to_py(sub_ref.value)
-                                    cf.CFRelease(sub_ref.value)
-                                if sub_s != "AXApplicationDockItem":
-                                    continue
-                                t_ref = ctypes.c_void_p()
-                                title_s = ""
-                                if ax.AXUIElementCopyAttributeValue(item, s_title, ctypes.byref(t_ref)) == 0 and t_ref.value:
-                                    title_s = _cf_to_py(t_ref.value).strip().lower()
-                                    cf.CFRelease(t_ref.value)
-                                if not title_s or title_s not in self._vdisp_only_apps:
-                                    continue
-                                p_ref = ctypes.c_void_p()
-                                sz_ref = ctypes.c_void_p()
-                                if (
-                                    ax.AXUIElementCopyAttributeValue(item, s_pos, ctypes.byref(p_ref)) == 0
-                                    and p_ref.value
-                                    and ax.AXUIElementCopyAttributeValue(item, s_size, ctypes.byref(sz_ref)) == 0
-                                    and sz_ref.value
-                                ):
-                                    pt = _CGPoint()
-                                    sz = _CGSize()
-                                    ok_p = ax.AXValueGetValue(p_ref.value, 1, ctypes.byref(pt))
-                                    ok_s = ax.AXValueGetValue(sz_ref.value, 2, ctypes.byref(sz))
-                                    cf.CFRelease(p_ref.value)
-                                    cf.CFRelease(sz_ref.value)
-                                    if ok_p and ok_s and sz.w > 8 and sz.h > 8:
-                                        new_icons.append((pt.x, pt.y, sz.w, sz.h, title_s))
-                                else:
-                                    if p_ref.value:
-                                        cf.CFRelease(p_ref.value)
-                                    if sz_ref.value:
-                                        cf.CFRelease(sz_ref.value)
+                            ch_ref = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(dock_ax, s_ch, ctypes.byref(ch_ref)) == 0 and ch_ref.value:
+                                try:
+                                    n_top = cf.CFArrayGetCount(ch_ref.value)
+                                    for i in range(n_top):
+                                        el = cf.CFArrayGetValueAtIndex(ch_ref.value, i)
+                                        if not el or _get_ax_str(el, s_role) != "AXList":
+                                            continue
+                                        items_ref = ctypes.c_void_p()
+                                        if ax.AXUIElementCopyAttributeValue(el, s_ch, ctypes.byref(items_ref)) != 0 or not items_ref.value:
+                                            continue
+                                        try:
+                                            n_items = cf.CFArrayGetCount(items_ref.value)
+                                            for j in range(n_items):
+                                                item = cf.CFArrayGetValueAtIndex(items_ref.value, j)
+                                                if not item or _get_ax_str(item, s_sub) != "AXApplicationDockItem":
+                                                    continue
+                                                mkey = _match_vdisp_label(_get_ax_str(item, s_title))
+                                                if not mkey:
+                                                    continue
+                                                rc = _get_ax_rect(item)
+                                                if rc:
+                                                    new_icons.append((rc[0], rc[1], rc[2], rc[3], mkey))
+                                        finally:
+                                            cf.CFRelease(items_ref.value)
+                                finally:
+                                    cf.CFRelease(ch_ref.value)
                         finally:
-                            cf.CFRelease(items_ref.value)
-                finally:
-                    cf.CFRelease(ch_ref.value)
+                            cf.CFRelease(dock_ax)
+
+                # 2B. Quét thanh Dock dọc bên phải (SmartRightDock / AlwaysDock / Docky)
+                if custom_dock_pid > 0:
+                    cd_ax = ax.AXUIElementCreateApplication(custom_dock_pid)
+                    if cd_ax:
+                        try:
+                            def _walk_custom_dock(el_ref: Any, depth: int = 0) -> None:
+                                if not el_ref or depth > 5:
+                                    return
+                                if depth > 0:
+                                    mkey = _match_vdisp_label(
+                                        _get_ax_str(el_ref, s_title),
+                                        _get_ax_str(el_ref, s_desc),
+                                        _get_ax_str(el_ref, s_help),
+                                        _get_ax_str(el_ref, s_ident),
+                                    )
+                                    if mkey:
+                                        rc = _get_ax_rect(el_ref)
+                                        if rc and 14.0 <= rc[2] <= 96.0 and 14.0 <= rc[3] <= 96.0:
+                                            new_icons.append((rc[0], rc[1], rc[2], rc[3], mkey))
+                                            return
+                                ch_r = ctypes.c_void_p()
+                                if ax.AXUIElementCopyAttributeValue(el_ref, s_ch, ctypes.byref(ch_r)) == 0 and ch_r.value:
+                                    try:
+                                        cnt_c = cf.CFArrayGetCount(ch_r.value)
+                                        for k in range(min(40, cnt_c)):
+                                            _walk_custom_dock(cf.CFArrayGetValueAtIndex(ch_r.value, k), depth + 1)
+                                    finally:
+                                        cf.CFRelease(ch_r.value)
+
+                            wr = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(cd_ax, s_wins, ctypes.byref(wr)) == 0 and wr.value:
+                                try:
+                                    for wi in range(min(4, cf.CFArrayGetCount(wr.value))):
+                                        _walk_custom_dock(cf.CFArrayGetValueAtIndex(wr.value, wi), 0)
+                                finally:
+                                    cf.CFRelease(wr.value)
+                        finally:
+                            cf.CFRelease(cd_ax)
             finally:
-                if dock_ax:
-                    cf.CFRelease(dock_ax)
-                for s_ref in (s_ch, s_role, s_sub, s_title, s_pos, s_size):
+                for s_ref in (s_wins, s_ch, s_role, s_sub, s_title, s_desc, s_help, s_ident, s_pos, s_size):
                     if s_ref:
                         cf.CFRelease(s_ref)
             self._dock_icons = new_icons
@@ -1420,6 +1609,7 @@ class MacVirtualDisplayManager:
         self._dock_icons = []
         self._vdisp_only_apps = {}
         self._min_vdisp_pids.clear()
+        self._vdisp_seen_pids.clear()
         self._vdisp_bounds_cache = None
         self._vdisp_has_fullscreen = False
         loop_ref = self._tap_loop_ref
