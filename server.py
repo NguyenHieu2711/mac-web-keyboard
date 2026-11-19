@@ -5835,9 +5835,8 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
             ex_txt = (rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")
             m_host = re.search(r"full address:s:([^\r\n]+)", ex_txt, re.IGNORECASE)
             host_val = m_host.group(1).strip() if m_host else "192.168.52.230"
-            m_user = re.search(r"username:s:([^\r\n]+)", ex_txt, re.IGNORECASE)
-            user_val = m_user.group(1).strip() if m_user else ""
 
+            # TUYỆT ĐỐI KHÔNG truyền --username vào bookmark write vì MRD sẽ tạo ZCREDENTIALENTITY mới làm đứt liên kết mật khẩu Keychain cũ!
             preserve_flags: List[str] = [
                 "--useallmonitors", flag,
                 "--fullscreen", flag,
@@ -5846,8 +5845,6 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
                 "--scaling", "false",
                 "--colordepth", "32",
             ]
-            if user_val:
-                preserve_flags += ["--username", user_val]
             if re.search(r"audiocapturemode:i:1", ex_txt, re.IGNORECASE):
                 preserve_flags += ["--redirectmicrophones", "true"]
             if re.search(r"camerastoredirect:s:[^\r\n]+", ex_txt, re.IGNORECASE):
@@ -5871,6 +5868,33 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
                 rc_w = subprocess.run(w_args2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3.0)
                 w_msg = ((rc_w.stdout or "") + " " + (rc_w.stderr or "")).strip()
             last_status = f"rc={rc_w.returncode}:retina=1,dyn=1,mm={flag}:{w_msg[:40]}"
+
+        # Khôi phục liên kết ZCREDENTIAL gốc có lưu mật khẩu Keychain nếu từng bị sinh bản ghi phụ
+        try:
+            import sqlite3
+            db_p = Path.home() / "Library/Containers/com.microsoft.rdc.macos/Data/Library/Application Support/com.microsoft.rdc.macos/com.microsoft.rdc.application-data.sqlite"
+            if db_p.exists() and not _find_live_mrd_pids():
+                conn = sqlite3.connect(str(db_p), timeout=2.0)
+                try:
+                    cur = conn.cursor()
+                    b_cols = [r[1] for r in cur.execute("PRAGMA table_info(ZBOOKMARKENTITY)").fetchall()]
+                    cred_col = next((c for c in b_cols if "CREDENTIAL" in c.upper() and not c.upper().startswith("Z_")), "")
+                    c_tbls = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%CREDENTIAL%'").fetchall()]
+                    if cred_col and c_tbls:
+                        ct = c_tbls[0]
+                        c_rows = cur.execute(f"SELECT Z_PK FROM {ct} ORDER BY Z_PK ASC").fetchall()
+                        if len(c_rows) >= 2:
+                            orig_pk = int(c_rows[0][0])
+                            cur.execute(f"UPDATE ZBOOKMARKENTITY SET {cred_col} = ? WHERE {cred_col} != ?", (orig_pk, orig_pk))
+                            conn.commit()
+                            _RDP_CLOSER_DIAG["cred_repair"] = f"relinked->{orig_pk}(total={len(c_rows)})"
+                        else:
+                            _RDP_CLOSER_DIAG["cred_repair"] = f"ok(total={len(c_rows)},col={cred_col})"
+                finally:
+                    conn.close()
+        except Exception as ce:
+            _RDP_CLOSER_DIAG["cred_repair"] = f"err:{str(ce)[:60]}"
+
         _RDP_CLOSER_DIAG["multimon_bookmark"] = bool(enable_multimon)
         _RDP_CLOSER_DIAG["bmk_write_status"] = last_status
     except Exception as exc:
@@ -6285,7 +6309,7 @@ def _quit_mrd_cleanly() -> None:
         rem = _find_live_mrd_pids()
         if not rem:
             return
-        if step_q == 9:
+        if step_q == 5:
             for mp in rem:
                 try:
                     os.kill(mp, signal.SIGTERM)
