@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -22,6 +23,7 @@ namespace MacWebKeyboard
         private const int SW_RESTORE = 9;
         private const int SW_SHOWMAXIMIZED = 3;
         private const int SW_SHOWMINIMIZED = 2;
+        private const int WPF_RESTORETOMAXIMIZED = 2;
 
         private const uint SWP_NOZORDER = 0x0004;
         private const uint SWP_NOACTIVATE = 0x0010;
@@ -171,6 +173,7 @@ namespace MacWebKeyboard
         private static DateTime _dropQuarantineSince = DateTime.MinValue;
         private static int _dropQuarantineTargetSec = -1;
         private static bool _restorePending = false;
+        private static bool _left2MonMode = false;
         private static int _restoreGen = 0;
         private static string _lastRestoreSummary = "";
         private static string _lastDiag = "";
@@ -456,21 +459,28 @@ namespace MacWebKeyboard
             if (curMin)
             {
                 wp.rcNormalPosition = new RECT { Left = nx, Top = ny, Right = nx + nw, Bottom = ny + nh };
+                if (slot.IsMaximized) wp.flags |= WPF_RESTORETOMAXIMIZED;
                 SetWindowPlacement(hWnd, ref wp);
                 return true;
             }
 
-            if (slot.IsMaximized || curMax)
+            if (curMax || slot.IsMaximized)
             {
-                ShowWindow(hWnd, SW_RESTORE);
-                Thread.Sleep(35);
-                int rx = wa.Left + Math.Max(0, (wa.Width - nw) / 2);
-                int ry = wa.Top + Math.Max(0, (wa.Height - nh) / 2);
+                if (curMax)
+                {
+                    ShowWindow(hWnd, SW_RESTORE);
+                    Thread.Sleep(35);
+                }
+                int rx = slot.IsMaximized ? (wa.Left + Math.Max(0, (wa.Width - nw) / 2)) : nx;
+                int ry = slot.IsMaximized ? (wa.Top + Math.Max(0, (wa.Height - nh) / 2)) : ny;
                 SetWindowPos(hWnd, IntPtr.Zero, rx, ry, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
                 Thread.Sleep(40);
                 SetWindowPos(hWnd, IntPtr.Zero, rx, ry, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
-                Thread.Sleep(35);
-                ShowWindow(hWnd, SW_SHOWMAXIMIZED);
+                if (slot.IsMaximized)
+                {
+                    Thread.Sleep(35);
+                    ShowWindow(hWnd, SW_SHOWMAXIMIZED);
+                }
                 return true;
             }
 
@@ -571,6 +581,7 @@ namespace MacWebKeyboard
                             _dropQuarantineSince = DateTime.MinValue;
                             _dropQuarantineTargetSec = -1;
                             _restorePending = false;
+                            _left2MonMode = false;
                             _lastRestoreSummary = string.Format("restored={0} at {1:HH:mm:ss} sig={2}",
                                 totalMoved, DateTime.Now, newSig);
                             AddEventLocked("RESTORE_DONE moved=" + totalMoved);
@@ -710,6 +721,89 @@ namespace MacWebKeyboard
             th.Start();
         }
 
+        private static string GetSavedStatePath()
+        {
+            return Path.Combine(Path.GetTempPath(), "mwk_layout_guard_state.txt");
+        }
+
+        private static void SaveLayoutStateLocked()
+        {
+            try
+            {
+                if (_saved2MonLayout == null || CountSecondary(_saved2MonLayout) <= 0) return;
+                var sb = new StringBuilder();
+                sb.AppendLine(_lastStable2MonSig ?? "");
+                foreach (var kv in _saved2MonLayout)
+                {
+                    WindowSlot s = kv.Value;
+                    string safeProc = (s.ProcName ?? "").Replace("|", " ").Replace("\r", "").Replace("\n", "");
+                    string safeTitle = (s.Title ?? "").Replace("|", " ").Replace("\r", "").Replace("\n", "");
+                    sb.AppendFormat(CultureInfo.InvariantCulture,
+                        "{0}|{1}|{2}|{3}|{4:F4}|{5:F4}|{6:F4}|{7:F4}|{8}\n",
+                        s.Hwnd,
+                        safeProc,
+                        s.IsSecondary ? 1 : 0,
+                        s.IsMaximized ? 1 : 0,
+                        s.RelX, s.RelY, s.RelW, s.RelH,
+                        safeTitle);
+                }
+                File.WriteAllText(GetSavedStatePath(), sb.ToString(), Encoding.UTF8);
+            }
+            catch
+            {
+            }
+        }
+
+        private static bool TryLoadLayoutStateLocked()
+        {
+            try
+            {
+                string path = GetSavedStatePath();
+                if (!File.Exists(path)) return false;
+                if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(path)).TotalHours > 48.0) return false;
+                string[] lines = File.ReadAllLines(path, Encoding.UTF8);
+                if (lines.Length < 2) return false;
+                string sigLine = (lines[0] ?? "").Trim();
+                var loaded = new Dictionary<long, WindowSlot>();
+                for (int i = 1; i < lines.Length; i++)
+                {
+                    string ln = lines[i];
+                    if (string.IsNullOrWhiteSpace(ln)) continue;
+                    string[] parts = ln.Split(new char[] { '|' }, 9);
+                    if (parts.Length < 8) continue;
+                    long hwnd;
+                    double rx, ry, rw, rh;
+                    if (!long.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out hwnd)) continue;
+                    if (!double.TryParse(parts[4], NumberStyles.Float, CultureInfo.InvariantCulture, out rx)) continue;
+                    if (!double.TryParse(parts[5], NumberStyles.Float, CultureInfo.InvariantCulture, out ry)) continue;
+                    if (!double.TryParse(parts[6], NumberStyles.Float, CultureInfo.InvariantCulture, out rw)) continue;
+                    if (!double.TryParse(parts[7], NumberStyles.Float, CultureInfo.InvariantCulture, out rh)) continue;
+                    loaded[hwnd] = new WindowSlot
+                    {
+                        Hwnd = hwnd,
+                        ProcName = parts[1],
+                        IsSecondary = parts[2] == "1",
+                        IsMaximized = parts[3] == "1",
+                        IsMinimized = false,
+                        RelX = Clamp(rx, 0.0, 0.85),
+                        RelY = Clamp(ry, 0.0, 0.85),
+                        RelW = Clamp(rw, 0.25, 1.0),
+                        RelH = Clamp(rh, 0.25, 1.0),
+                        Title = parts.Length >= 9 ? parts[8] : "",
+                    };
+                }
+                if (CountSecondary(loaded) <= 0) return false;
+                _saved2MonLayout = loaded;
+                if (!string.IsNullOrEmpty(sigLine)) _lastStable2MonSig = sigLine;
+                AddEventLocked("LOAD_SAVED sec=" + CountSecondary(loaded));
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private static void CheckTopologyAndSnapshot(bool forceCheck, bool fromSessionEvent)
         {
             Screen pri, sec;
@@ -746,15 +840,23 @@ namespace MacWebKeyboard
                     if (all.Length >= 2 && pri != null && sec != null)
                     {
                         int savedSec = CountSecondary(_saved2MonLayout);
-                        if (!string.IsNullOrEmpty(_lastStable2MonSig) &&
-                            (fromSessionEvent || !string.Equals(sig, _lastStable2MonSig, StringComparison.Ordinal)) &&
-                            savedSec > 0)
+                        // Khôi phục bố cục 2 màn khi:
+                        // 1) Vừa quay lại từ chế độ 1 màn / cửa sổ thu nhỏ trên Mac (_left2MonMode == true) - KỂ CẢ khi sig PC 2 màn giống hệt _lastStable2MonSig!
+                        // 2) Sự kiện reconnect RDP/Console (fromSessionEvent)
+                        // 3) Chuyển giữa 2 cặp màn hình khác nhau (VD: PC 2 màn <-> MacBook+Phone 2 màn)
+                        bool shouldRestore = savedSec > 0 && (
+                            _left2MonMode ||
+                            fromSessionEvent ||
+                            (!string.IsNullOrEmpty(_lastStable2MonSig) && !string.Equals(sig, _lastStable2MonSig, StringComparison.Ordinal))
+                        );
+
+                        if (shouldRestore)
                         {
                             _restorePending = true;
                             _restoreGen++;
                             restoreGenLocal = _restoreGen;
                             needRestore = true;
-                            AddEventLocked("SCHEDULE_RESTORE sec=" + savedSec);
+                            AddEventLocked("SCHEDULE_RESTORE sec=" + savedSec + (_left2MonMode ? " from1m" : ""));
                         }
                         else if (string.IsNullOrEmpty(_lastStable2MonSig))
                         {
@@ -765,13 +867,41 @@ namespace MacWebKeyboard
                                 _saved2MonLayout = initCur;
                                 int initSec = CountSecondary(initCur);
                                 _history.Add(new TimedSnapshot { CapturedUtc = now, Sig = sig, SecCount = initSec, Layout = initCur });
+                                if (initSec > 0) SaveLayoutStateLocked();
+                            }
+                        }
+                        else if (savedSec > 0)
+                        {
+                            // Khởi động lại guard ngay lúc vừa trở về 2 màn (toàn bộ app vẫn đang bị dồn về màn 1)
+                            var curCheck = CaptureCurrentLayout(pri, sec);
+                            if (CountSecondary(curCheck) == 0)
+                            {
+                                bool anySavedSecAlive = false;
+                                foreach (var kv in _saved2MonLayout)
+                                {
+                                    if (kv.Value.IsSecondary && IsWindow(new IntPtr(kv.Key)))
+                                    {
+                                        anySavedSecAlive = true;
+                                        break;
+                                    }
+                                }
+                                if (anySavedSecAlive)
+                                {
+                                    _restorePending = true;
+                                    _restoreGen++;
+                                    restoreGenLocal = _restoreGen;
+                                    needRestore = true;
+                                    AddEventLocked("SCHEDULE_RESTORE_BOOT sec=" + savedSec);
+                                }
                             }
                         }
                     }
                     else
                     {
-                        // Chuyển về 1 màn (chỉ dùng MacBook không có màn phụ) -> ĐÓNG BĂNG _saved2MonLayout
-                        // đồng thời kéo toàn bộ cửa sổ bị lạc ngoài khung (như Obsidian ở màn #2 cũ) vào gọn màn chính!
+                        // Chuyển về 1 màn (chế độ cửa sổ thường trên Mac hoặc thu nhỏ Remote) ->
+                        // ĐÁNH DẤU _left2MonMode = true & ĐÓNG BĂNG _saved2MonLayout (tuyệt đối không ghi đè!)
+                        // để khi về lại PC 2 màn hoặc Full-Screen 2 màn sẽ tự động tách lại y hệt layout gốc!
+                        _left2MonMode = true;
                         _restorePending = false;
                         _restoreGen++;
                         restoreGenLocal = _restoreGen;
@@ -783,6 +913,7 @@ namespace MacWebKeyboard
                 }
                 else if (all.Length == 1 && pri != null)
                 {
+                    _left2MonMode = true;
                     // Định kỳ kéo cửa sổ vừa được bấm mở từ taskbar nếu vẫn còn lạc tọa độ ngoài màn #1 (giữ nguyên _saved2MonLayout!)
                     if ((now - _lastSingleRescueAt).TotalSeconds >= 1.5)
                     {
@@ -833,6 +964,7 @@ namespace MacWebKeyboard
                                     _lastStable2MonSig = sig;
                                     _dropQuarantineSince = DateTime.MinValue;
                                     _dropQuarantineTargetSec = -1;
+                                    if (curSec > 0) SaveLayoutStateLocked();
                                 }
                             }
                             else
@@ -841,6 +973,7 @@ namespace MacWebKeyboard
                                 _dropQuarantineTargetSec = -1;
                                 _saved2MonLayout = cur;
                                 _lastStable2MonSig = sig;
+                                if (curSec > 0) SaveLayoutStateLocked();
                             }
                         }
                     }
@@ -896,6 +1029,7 @@ namespace MacWebKeyboard
                     sb.AppendFormat("  \"current_sig\": \"{0}\",\n", EscapeJson(_lastSeenSig));
                     sb.AppendFormat("  \"stable_2mon_sig\": \"{0}\",\n", EscapeJson(_lastStable2MonSig));
                     sb.AppendFormat("  \"restore_pending\": {0},\n", _restorePending ? "true" : "false");
+                    sb.AppendFormat("  \"left_2mon_mode\": {0},\n", _left2MonMode ? "true" : "false");
                     sb.AppendFormat("  \"last_restore\": \"{0}\",\n", EscapeJson(_lastRestoreSummary));
                     sb.AppendFormat("  \"diag\": \"{0}\",\n", EscapeJson(_lastDiag));
                     sb.AppendFormat("  \"primary_count\": {0},\n", priCount);
@@ -950,6 +1084,11 @@ namespace MacWebKeyboard
                 catch
                 {
                     try { SetProcessDPIAware(); } catch { }
+                }
+
+                lock (StateLock)
+                {
+                    TryLoadLayoutStateLocked();
                 }
 
                 CheckTopologyAndSnapshot(true, false);
