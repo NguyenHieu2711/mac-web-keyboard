@@ -1089,6 +1089,10 @@ class MacVirtualDisplayManager:
 
             ax.AXUIElementCreateApplication.argtypes = [ctypes.c_int32]
             ax.AXUIElementCreateApplication.restype = ctypes.c_void_p
+            ax.AXUIElementCreateSystemWide.argtypes = []
+            ax.AXUIElementCreateSystemWide.restype = ctypes.c_void_p
+            ax.AXUIElementGetPid.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32)]
+            ax.AXUIElementGetPid.restype = ctypes.c_int32
             ax.AXUIElementCopyAttributeValue.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_void_p,

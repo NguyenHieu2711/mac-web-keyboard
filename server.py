@@ -4534,6 +4534,7 @@ async def mac_virtual_display_diag() -> dict:
             ("spans_displays", ["defaults", "read", "com.apple.spaces", "spans-displays"]),
             ("dock_orientation", ["defaults", "read", "com.apple.dock", "orientation"]),
             ("dock_autohide", ["defaults", "read", "com.apple.dock", "autohide"]),
+            ("mac_zoom", ["defaults", "read", "com.apple.universalaccess", "closeViewZoomedIn"]),
             ("rdp_app_ver", ["defaults", "read", "/Applications/Microsoft Remote Desktop.app/Contents/Info.plist", "CFBundleShortVersionString"]),
             ("win_app_ver", ["defaults", "read", "/Applications/Windows App.app/Contents/Info.plist", "CFBundleShortVersionString"]),
             ("rdp_prefs", ["defaults", "read", "com.microsoft.rdc.macos"]),
@@ -5748,27 +5749,90 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                 if q is None or mac_vdisp is None or not mac_vdisp._init_ax_libs():
                     continue
 
+                # Lấy rdp_pid trực tiếp từ WindowServer (CGWindowListOptionAll) & front_pid từ AXFocusedApplication
+                # (TUYỆT ĐỐI không dựa vào NSWorkspace.runningApplications() vì cache bị cũ trong tiến trình không chạy NSRunLoop!)
+                ax = mac_vdisp._ax_lib
+                cf = mac_vdisp._cf_lib
+                kCFStringEncodingUTF8 = 0x08000100
+
+                def _cfstr(s: str) -> ctypes.c_void_p:
+                    return cf.CFStringCreateWithCString(None, s.encode("utf-8"), kCFStringEncodingUTF8)
+
+                front_pid = 0
+                sys_ax = ax.AXUIElementCreateSystemWide()
+                if sys_ax:
+                    s_foc = _cfstr("AXFocusedApplication")
+                    try:
+                        foc_ref = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(sys_ax, s_foc, ctypes.byref(foc_ref)) == 0 and foc_ref.value:
+                            try:
+                                p_val = ctypes.c_int32(0)
+                                if ax.AXUIElementGetPid(foc_ref.value, ctypes.byref(p_val)) == 0:
+                                    front_pid = int(p_val.value)
+                            finally:
+                                cf.CFRelease(foc_ref.value)
+                    finally:
+                        cf.CFRelease(sys_ax)
+                        if s_foc:
+                            cf.CFRelease(s_foc)
+
+                # Bước 1: Dùng CGWindowListOptionAll (thấy xuyên TẤT CẢ Space + luôn live PID mới nhất!)
+                main_b = q.CGDisplayBounds(q.CGMainDisplayID())
+                main_x = float(main_b.origin.x)
+                main_w = float(main_b.size.width)
+
                 rdp_pid = 0
                 rdp_app = None
-                front_pid = 0
+                session_titles: List[str] = []
+                session_titles_lower: set = set()
+                on_screen_session_main = False
+                all_has_launcher = False
+                all_has_unnamed_big = False
+                all_has_dialog = False
                 with objc.autorelease_pool():
-                    ws_shared = AppKit.NSWorkspace.sharedWorkspace()
-                    fapp = ws_shared.frontmostApplication()
-                    front_pid = int(fapp.processIdentifier()) if fapp is not None else 0
-                    apps = ws_shared.runningApplications() or []
-                    for rapp in apps:
-                        try:
-                            bid = str(rapp.bundleIdentifier() or "").strip().lower()
-                            lname = str(rapp.localizedName() or "").strip().lower()
-                            if bid in ("com.microsoft.rdc.macos", "com.microsoft.rdc.osx.beta") or lname in (
-                                "microsoft remote desktop",
-                                "windows app",
-                            ):
-                                rdp_pid = int(rapp.processIdentifier())
-                                rdp_app = rapp
-                                break
-                        except Exception:
+                    wlist = q.CGWindowListCopyWindowInfo(
+                        q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements,
+                        q.kCGNullWindowID,
+                    ) or []
+                    for w in wlist:
+                        owner_l = str(w.get("kCGWindowOwnerName", "") or "").strip().lower()
+                        if "microsoft remote desktop" not in owner_l and "windows app" not in owner_l and "com.microsoft.rdc" not in owner_l:
                             continue
+                        pid_w = int(w.get("kCGWindowOwnerPID", 0) or 0)
+                        if pid_w <= 0:
+                            continue
+                        if rdp_pid <= 0:
+                            rdp_pid = pid_w
+                        if int(w.get("kCGWindowLayer", -1)) != 0:
+                            continue
+                        wb = w.get("kCGWindowBounds") or {}
+                        wx = float(wb.get("X", 0))
+                        ww = float(wb.get("Width", 0))
+                        wh = float(wb.get("Height", 0))
+                        if ww < 120.0 or wh < 80.0:
+                            continue
+                        wname_raw = str(w.get("kCGWindowName", "") or "").strip()
+                        wname_l = wname_raw.lower()
+                        is_onscreen = bool(w.get("kCGWindowIsOnscreen", False))
+                        in_main = (main_x <= (wx + ww * 0.5) < (main_x + main_w))
+                        if wname_l and any(k in wname_l for k in dialog_keywords):
+                            all_has_dialog = True
+                        elif wname_l in launcher_titles:
+                            all_has_launcher = True
+                        elif wname_raw and ww >= 500.0 and wh >= 300.0:
+                            rdp_pid = pid_w
+                            if wname_l not in session_titles_lower:
+                                session_titles_lower.add(wname_l)
+                                session_titles.append(wname_raw)
+                            if is_onscreen and in_main:
+                                on_screen_session_main = True
+                        elif not wname_raw and ww >= 600.0 and wh >= 380.0:
+                            all_has_unnamed_big = True
+                    if rdp_pid > 0:
+                        try:
+                            rdp_app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
+                        except Exception:
+                            rdp_app = None
 
                 now_m = time.monotonic()
                 just_activated_rdp = (rdp_pid > 0 and front_pid == rdp_pid and prev_front_pid != rdp_pid)
@@ -5787,50 +5851,8 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                     _RDP_CLOSER_DIAG["launcher_seen"] = False
                     continue
 
-                # Bước 1: Dùng CGWindowListOptionAll (thấy xuyên TẤT CẢ Space!) + tọa độ màn chính MacBook
-                main_b = q.CGDisplayBounds(q.CGMainDisplayID())
-                main_x = float(main_b.origin.x)
-                main_w = float(main_b.size.width)
-
-                session_titles: List[str] = []
-                session_titles_lower: set = set()
-                on_screen_session_main = False
-                all_has_launcher = False
-                all_has_unnamed_big = False
-                all_has_dialog = False
-                with objc.autorelease_pool():
-                    wlist = q.CGWindowListCopyWindowInfo(
-                        q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements,
-                        q.kCGNullWindowID,
-                    ) or []
-                    for w in wlist:
-                        if int(w.get("kCGWindowOwnerPID", 0) or 0) != rdp_pid:
-                            continue
-                        if int(w.get("kCGWindowLayer", -1)) != 0:
-                            continue
-                        wb = w.get("kCGWindowBounds") or {}
-                        wx = float(wb.get("X", 0))
-                        ww = float(wb.get("Width", 0))
-                        wh = float(wb.get("Height", 0))
-                        if ww < 120.0 or wh < 80.0:
-                            continue
-                        wname_raw = str(w.get("kCGWindowName", "") or "").strip()
-                        wname_l = wname_raw.lower()
-                        is_onscreen = bool(w.get("kCGWindowIsOnscreen", False))
-                        in_main = (main_x <= (wx + ww * 0.5) < (main_x + main_w))
-                        if wname_l and any(k in wname_l for k in dialog_keywords):
-                            all_has_dialog = True
-                        elif wname_l in launcher_titles:
-                            all_has_launcher = True
-                        elif wname_raw and ww >= 500.0 and wh >= 300.0:
-                            if wname_l not in session_titles_lower:
-                                session_titles_lower.add(wname_l)
-                                session_titles.append(wname_raw)
-                            if is_onscreen and in_main:
-                                on_screen_session_main = True
-                        elif not wname_raw and ww >= 600.0 and wh >= 380.0:
-                            all_has_unnamed_big = True
-
+                _RDP_CLOSER_DIAG["rdp_pid"] = rdp_pid
+                _RDP_CLOSER_DIAG["front_pid"] = front_pid
                 _RDP_CLOSER_DIAG["sessions"] = list(session_titles)
                 _RDP_CLOSER_DIAG["on_screen_main"] = bool(on_screen_session_main)
                 _RDP_CLOSER_DIAG["launcher_seen"] = bool(all_has_launcher or all_has_unnamed_big)
@@ -5868,12 +5890,6 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                     continue
 
                 # Bước 2: Dùng AXWindows đóng Connection Center thừa + AXMenuBar -> Window -> <session> để trượt thẳng vào PC Hieu!
-                ax = mac_vdisp._ax_lib
-                cf = mac_vdisp._cf_lib
-                kCFStringEncodingUTF8 = 0x08000100
-
-                def _cfstr(s: str) -> ctypes.c_void_p:
-                    return cf.CFStringCreateWithCString(None, s.encode("utf-8"), kCFStringEncodingUTF8)
 
                 def _get_str(el_ref: Any, attr_ref: Any) -> str:
                     r = ctypes.c_void_p()
@@ -5936,7 +5952,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                 if not b_el:
                                     continue
                                 bt = _get_str(b_el, s_title).strip().lower()
-                                if bt not in ("window", "view", "cửa sổ", "xem"):
+                                if bt not in ("window", "view", "connection", "connections", "cửa sổ", "xem"):
                                     continue
                                 sub_arr = ctypes.c_void_p()
                                 if ax.AXUIElementCopyAttributeValue(b_el, s_children, ctypes.byref(sub_arr)) != 0 or not sub_arr.value:
