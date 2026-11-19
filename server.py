@@ -5791,7 +5791,7 @@ def _find_live_mrd_pids() -> List[int]:
 
 
 def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bool:
-    """Kiểm tra trực tiếp qua bookmark export xem --retina (forcehidpioptimizations) hoặc --dynamicdisplay (dynamic resolution) có đang bị tắt (=0) không."""
+    """Kiểm tra trực tiếp qua bookmark export xem --retina (forcehidpioptimizations=1), --dynamicdisplay (dynamic resolution=1), hoặc --scaling (smart sizing=0) đã chuẩn chưa."""
     if not IS_MACOS or not bookmarks:
         return False
     mrd_bin, _ = _get_mrd_cli_info()
@@ -5808,7 +5808,8 @@ def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bo
             return False
         has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
         has_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
-        return (not has_retina) or (not has_dyn)
+        has_smart_lock = bool(re.search(r"smart sizing:i:1", ex_txt, re.IGNORECASE))
+        return (not has_retina) or (not has_dyn) or has_smart_lock
     except Exception:
         return False
 
@@ -5843,7 +5844,7 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
                 "--fullscreen", flag,
                 "--retina", "true",
                 "--dynamicdisplay", "true",
-                "--scaling", "true",
+                "--scaling", "false",
                 "--colordepth", "32",
             ]
             if user_val:
@@ -6354,8 +6355,10 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
     else:
         _LAST_DOWNGRADED_1MON_PID = 0
 
-    time.sleep(0.35)
-    _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
+    for _ in range(5):
+        time.sleep(0.32)
+        if _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False):
+            break
 
     # Khi về 1 màn cửa sổ thường: bung khít 1512x944 ngay khi cửa sổ mở và lặp lại sau khi kênh Dynamic Display bắt tay xong!
     if not enable_multimon:
