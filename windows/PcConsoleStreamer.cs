@@ -18,6 +18,8 @@ namespace MacWebKeyboard
     internal static class PcConsoleStreamer
     {
         private const int CONSOLE_LISTEN_PORT = 5052;
+        private const int CHILD_LISTEN_PORT = 5053;
+        private static bool _isChildSession = false;
         private const int INPUT_MOUSE = 0;
         private const int INPUT_KEYBOARD = 1;
 
@@ -30,40 +32,11 @@ namespace MacWebKeyboard
         private const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
         private const uint MOUSEEVENTF_WHEEL = 0x0800;
         private const uint MOUSEEVENTF_HWHEEL = 0x1000;
-        private const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
         private const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
 
         private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
         private const uint KEYEVENTF_KEYUP = 0x0002;
         private const uint KEYEVENTF_UNICODE = 0x0004;
-
-        private const uint PW_RENDERFULLCONTENT = 0x00000002;
-        private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
-        private const int DWMWA_CLOAKED = 14;
-        private const int GWL_EXSTYLE = -20;
-        private const int WS_EX_TOOLWINDOW = 0x00000080;
-        private const uint GW_OWNER = 4;
-        private const int SW_SHOWNOACTIVATE = 4;
-        private const int SW_RESTORE = 9;
-        private const uint SWP_NOZORDER = 0x0004;
-        private const uint SWP_NOACTIVATE = 0x0010;
-
-        private static readonly object _pinLock = new object();
-        private static IntPtr _pinnedHwnd = IntPtr.Zero;
-        private static volatile int _pinVersion = 0;
-
-        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct RECT
-        {
-            public int Left;
-            public int Top;
-            public int Right;
-            public int Bottom;
-            public int Width { get { return Right - Left; } }
-            public int Height { get { return Bottom - Top; } }
-        }
 
         [DllImport("shcore.dll")]
         private static extern int SetProcessDpiAwareness(int value);
@@ -73,6 +46,12 @@ namespace MacWebKeyboard
 
         [DllImport("user32.dll")]
         private static extern int GetSystemMetrics(int nIndex);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint WTSGetActiveConsoleSessionId();
+
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        private static extern bool WTSGetChildSessionId(out uint pSessionId);
 
         [DllImport("wtsapi32.dll", SetLastError = true)]
         private static extern bool WTSQuerySessionInformationW(
@@ -86,69 +65,6 @@ namespace MacWebKeyboard
 
         [DllImport("user32.dll")]
         private static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
-
-        [DllImport("user32.dll")]
-        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsWindow(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsWindowVisible(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsIconic(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsZoomed(IntPtr hWnd);
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern int GetWindowTextLengthW(IntPtr hWnd);
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
-
-        [DllImport("user32.dll")]
-        private static extern int GetWindowLongW(IntPtr hWnd, int nIndex);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
-
-        [DllImport("user32.dll")]
-        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetForegroundWindow();
-
-        [DllImport("user32.dll")]
-        private static extern bool SetForegroundWindow(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-        [DllImport("user32.dll")]
-        private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-
-        [DllImport("user32.dll")]
-        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-
-        [DllImport("user32.dll")]
-        private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
-
-        [DllImport("user32.dll")]
-        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
-
-        [DllImport("kernel32.dll")]
-        private static extern uint GetCurrentThreadId();
-
-        [DllImport("dwmapi.dll")]
-        private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
-
-        [DllImport("dwmapi.dll")]
-        private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct INPUT
@@ -253,34 +169,52 @@ namespace MacWebKeyboard
                 }
             }
             _jpegParams = new EncoderParameters(1);
-            _jpegParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 74L);
+            _jpegParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 88L);
         }
 
-        private static string JsonEscape(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return "";
-            var sb = new StringBuilder(s.Length + 16);
-            foreach (char c in s)
-            {
-                if (c == '\\') sb.Append("\\\\");
-                else if (c == '"') sb.Append("\\\"");
-                else if (c == '\r' || c == '\n' || c == '\t') sb.Append(' ');
-                else if (c < 0x20) continue;
-                else sb.Append(c);
-            }
-            return sb.ToString();
-        }
-
-        private static bool IsSessionActiveAndUnlocked()
+        private static bool DetectIsChildSession()
         {
             try
             {
-                uint mySid = (uint)Process.GetCurrentProcess().SessionId;
+                int mySid = Process.GetCurrentProcess().SessionId;
+                uint childSid = 0xFFFFFFFF;
+                if (WTSGetChildSessionId(out childSid) && childSid != 0xFFFFFFFF && (int)childSid == mySid)
+                {
+                    return true;
+                }
+                // Fallback: nếu phiên hiện tại khác console session và là phiên RDP cục bộ từ ChildHost
+                uint consoleSid = WTSGetActiveConsoleSessionId();
+                if (consoleSid != 0xFFFFFFFF && mySid != (int)consoleSid)
+                {
+                    IntPtr buf;
+                    int bytes;
+                    // WTSClientName = 10 -> Child session loopback thường có client name là chính hostname
+                    if (WTSQuerySessionInformationW(IntPtr.Zero, (uint)mySid, 10, out buf, out bytes) && buf != IntPtr.Zero)
+                    {
+                        string cliName = Marshal.PtrToStringUni(buf) ?? "";
+                        WTSFreeMemory(buf);
+                        if (string.Equals(cliName.Trim(), Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool IsConsoleActiveAndUnlocked()
+        {
+            if (_isChildSession) return true;
+            try
+            {
+                uint cid = WTSGetActiveConsoleSessionId();
+                if (cid == 0xFFFFFFFF) return false;
                 IntPtr buf;
                 int bytes;
                 int connState = -1;
-                // WTSConnectState = 8 -> 0 (WTSActive) đúng cho cả PC trực tiếp lẫn khi MacBook đang RDP vào Session 1
-                if (WTSQuerySessionInformationW(IntPtr.Zero, mySid, 8, out buf, out bytes) && buf != IntPtr.Zero)
+                if (WTSQuerySessionInformationW(IntPtr.Zero, cid, 8, out buf, out bytes) && buf != IntPtr.Zero)
                 {
                     connState = Marshal.ReadInt32(buf);
                     WTSFreeMemory(buf);
@@ -288,13 +222,12 @@ namespace MacWebKeyboard
                 if (connState != 0) return false;
 
                 int unlockFlag = 1;
-                if (WTSQuerySessionInformationW(IntPtr.Zero, mySid, 25, out buf, out bytes) && buf != IntPtr.Zero)
+                if (WTSQuerySessionInformationW(IntPtr.Zero, cid, 25, out buf, out bytes) && buf != IntPtr.Zero)
                 {
                     if (bytes >= 20) unlockFlag = Marshal.ReadInt32(buf, 16);
                     WTSFreeMemory(buf);
                 }
-                // 0 = LOCKED, 1 = UNLOCKED, -1 (0xFFFFFFFF) = UNKNOWN (thường gặp trên RDP đang mở khóa)
-                return unlockFlag != 0;
+                return unlockFlag == 1;
             }
             catch
             {
@@ -332,244 +265,15 @@ namespace MacWebKeyboard
             return new Size(Math.Max(320, w), Math.Max(240, h));
         }
 
-        private static bool GetVisibleWindowRect(IntPtr hwnd, out RECT visRect)
+        private static byte[] CaptureJpegFrame(out int outW, out int outH, out ulong sig)
         {
-            if (DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out visRect, Marshal.SizeOf(typeof(RECT))) == 0 &&
-                visRect.Width > 0 && visRect.Height > 0)
-            {
-                return true;
-            }
-            return GetWindowRect(hwnd, out visRect) && visRect.Width > 0 && visRect.Height > 0;
-        }
+            outW = 0;
+            outH = 0;
+            sig = 0;
+            Size scr = GetPrimaryScreenSize();
+            int sw = scr.Width;
+            int sh = scr.Height;
 
-        private static string GetWindowTitleSafe(IntPtr hwnd)
-        {
-            if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return "";
-            int len = GetWindowTextLengthW(hwnd);
-            if (len <= 0) return "";
-            var sb = new StringBuilder(Math.Min(len + 1, 260));
-            GetWindowTextW(hwnd, sb, sb.Capacity);
-            return sb.ToString().Trim();
-        }
-
-        private static string GetFriendlyProcName(IntPtr hwnd)
-        {
-            try
-            {
-                uint pid = 0;
-                GetWindowThreadProcessId(hwnd, out pid);
-                if (pid == 0) return "";
-                using (Process p = Process.GetProcessById((int)pid))
-                {
-                    string n = (p.ProcessName ?? "").Trim();
-                    string low = n.ToLowerInvariant();
-                    if (low == "msedge") return "Edge";
-                    if (low == "chrome") return "Chrome";
-                    if (low == "firefox") return "Firefox";
-                    if (low == "code") return "VS Code";
-                    if (low == "explorer") return "Explorer";
-                    if (low == "obsidian") return "Obsidian";
-                    if (low == "antigravity") return "Antigravity";
-                    if (low == "zalo") return "Zalo";
-                    if (low == "discord") return "Discord";
-                    return n;
-                }
-            }
-            catch
-            {
-                return "";
-            }
-        }
-
-        private static bool IsCloakedWindow(IntPtr hwnd)
-        {
-            try
-            {
-                int cloaked = 0;
-                if (DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out cloaked, sizeof(int)) == 0 && cloaked != 0)
-                    return true;
-            }
-            catch { }
-            return false;
-        }
-
-        private static string EnumOpenWindowsJson()
-        {
-            IntPtr fg = GetForegroundWindow();
-            IntPtr pinned;
-            lock (_pinLock) { pinned = _pinnedHwnd; }
-            if (pinned != IntPtr.Zero && !IsWindow(pinned))
-            {
-                lock (_pinLock) { _pinnedHwnd = IntPtr.Zero; pinned = IntPtr.Zero; }
-            }
-
-            var items = new List<string>();
-            int myPid = Process.GetCurrentProcess().Id;
-
-            EnumWindows((hwnd, lParam) =>
-            {
-                try
-                {
-                    if (!IsWindowVisible(hwnd)) return true;
-                    if (IsCloakedWindow(hwnd)) return true;
-                    int exStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
-                    if ((exStyle & WS_EX_TOOLWINDOW) != 0) return true;
-                    if (GetWindow(hwnd, GW_OWNER) != IntPtr.Zero) return true;
-
-                    uint pid = 0;
-                    GetWindowThreadProcessId(hwnd, out pid);
-                    if ((int)pid == myPid) return true;
-
-                    string title = GetWindowTitleSafe(hwnd);
-                    if (string.IsNullOrEmpty(title)) return true;
-
-                    var clsSb = new StringBuilder(128);
-                    GetClassNameW(hwnd, clsSb, clsSb.Capacity);
-                    string cls = clsSb.ToString();
-                    if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" ||
-                        cls == "Shell_SecondaryTrayWnd" || cls == "Windows.UI.Core.CoreWindow")
-                        return true;
-
-                    bool minimized = IsIconic(hwnd);
-                    RECT r;
-                    GetVisibleWindowRect(hwnd, out r);
-                    if (!minimized && (r.Width < 180 || r.Height < 120)) return true;
-
-                    string proc = GetFriendlyProcName(hwnd);
-                    long hid = hwnd.ToInt64();
-                    items.Add(
-                        "{\"hwnd\":" + hid +
-                        ",\"title\":\"" + JsonEscape(title) + "\"" +
-                        ",\"proc\":\"" + JsonEscape(proc) + "\"" +
-                        ",\"w\":" + Math.Max(0, r.Width) +
-                        ",\"h\":" + Math.Max(0, r.Height) +
-                        ",\"minimized\":" + (minimized ? "true" : "false") +
-                        ",\"active\":" + (hwnd == fg ? "true" : "false") + "}"
-                    );
-                }
-                catch { }
-                return items.Count < 32;
-            }, IntPtr.Zero);
-
-            string pinnedTitle = pinned != IntPtr.Zero ? GetWindowTitleSafe(pinned) : "";
-            string pinnedProc = pinned != IntPtr.Zero ? GetFriendlyProcName(pinned) : "";
-            return "{\"ok\":true,\"pinned\":" + pinned.ToInt64() +
-                   ",\"pinned_title\":\"" + JsonEscape(pinnedTitle) + "\"" +
-                   ",\"pinned_proc\":\"" + JsonEscape(pinnedProc) + "\"" +
-                   ",\"windows\":[" + string.Join(",", items.ToArray()) + "]}\n";
-        }
-
-        private static void FitWindowToPhoneAspect(IntPtr hwnd)
-        {
-            if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return;
-            try
-            {
-                if (IsIconic(hwnd))
-                {
-                    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                    Thread.Sleep(60);
-                }
-                if (IsZoomed(hwnd))
-                {
-                    ShowWindow(hwnd, SW_RESTORE);
-                    Thread.Sleep(60);
-                }
-
-                RECT winR, visR;
-                if (!GetWindowRect(hwnd, out winR)) return;
-                if (!GetVisibleWindowRect(hwnd, out visR)) visR = winR;
-
-                int padL = Math.Max(0, visR.Left - winR.Left);
-                int padT = Math.Max(0, visR.Top - winR.Top);
-                int padR = Math.Max(0, winR.Right - visR.Right);
-                int padB = Math.Max(0, winR.Bottom - visR.Bottom);
-
-                Rectangle wa = Screen.FromHandle(hwnd).WorkingArea;
-                if (wa.Width < 320 || wa.Height < 240) wa = Screen.PrimaryScreen.WorkingArea;
-
-                const double PHONE_RATIO = 2248.0 / 1080.0;
-                int targetVisW = Math.Min(wa.Width, 2248);
-                int targetVisH = (int)Math.Round(targetVisW / PHONE_RATIO);
-                if (targetVisH > wa.Height)
-                {
-                    targetVisH = wa.Height;
-                    targetVisW = (int)Math.Round(targetVisH * PHONE_RATIO);
-                }
-                targetVisW = Math.Max(640, targetVisW & ~1);
-                targetVisH = Math.Max(308, targetVisH & ~1);
-
-                int finalW = targetVisW + padL + padR;
-                int finalH = targetVisH + padT + padB;
-                int finalX = wa.Left + Math.Max(0, (wa.Width - targetVisW) / 2) - padL;
-                int finalY = wa.Top + Math.Max(0, (wa.Height - targetVisH) / 2) - padT;
-
-                SetWindowPos(hwnd, IntPtr.Zero, finalX, finalY, finalW, finalH, SWP_NOZORDER | SWP_NOACTIVATE);
-            }
-            catch { }
-        }
-
-        private static string SetPinnedWindow(long hwndVal, bool fitPhone)
-        {
-            IntPtr next = IntPtr.Zero;
-            if (hwndVal > 0)
-            {
-                IntPtr cand = new IntPtr(hwndVal);
-                if (IsWindow(cand))
-                {
-                    next = cand;
-                    if (fitPhone) FitWindowToPhoneAspect(cand);
-                }
-            }
-            lock (_pinLock)
-            {
-                _pinnedHwnd = next;
-                _pinVersion++;
-            }
-            string title = next != IntPtr.Zero ? GetWindowTitleSafe(next) : "";
-            string proc = next != IntPtr.Zero ? GetFriendlyProcName(next) : "";
-            return "{\"type\":\"pin_state\",\"hwnd\":" + next.ToInt64() +
-                   ",\"title\":\"" + JsonEscape(title) + "\"" +
-                   ",\"proc\":\"" + JsonEscape(proc) + "\"}";
-        }
-
-        private static void BringPinnedToFrontForInput(IntPtr hwnd)
-        {
-            if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return;
-            try
-            {
-                if (IsIconic(hwnd))
-                {
-                    ShowWindow(hwnd, SW_RESTORE);
-                    Thread.Sleep(30);
-                }
-                IntPtr fg = GetForegroundWindow();
-                if (fg == hwnd) return;
-
-                uint curTid = GetCurrentThreadId();
-                uint fgPid;
-                uint fgTid = fg != IntPtr.Zero ? GetWindowThreadProcessId(fg, out fgPid) : 0;
-                bool attached = false;
-                if (fgTid != 0 && fgTid != curTid)
-                {
-                    attached = AttachThreadInput(curTid, fgTid, true);
-                }
-                try
-                {
-                    SetForegroundWindow(hwnd);
-                }
-                finally
-                {
-                    if (attached) AttachThreadInput(curTid, fgTid, false);
-                }
-                Thread.Sleep(25);
-            }
-            catch { }
-        }
-
-        private static byte[] EncodeBitmapJpeg(Bitmap rawBmp, out int outW, out int outH, out ulong sig)
-        {
-            int sw = rawBmp.Width;
-            int sh = rawBmp.Height;
             int tw = sw;
             int th = sh;
             if (sw > 2560)
@@ -578,191 +282,81 @@ namespace MacWebKeyboard
                 th = Math.Max(1, (int)Math.Round(sh * 2560.0 / sw));
             }
 
-            Bitmap targetBmp = rawBmp;
-            Bitmap resized = null;
-            try
-            {
-                if (tw != sw || th != sh || rawBmp.PixelFormat != PixelFormat.Format24bppRgb)
-                {
-                    resized = new Bitmap(tw, th, PixelFormat.Format24bppRgb);
-                    using (var gr = Graphics.FromImage(resized))
-                    {
-                        gr.InterpolationMode = InterpolationMode.HighQualityBilinear;
-                        gr.DrawImage(rawBmp, 0, 0, tw, th);
-                    }
-                    targetBmp = resized;
-                }
-
-                ulong hash = 14695981039346656037UL;
-                BitmapData bd = targetBmp.LockBits(
-                    new Rectangle(0, 0, tw, th), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-                try
-                {
-                    int stride = Math.Abs(bd.Stride);
-                    int stepY = Math.Max(1, th / 16);
-                    int stepX = Math.Max(1, tw / 16);
-                    byte[] rowBuf = new byte[stride];
-                    for (int y = stepY / 2; y < th; y += stepY)
-                    {
-                        Marshal.Copy(IntPtr.Add(bd.Scan0, y * bd.Stride), rowBuf, 0, stride);
-                        for (int x = stepX / 2; x < tw; x += stepX)
-                        {
-                            int off = x * 3;
-                            if (off + 2 < stride)
-                            {
-                                hash ^= rowBuf[off]; hash *= 1099511628211UL;
-                                hash ^= rowBuf[off + 1]; hash *= 1099511628211UL;
-                                hash ^= rowBuf[off + 2]; hash *= 1099511628211UL;
-                            }
-                        }
-                    }
-                }
-                finally
-                {
-                    targetBmp.UnlockBits(bd);
-                }
-                sig = hash;
-                outW = tw;
-                outH = th;
-
-                using (var ms = new MemoryStream(163840))
-                {
-                    if (_jpegCodec != null)
-                        targetBmp.Save(ms, _jpegCodec, _jpegParams);
-                    else
-                        targetBmp.Save(ms, ImageFormat.Jpeg);
-                    return ms.ToArray();
-                }
-            }
-            finally
-            {
-                if (resized != null) resized.Dispose();
-            }
-        }
-
-        private static byte[] CapturePinnedWindowFrame(IntPtr hwnd, out int outW, out int outH, out ulong sig)
-        {
-            outW = 0;
-            outH = 0;
-            sig = 0;
-            if (IsIconic(hwnd)) return null;
-
-            RECT winR, visR;
-            if (!GetWindowRect(hwnd, out winR) || winR.Width < 32 || winR.Height < 32) return null;
-            if (!GetVisibleWindowRect(hwnd, out visR)) visR = winR;
-
-            int cropX = Math.Max(0, Math.Min(winR.Width - 1, visR.Left - winR.Left));
-            int cropY = Math.Max(0, Math.Min(winR.Height - 1, visR.Top - winR.Top));
-            int cropW = Math.Max(1, Math.Min(winR.Width - cropX, visR.Width));
-            int cropH = Math.Max(1, Math.Min(winR.Height - cropY, visR.Height));
-
-            using (var fullBmp = new Bitmap(winR.Width, winR.Height, PixelFormat.Format32bppArgb))
-            {
-                bool ok = false;
-                using (var g = Graphics.FromImage(fullBmp))
-                {
-                    IntPtr hdc = g.GetHdc();
-                    try
-                    {
-                        ok = PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT);
-                        if (!ok) ok = PrintWindow(hwnd, hdc, 0);
-                    }
-                    finally
-                    {
-                        g.ReleaseHdc(hdc);
-                    }
-                }
-                if (!ok) return null;
-
-                using (var cropped = new Bitmap(cropW, cropH, PixelFormat.Format24bppRgb))
-                {
-                    using (var gc = Graphics.FromImage(cropped))
-                    {
-                        gc.DrawImage(fullBmp, new Rectangle(0, 0, cropW, cropH), new Rectangle(cropX, cropY, cropW, cropH), GraphicsUnit.Pixel);
-                    }
-                    return EncodeBitmapJpeg(cropped, out outW, out outH, out sig);
-                }
-            }
-        }
-
-        private static byte[] CaptureJpegFrame(out int outW, out int outH, out ulong sig, out bool pinnedClosed)
-        {
-            outW = 0;
-            outH = 0;
-            sig = 0;
-            pinnedClosed = false;
-
-            IntPtr pinned;
-            lock (_pinLock) { pinned = _pinnedHwnd; }
-            if (pinned != IntPtr.Zero)
-            {
-                if (!IsWindow(pinned))
-                {
-                    lock (_pinLock)
-                    {
-                        if (_pinnedHwnd == pinned) { _pinnedHwnd = IntPtr.Zero; _pinVersion++; }
-                    }
-                    pinnedClosed = true;
-                }
-                else
-                {
-                    return CapturePinnedWindowFrame(pinned, out outW, out outH, out sig);
-                }
-            }
-
-            Size scr = GetPrimaryScreenSize();
-            int sw = scr.Width;
-            int sh = scr.Height;
             using (var rawBmp = new Bitmap(sw, sh, PixelFormat.Format24bppRgb))
             {
                 using (var g = Graphics.FromImage(rawBmp))
                 {
                     g.CopyFromScreen(0, 0, 0, 0, new Size(sw, sh), CopyPixelOperation.SourceCopy);
                 }
-                return EncodeBitmapJpeg(rawBmp, out outW, out outH, out sig);
+
+                Bitmap targetBmp = rawBmp;
+                Bitmap resized = null;
+                try
+                {
+                    if (tw != sw || th != sh)
+                    {
+                        resized = new Bitmap(tw, th, PixelFormat.Format24bppRgb);
+                        using (var gr = Graphics.FromImage(resized))
+                        {
+                            gr.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                            gr.DrawImage(rawBmp, 0, 0, tw, th);
+                        }
+                        targetBmp = resized;
+                    }
+
+                    // Fast 64-point visual signature to skip sending identical static frames
+                    ulong hash = 14695981039346656037UL;
+                    BitmapData bd = targetBmp.LockBits(
+                        new Rectangle(0, 0, tw, th), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+                    try
+                    {
+                        int stride = Math.Abs(bd.Stride);
+                        int stepY = Math.Max(1, th / 16);
+                        int stepX = Math.Max(1, tw / 16);
+                        byte[] rowBuf = new byte[stride];
+                        for (int y = stepY / 2; y < th; y += stepY)
+                        {
+                            Marshal.Copy(IntPtr.Add(bd.Scan0, y * bd.Stride), rowBuf, 0, stride);
+                            for (int x = stepX / 2; x < tw; x += stepX)
+                            {
+                                int off = x * 3;
+                                if (off + 2 < stride)
+                                {
+                                    hash ^= rowBuf[off]; hash *= 1099511628211UL;
+                                    hash ^= rowBuf[off + 1]; hash *= 1099511628211UL;
+                                    hash ^= rowBuf[off + 2]; hash *= 1099511628211UL;
+                                }
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        targetBmp.UnlockBits(bd);
+                    }
+                    sig = hash;
+                    outW = tw;
+                    outH = th;
+
+                    using (var ms = new MemoryStream(163840))
+                    {
+                        if (_jpegCodec != null)
+                            targetBmp.Save(ms, _jpegCodec, _jpegParams);
+                        else
+                            targetBmp.Save(ms, ImageFormat.Jpeg);
+                        return ms.ToArray();
+                    }
+                }
+                finally
+                {
+                    if (resized != null) resized.Dispose();
+                }
             }
         }
 
-        private static void SendMouseEvent(double rx, double ry, uint flags, uint mouseData, bool activatePinned)
+        private static void SendMouseEvent(double rx, double ry, uint flags, uint mouseData)
         {
-            double clampedX = Math.Max(0.0, Math.Min(1.0, rx));
-            double clampedY = Math.Max(0.0, Math.Min(1.0, ry));
-
-            IntPtr pinned;
-            lock (_pinLock) { pinned = _pinnedHwnd; }
-
-            int ax;
-            int ay;
-            uint finalFlags = flags;
-
-            if (pinned != IntPtr.Zero && IsWindow(pinned))
-            {
-                if (activatePinned) BringPinnedToFrontForInput(pinned);
-                RECT visR;
-                if (GetVisibleWindowRect(pinned, out visR) && visR.Width > 0 && visR.Height > 0)
-                {
-                    double px = visR.Left + clampedX * visR.Width;
-                    double py = visR.Top + clampedY * visR.Height;
-                    int vx = GetSystemMetrics(76); // SM_XVIRTUALSCREEN
-                    int vy = GetSystemMetrics(77); // SM_YVIRTUALSCREEN
-                    int vw = Math.Max(1, GetSystemMetrics(78)); // SM_CXVIRTUALSCREEN
-                    int vh = Math.Max(1, GetSystemMetrics(79)); // SM_CYVIRTUALSCREEN
-                    ax = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, (px - vx) / vw)) * 65535.0);
-                    ay = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, (py - vy) / vh)) * 65535.0);
-                    finalFlags |= MOUSEEVENTF_VIRTUALDESK;
-                }
-                else
-                {
-                    ax = (int)Math.Round(clampedX * 65535.0);
-                    ay = (int)Math.Round(clampedY * 65535.0);
-                }
-            }
-            else
-            {
-                ax = (int)Math.Round(clampedX * 65535.0);
-                ay = (int)Math.Round(clampedY * 65535.0);
-            }
-
+            int ax = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, rx)) * 65535.0);
+            int ay = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, ry)) * 65535.0);
             var inp = new INPUT
             {
                 type = INPUT_MOUSE,
@@ -773,7 +367,7 @@ namespace MacWebKeyboard
                         dx = ax,
                         dy = ay,
                         mouseData = mouseData,
-                        dwFlags = finalFlags,
+                        dwFlags = flags,
                         time = 0,
                         dwExtraInfo = IntPtr.Zero
                     }
@@ -868,46 +462,15 @@ namespace MacWebKeyboard
             return res;
         }
 
-        private static long ExtractJsonLong(string json, string key, long defVal)
+        private static void DispatchInputJson(string json)
         {
-            Match m = Regex.Match(json, "\"" + Regex.Escape(key) + "\"\\s*:\\s*(-?[0-9]+)");
-            long v;
-            if (m.Success && long.TryParse(m.Groups[1].Value, out v)) return v;
-            return defVal;
-        }
-
-        private static bool ExtractJsonBool(string json, string key, bool defVal)
-        {
-            Match m = Regex.Match(json, "\"" + Regex.Escape(key) + "\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
-            if (!m.Success) return defVal;
-            return string.Equals(m.Groups[1].Value, "true", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static void EnsurePinnedForegroundForKey()
-        {
-            IntPtr pinned;
-            lock (_pinLock) { pinned = _pinnedHwnd; }
-            if (pinned != IntPtr.Zero && IsWindow(pinned))
-            {
-                BringPinnedToFrontForInput(pinned);
-            }
-        }
-
-        private static string DispatchInputJson(string json)
-        {
-            if (string.IsNullOrWhiteSpace(json)) return null;
+            if (string.IsNullOrWhiteSpace(json)) return;
             string mtype = ExtractJsonString(json, "type");
-            if (mtype == "pin_window")
-            {
-                long hwndVal = ExtractJsonLong(json, "hwnd", 0);
-                bool fitPhone = ExtractJsonBool(json, "fit_phone", true);
-                return SetPinnedWindow(hwndVal, fitPhone);
-            }
             if (mtype == "ptr_move")
             {
                 double rx = ExtractJsonDouble(json, "rx", 0.5);
                 double ry = ExtractJsonDouble(json, "ry", 0.5);
-                SendMouseEvent(rx, ry, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, false);
+                SendMouseEvent(rx, ry, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0);
             }
             else if (mtype == "ptr_down" || mtype == "ptr_up")
             {
@@ -919,7 +482,7 @@ namespace MacWebKeyboard
                 if (btn == 2) btnFlag = isDown ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
                 else if (btn == 1) btnFlag = isDown ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
                 else btnFlag = isDown ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
-                SendMouseEvent(rx, ry, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | btnFlag, 0, isDown);
+                SendMouseEvent(rx, ry, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | btnFlag, 0);
             }
             else if (mtype == "ptr_wheel")
             {
@@ -927,15 +490,14 @@ namespace MacWebKeyboard
                 double ry = ExtractJsonDouble(json, "ry", 0.5);
                 double dx = ExtractJsonDouble(json, "dx", 0.0);
                 double dy = ExtractJsonDouble(json, "dy", 0.0);
-                SendMouseEvent(rx, ry, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, true);
+                SendMouseEvent(rx, ry, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0);
                 int wy = (int)Math.Round(dy * 3.0);
                 int wx = (int)Math.Round(-dx * 3.0);
-                if (wy != 0) SendMouseEvent(rx, ry, MOUSEEVENTF_WHEEL, unchecked((uint)wy), false);
-                if (wx != 0) SendMouseEvent(rx, ry, MOUSEEVENTF_HWHEEL, unchecked((uint)wx), false);
+                if (wy != 0) SendMouseEvent(rx, ry, MOUSEEVENTF_WHEEL, unchecked((uint)wy));
+                if (wx != 0) SendMouseEvent(rx, ry, MOUSEEVENTF_HWHEEL, unchecked((uint)wx));
             }
             else if (mtype == "key_tap")
             {
-                EnsurePinnedForegroundForKey();
                 string key = ExtractJsonString(json, "key");
                 List<string> mods = ExtractJsonStringArray(json, "mods");
                 var modVks = new List<ushort>();
@@ -955,7 +517,6 @@ namespace MacWebKeyboard
             }
             else if (mtype == "combo")
             {
-                EnsurePinnedForegroundForKey();
                 List<string> keys = ExtractJsonStringArray(json, "keys");
                 var vks = new List<ushort>();
                 foreach (string k in keys)
@@ -968,11 +529,9 @@ namespace MacWebKeyboard
             }
             else if (mtype == "unicode_text")
             {
-                EnsurePinnedForegroundForKey();
                 string txt = ExtractJsonString(json, "text");
                 if (!string.IsNullOrEmpty(txt)) SendUnicodeString(txt);
             }
-            return null;
         }
 
         private static void WriteFramed(Stream s, byte[] payload)
@@ -988,36 +547,11 @@ namespace MacWebKeyboard
             s.Flush();
         }
 
-        private static void WriteControlJson(Stream ns, object writeLock, string json)
-        {
-            byte[] ctrl = Encoding.UTF8.GetBytes(json);
-            byte[] pkt = new byte[1 + ctrl.Length];
-            pkt[0] = 0x20;
-            Buffer.BlockCopy(ctrl, 0, pkt, 1, ctrl.Length);
-            lock (writeLock) { WriteFramed(ns, pkt); }
-        }
-
-        private static string CurrentPinStateJson()
-        {
-            IntPtr pinned;
-            lock (_pinLock) { pinned = _pinnedHwnd; }
-            if (pinned != IntPtr.Zero && !IsWindow(pinned))
-            {
-                lock (_pinLock) { _pinnedHwnd = IntPtr.Zero; pinned = IntPtr.Zero; }
-            }
-            string title = pinned != IntPtr.Zero ? GetWindowTitleSafe(pinned) : "";
-            string proc = pinned != IntPtr.Zero ? GetFriendlyProcName(pinned) : "";
-            return "{\"type\":\"pin_state\",\"hwnd\":" + pinned.ToInt64() +
-                   ",\"title\":\"" + JsonEscape(title) + "\"" +
-                   ",\"proc\":\"" + JsonEscape(proc) + "\"}";
-        }
-
         private static void HandleClient(TcpClient client)
         {
             try
             {
                 client.NoDelay = true;
-                client.SendTimeout = 2000;
                 using (NetworkStream ns = client.GetStream())
                 using (var reader = new StreamReader(ns, Encoding.UTF8, false, 4096, true))
                 {
@@ -1027,30 +561,11 @@ namespace MacWebKeyboard
 
                     if (cmd == "PROBE")
                     {
-                        bool active = IsSessionActiveAndUnlocked();
+                        bool active = IsConsoleActiveAndUnlocked();
                         Size sz = GetPrimaryScreenSize();
-                        IntPtr pinned;
-                        lock (_pinLock) { pinned = _pinnedHwnd; }
-                        if (pinned != IntPtr.Zero && IsWindow(pinned))
-                        {
-                            RECT pr;
-                            if (GetVisibleWindowRect(pinned, out pr) && pr.Width > 0 && pr.Height > 0)
-                            {
-                                sz = new Size(pr.Width, pr.Height);
-                            }
-                        }
                         string reply = "{\"ok\":true,\"active\":" + (active ? "true" : "false") +
-                                       ",\"pinned\":" + (pinned != IntPtr.Zero && IsWindow(pinned) ? pinned.ToInt64() : 0) +
+                                       ",\"child\":" + (_isChildSession ? "true" : "false") +
                                        ",\"width\":" + sz.Width + ",\"height\":" + sz.Height + "}\n";
-                        byte[] rb = Encoding.UTF8.GetBytes(reply);
-                        ns.Write(rb, 0, rb.Length);
-                        ns.Flush();
-                        return;
-                    }
-
-                    if (cmd == "WINDOWS")
-                    {
-                        string reply = EnumOpenWindowsJson();
                         byte[] rb = Encoding.UTF8.GetBytes(reply);
                         ns.Write(rb, 0, rb.Length);
                         ns.Flush();
@@ -1062,8 +577,6 @@ namespace MacWebKeyboard
                     bool running = true;
                     object writeLock = new object();
 
-                    try { WriteControlJson(ns, writeLock, CurrentPinStateJson()); } catch { }
-
                     var inputThread = new Thread(() =>
                     {
                         try
@@ -1071,15 +584,7 @@ namespace MacWebKeyboard
                             string line;
                             while (running && (line = reader.ReadLine()) != null)
                             {
-                                try
-                                {
-                                    string ctrlReply = DispatchInputJson(line);
-                                    if (!string.IsNullOrEmpty(ctrlReply))
-                                    {
-                                        WriteControlJson(ns, writeLock, ctrlReply);
-                                    }
-                                }
-                                catch { }
+                                try { DispatchInputJson(line); } catch { }
                             }
                         }
                         catch { }
@@ -1089,18 +594,21 @@ namespace MacWebKeyboard
                     inputThread.Start();
 
                     ulong prevSig = 0;
-                    int lastPinVer = _pinVersion;
                     long lastSentTick = 0;
                     int lockedStreak = 0;
 
                     while (running)
                     {
-                        if (!IsSessionActiveAndUnlocked())
+                        if (!IsConsoleActiveAndUnlocked())
                         {
                             lockedStreak++;
                             if (lockedStreak >= 12)
                             {
-                                WriteControlJson(ns, writeLock, "{\"type\":\"parallel_ended\",\"reason\":\"console_locked\"}");
+                                byte[] ctrl = Encoding.UTF8.GetBytes("{\"type\":\"parallel_ended\",\"reason\":\"console_locked\"}");
+                                byte[] pkt = new byte[1 + ctrl.Length];
+                                pkt[0] = 0x20;
+                                Buffer.BlockCopy(ctrl, 0, pkt, 1, ctrl.Length);
+                                lock (writeLock) { WriteFramed(ns, pkt); }
                                 break;
                             }
                             Thread.Sleep(80);
@@ -1110,21 +618,9 @@ namespace MacWebKeyboard
 
                         try
                         {
-                            int curPinVer = _pinVersion;
-                            if (curPinVer != lastPinVer)
-                            {
-                                lastPinVer = curPinVer;
-                                prevSig = 0;
-                            }
                             int fw, fh;
                             ulong sig;
-                            bool pinnedClosed;
-                            byte[] jpeg = CaptureJpegFrame(out fw, out fh, out sig, out pinnedClosed);
-                            if (pinnedClosed)
-                            {
-                                prevSig = 0;
-                                try { WriteControlJson(ns, writeLock, "{\"type\":\"pin_state\",\"hwnd\":0,\"title\":\"\",\"proc\":\"\"}"); } catch { }
-                            }
+                            byte[] jpeg = CaptureJpegFrame(out fw, out fh, out sig);
                             long nowTick = Environment.TickCount;
                             bool changed = (sig != prevSig) || (unchecked(nowTick - lastSentTick) >= 1400);
                             if (jpeg != null && jpeg.Length > 0 && changed)
@@ -1143,10 +639,9 @@ namespace MacWebKeyboard
                         }
                         catch
                         {
-                            if (!client.Connected) break;
                             Thread.Sleep(80);
                         }
-                        Thread.Sleep(50);
+                        Thread.Sleep(38);
                     }
                 }
             }
@@ -1160,25 +655,18 @@ namespace MacWebKeyboard
         public static int Main()
         {
             InitDpiAndCodec();
-            bool desktopReady = false;
-            for (int attempt = 0; attempt < 12; attempt++)
-            {
-                if (CanCaptureInteractiveDesktop())
-                {
-                    desktopReady = true;
-                    break;
-                }
-                Thread.Sleep(500);
-            }
-            if (!desktopReady)
+            if (!CanCaptureInteractiveDesktop())
             {
                 return 2;
             }
 
+            _isChildSession = DetectIsChildSession();
+            int bindPort = _isChildSession ? CHILD_LISTEN_PORT : CONSOLE_LISTEN_PORT;
+
             TcpListener listener = null;
             try
             {
-                listener = new TcpListener(IPAddress.Loopback, CONSOLE_LISTEN_PORT);
+                listener = new TcpListener(IPAddress.Loopback, bindPort);
                 listener.Start();
             }
             catch

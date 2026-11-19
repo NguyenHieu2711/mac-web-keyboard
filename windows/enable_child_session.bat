@@ -25,9 +25,5 @@ timeout /t 5 /nobreak >nul
 echo [4/4] Kiem tra trang thai truc tiep:
 powershell.exe -NoProfile -Command "try { Invoke-RestMethod -Uri 'http://127.0.0.1:5051/rdp-mode-check' -TimeoutSec 3 | ConvertTo-Json -Compress } catch { $_.Exception.Message }"
 echo.
-echo [OK] DA BAT CHILD SESSIONS THANH CONG!
-echo [!] LUU Y QUAN TRONG (chi can lam 1 lan duy nhat):
-echo     Hay DANG XUAT (Sign out) Windows roi DANG NHAP LAI (hoac Restart PC 1 lan)
-echo     de Windows cap quyen tu dang nhap cho Desktop con doc lap (khong hoi mat khau).
-echo     Sau khi dang nhap lai, he thong se tu dong khoi chay va ket noi 2248x1080 @ 125%%!
+echo [OK] XONG! Mo lai tab Remote PC tren Dien thoai de kiem tra.
 pause

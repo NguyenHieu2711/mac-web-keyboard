@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -4529,6 +4529,178 @@ async def rdp_parallel_ws(ws: WebSocket) -> None:
             pass
 
 
+try:
+    from mac_virtual_display import MacVirtualDisplayManager
+
+    mac_vdisp = MacVirtualDisplayManager()
+except Exception:
+    mac_vdisp = None  # type: ignore
+
+
+@app.get("/mac-virtual-display/status")
+async def mac_virtual_display_status() -> dict:
+    if mac_vdisp is None:
+        return {"ok": False, "supported": False, "active": False, "error": "Module màn phụ chưa sẵn sàng."}
+    return await asyncio.to_thread(mac_vdisp.status, injector._quartz)
+
+
+@app.post("/mac-virtual-display/toggle")
+async def mac_virtual_display_toggle(req: Request) -> dict:
+    if mac_vdisp is None or not IS_MACOS:
+        return {"ok": False, "supported": False, "active": False, "error": "Chỉ hỗ trợ trên macOS."}
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    want_enable = bool(body.get("enable", not mac_vdisp.is_active()))
+    auto_reconnect = bool(body.get("auto_reconnect_rdp", True))
+    logical_w = int(body.get("logical_w", 1798) or 1798)
+    logical_h = int(body.get("logical_h", 864) or 864)
+    hidpi = bool(body.get("hidpi", True))
+
+    def _run_toggle() -> dict:
+        was_rdp = find_mac_rdp_window()
+        if want_enable:
+            st = mac_vdisp.start(logical_w=logical_w, logical_h=logical_h, hidpi=hidpi)
+        else:
+            st = mac_vdisp.stop()
+        rdp_refresh: Dict[str, Any] = {"rdp_was_open": bool(was_rdp), "rdp_reconnected": False}
+        if st.get("ok") and auto_reconnect and was_rdp is not None:
+            _RDP_PID_TCP_CACHE.clear()
+            _ACTIVE_RDP_3389_PIDS.clear()
+            rdp_refresh = mac_vdisp.auto_refresh_windows_app_session(
+                was_rdp_info=was_rdp,
+                find_rdp_fn=find_mac_rdp_window,
+                quartz=injector._quartz,
+                expect_second_monitor=want_enable,
+            )
+        st = mac_vdisp.status(injector._quartz)
+        st["rdp_refresh"] = rdp_refresh
+        return st
+
+    return await asyncio.to_thread(_run_toggle)
+
+
+@app.websocket("/mac-virtual-display-ws")
+async def mac_virtual_display_ws(ws: WebSocket) -> None:
+    global _ACTIVE_RDP_WS_COUNT
+    await ws.accept()
+    if mac_vdisp is None or not IS_MACOS:
+        try:
+            await ws.send_text('{"type":"vdisp_ended","reason":"unsupported"}')
+            await ws.close()
+        except Exception:
+            pass
+        return
+
+    _ACTIVE_RDP_WS_COUNT += 1
+    audio_q: asyncio.Queue = asyncio.Queue()
+    _PC_WASAPI_CLIENTS.add(audio_q)
+    await _push_pc_bridge_cmd()
+    if _PC_WASAPI_FMT:
+        try:
+            await ws.send_text(json.dumps({"type": "spk_format", **_PC_WASAPI_FMT}))
+        except Exception:
+            pass
+
+    running = True
+    cur_bounds: Dict[str, Any] = {}
+    input_state: Dict[str, Any] = {"held_btn": -1}
+
+    async def _audio_sender() -> None:
+        try:
+            while running:
+                item = await audio_q.get()
+                if item is None:
+                    break
+                if isinstance(item, bytes):
+                    await ws.send_bytes(item)
+                elif isinstance(item, str):
+                    await ws.send_text(item)
+        except Exception:
+            pass
+
+    async def _video_sender() -> None:
+        nonlocal cur_bounds
+        missing_since: Optional[float] = None
+        last_bounds_at = 0.0
+        prev_pkt: Optional[bytes] = None
+        last_sent_at = 0.0
+        try:
+            while running:
+                now = time.monotonic()
+                if not cur_bounds or (now - last_bounds_at) >= 0.5:
+                    last_bounds_at = now
+                    b = await asyncio.to_thread(mac_vdisp.get_bounds, injector._quartz)
+                    if b is not None:
+                        cur_bounds = {
+                            "pid": 0,
+                            "content_x": b["x"],
+                            "content_y": b["y"],
+                            "content_w": b["w"],
+                            "content_h": b["h"],
+                        }
+                        missing_since = None
+                    else:
+                        if missing_since is None:
+                            missing_since = now
+                        elif (now - missing_since) >= 1.2:
+                            await ws.send_text('{"type":"vdisp_ended","reason":"disabled"}')
+                            break
+                        await asyncio.sleep(0.12)
+                        continue
+
+                pkt = await asyncio.to_thread(
+                    mac_vdisp.capture_jpeg_packet,
+                    lens_capturer._quartz,
+                    lens_capturer._foundation,
+                    lens_capturer._objc,
+                    0.82,
+                    2248,
+                )
+                if pkt is not None:
+                    if pkt != prev_pkt or (now - last_sent_at) >= 1.4:
+                        prev_pkt = pkt
+                        last_sent_at = now
+                        await ws.send_bytes(pkt)
+                    await asyncio.sleep(0.045)
+                else:
+                    await asyncio.sleep(0.1)
+        except Exception:
+            pass
+
+    a_task = asyncio.create_task(_audio_sender())
+    v_task = asyncio.create_task(_video_sender())
+    try:
+        while True:
+            raw_msg = await ws.receive_text()
+            try:
+                data = json.loads(raw_msg)
+            except Exception:
+                continue
+            if cur_bounds:
+                await asyncio.to_thread(
+                    _dispatch_parallel_rdp_input, cur_bounds, data, input_state
+                )
+    except Exception:
+        pass
+    finally:
+        _ACTIVE_RDP_WS_COUNT = max(0, _ACTIVE_RDP_WS_COUNT - 1)
+        running = False
+        _PC_WASAPI_CLIENTS.discard(audio_q)
+        try:
+            audio_q.put_nowait(None)
+        except Exception:
+            pass
+        a_task.cancel()
+        v_task.cancel()
+        await _push_pc_bridge_cmd()
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
 @app.get("/apk")
 async def download_apk() -> FileResponse:
     apk_path = BASE_DIR / "releases" / "app-release.apk"
@@ -4549,7 +4721,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.3.3",
+        "version": "2.3.5",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,

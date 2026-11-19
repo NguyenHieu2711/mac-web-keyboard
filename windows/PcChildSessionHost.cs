@@ -18,98 +18,28 @@ namespace MacWebKeyboard
     {
         void put_Property(
             [In, MarshalAs(UnmanagedType.BStr)] string bstrPropertyName,
-            [In, MarshalAs(UnmanagedType.Struct)] ref object pVariant);
+            [In] ref object pVariant);
 
-        [return: MarshalAs(UnmanagedType.Struct)]
-        object get_Property(
-            [In, MarshalAs(UnmanagedType.BStr)] string bstrPropertyName);
-    }
-
-    [ComImport]
-    [Guid("336d5562-efa8-482e-8cb3-c5c0fc7a7db6")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
-    public interface IMsTscAxEvents
-    {
-        [DispId(1)] void OnConnecting();
-        [DispId(2)] void OnConnected();
-        [DispId(3)] void OnLoginComplete();
-        [DispId(4)] void OnDisconnected([In] int discReason);
-        [DispId(5)] void OnEnterFullScreenMode();
-        [DispId(6)] void OnLeaveFullScreenMode();
-        [DispId(7)] void OnChannelReceivedData([In, MarshalAs(UnmanagedType.BStr)] string chanName, [In, MarshalAs(UnmanagedType.BStr)] string data);
-        [DispId(8)] void OnRequestGoFullScreen();
-        [DispId(9)] void OnRequestLeaveFullScreen();
-        [DispId(10)] void OnFatalError([In] int errorCode);
-        [DispId(11)] void OnWarning([In] int warningCode);
-        [DispId(12)] void OnRemoteDesktopSizeChange([In] int width, [In] int height);
-        [DispId(13)] void OnIdleTimeoutNotification();
-        [DispId(14)] void OnRequestContainerMinimize();
-        [DispId(15)] void OnConfirmClose([Out] out bool pfAllowClose);
-        [DispId(16)] void OnReceivedTSPublicKey([In, MarshalAs(UnmanagedType.BStr)] string publicKey, [Out] out bool pfContinueLogon);
-        [DispId(17)] void OnAutoReconnecting([In] int disconnectReason, [In] int attemptCount, [Out] out int pArcContinueStatus);
-        [DispId(18)] void OnAuthenticationWarningDisplayed();
-        [DispId(19)] void OnAuthenticationWarningDismissed();
-    }
-
-    [ClassInterface(ClassInterfaceType.None)]
-    public class RdpEventSink : IMsTscAxEvents
-    {
-        private readonly ChildHostForm _owner;
-        public RdpEventSink(ChildHostForm owner) { _owner = owner; }
-        public void OnConnecting() { _owner.OnRdpEvent("connecting", 0); }
-        public void OnConnected() { _owner.OnRdpEvent("connected", 0); }
-        public void OnLoginComplete() { _owner.OnRdpEvent("login_complete", 0); }
-        public void OnDisconnected(int discReason) { _owner.OnRdpEvent("disconnected", discReason); }
-        public void OnEnterFullScreenMode() {}
-        public void OnLeaveFullScreenMode() {}
-        public void OnChannelReceivedData(string chanName, string data) {}
-        public void OnRequestGoFullScreen() {}
-        public void OnRequestLeaveFullScreen() {}
-        public void OnFatalError(int errorCode) { _owner.OnRdpEvent("fatal_error", errorCode); }
-        public void OnWarning(int warningCode) { _owner.OnRdpEvent("warning", warningCode); }
-        public void OnRemoteDesktopSizeChange(int width, int height) { _owner.OnRdpEvent("size_" + width + "x" + height, 0); }
-        public void OnIdleTimeoutNotification() {}
-        public void OnRequestContainerMinimize() {}
-        public void OnConfirmClose(out bool pfAllowClose) { pfAllowClose = true; }
-        public void OnReceivedTSPublicKey(string publicKey, out bool pfContinueLogon) { pfContinueLogon = true; }
-        public void OnAutoReconnecting(int disconnectReason, int attemptCount, out int pArcContinueStatus) { pArcContinueStatus = 1; }
-        public void OnAuthenticationWarningDisplayed() { _owner.OnRdpEvent("auth_warn", 0); }
-        public void OnAuthenticationWarningDismissed() {}
+        void get_Property(
+            [In, MarshalAs(UnmanagedType.BStr)] string bstrPropertyName,
+            [Out] out object pVariant);
     }
 
     internal class RdpChildAxHost : AxHost
     {
-        private AxHost.ConnectionPointCookie _cookie;
-        private readonly ChildHostForm _owner;
-        public RdpChildAxHost(string clsid, ChildHostForm owner) : base(clsid) { _owner = owner; }
-
-        protected override void CreateSink()
-        {
-            try
-            {
-                _cookie = new AxHost.ConnectionPointCookie(GetOcx(), new RdpEventSink(_owner), typeof(IMsTscAxEvents));
-            }
-            catch { }
-        }
-
-        protected override void DetachSink()
-        {
-            try { if (_cookie != null) _cookie.Disconnect(); } catch { }
-            _cookie = null;
-        }
+        public RdpChildAxHost(string clsid) : base(clsid) { }
     }
 
-    public class ChildHostForm : Form
+    internal class ChildHostForm : Form
     {
-        private const int WS_EX_TRANSPARENT = 0x00000020;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
         private const int WS_EX_NOACTIVATE = 0x08000000;
 
         private static readonly string[] CandidateClsids = new string[]
         {
-            "8b918b82-7985-4c24-89df-c33ad2bbfbcd", // MsRdpClient9NotSafeForScripting
-            "a0c63c30-f08d-4ab4-907c-34905d770c7d", // MsRdpClient10NotSafeForScripting
             "1df7c823-b2d4-4b54-975a-f2ac5d7cf8b8", // MsRdpClient11NotSafeForScripting
+            "a0c63c30-f08d-4ab4-907c-34905d770c7d", // MsRdpClient10NotSafeForScripting
+            "8b918b82-7985-4c24-89df-c33ad2bbfbcd", // MsRdpClient9NotSafeForScripting
         };
 
         private RdpChildAxHost _ax;
@@ -118,34 +48,7 @@ namespace MacWebKeyboard
         private int _targetH;
         private uint _targetScale;
         public volatile bool IsConnected;
-        public volatile short ConnState;
         public volatile string LastError = "";
-        public volatile string LastEvent = "init";
-        public volatile int LastDiscReason;
-        public volatile string ActiveClsid = "";
-        private int _reconnectCooldown = 0;
-
-        public void OnRdpEvent(string evt, int code)
-        {
-            LastEvent = evt + (code != 0 ? ":" + code : "");
-            if (evt == "connected" || evt == "login_complete")
-            {
-                IsConnected = true;
-                ConnState = 1;
-            }
-            else if (evt == "disconnected")
-            {
-                IsConnected = false;
-                ConnState = 0;
-                LastDiscReason = code;
-                _reconnectCooldown = 3; // Chờ ~10s trước khi thử lại để tránh vòng lặp nóng
-            }
-            else if (evt == "fatal_error")
-            {
-                IsConnected = false;
-                LastError = "fatal_error:" + code;
-            }
-        }
 
         public ChildHostForm(int width, int height, uint scalePct)
         {
@@ -157,9 +60,8 @@ namespace MacWebKeyboard
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
             Location = new Point(-32000, -32000);
-            ClientSize = new Size(1, 1);
-            Opacity = 0.0;
-            Enabled = false;
+            ClientSize = new Size(_targetW, _targetH);
+            Opacity = 0.01;
             Text = "MacWebKeyboard Child Session Host";
 
             Load += OnFormLoad;
@@ -170,7 +72,7 @@ namespace MacWebKeyboard
             get
             {
                 CreateParams cp = base.CreateParams;
-                cp.ExStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                cp.ExStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
                 return cp;
             }
         }
@@ -197,13 +99,12 @@ namespace MacWebKeyboard
             {
                 try
                 {
-                    var host = new RdpChildAxHost(clsid, this);
+                    var host = new RdpChildAxHost(clsid);
                     ((System.ComponentModel.ISupportInitialize)host).BeginInit();
                     host.Dock = DockStyle.Fill;
                     Controls.Add(host);
                     ((System.ComponentModel.ISupportInitialize)host).EndInit();
                     _ax = host;
-                    ActiveClsid = clsid;
                     break;
                 }
                 catch (Exception ex)
@@ -224,15 +125,9 @@ namespace MacWebKeyboard
             {
                 dynamic ocx = _ax.GetOcx();
                 short state = (short)ocx.Connected;
-                ConnState = state;
                 IsConnected = (state == 1);
                 if (state == 0)
                 {
-                    if (_reconnectCooldown > 0)
-                    {
-                        _reconnectCooldown--;
-                        return;
-                    }
                     ConnectInternal();
                 }
             }
@@ -246,40 +141,16 @@ namespace MacWebKeyboard
         private void ConnectInternal()
         {
             if (_ax == null) return;
-            string step = "get_ocx";
             try
             {
                 dynamic ocx = _ax.GetOcx();
-                step = "check_connected";
                 short curState = (short)ocx.Connected;
-                ConnState = curState;
                 if (curState != 0)
                 {
                     IsConnected = (curState == 1);
                     return;
                 }
 
-                step = "set_server";
-                ocx.Server = "localhost";
-                step = "set_dims";
-                ocx.DesktopWidth = _targetW;
-                ocx.DesktopHeight = _targetH;
-                ocx.ColorDepth = 32;
-                try { ocx.AdvancedSettings2.SmartSizing = false; } catch { }
-                try { ocx.AdvancedSettings2.AudioRedirectionMode = 0; } catch { }
-                try { ocx.AdvancedSettings2.EnableAutoReconnect = true; } catch { }
-                step = "set_auth_level";
-                ocx.AdvancedSettings7.AuthenticationLevel = (uint)0;
-                step = "set_credssp";
-                ocx.AdvancedSettings7.EnableCredSspSupport = true;
-                try { ocx.AdvancedSettings9.EnableCredSspSupport = true; } catch { }
-                // Tuyệt đối không chiếm phím Win/Alt+Tab của phiên PC chính!
-                try { ocx.AdvancedSettings9.EnableWindowsKey = 0; } catch { }
-                try { ocx.AdvancedSettings9.AcceleratorPassthrough = 0; } catch { }
-                try { ocx.SecuredSettings3.KeyboardHookMode = 0; } catch { }
-                try { ocx.AdvancedSettings7.NegotiateSecurityLayer = true; } catch { }
-
-                step = "set_child_prop";
                 IMsRdpExtendedSettings ext = ocx as IMsRdpExtendedSettings;
                 if (ext != null)
                 {
@@ -293,18 +164,30 @@ namespace MacWebKeyboard
                         ext.put_Property("DeviceScaleFactor", ref vDevScale);
                     }
                     catch { }
+                    try
+                    {
+                        object vCred = true;
+                        ext.put_Property("EnableCredSspSupport", ref vCred);
+                    }
+                    catch { }
                 }
 
-                step = "connect";
+                ocx.Server = "localhost";
+                ocx.DesktopWidth = _targetW;
+                ocx.DesktopHeight = _targetH;
+                ocx.ColorDepth = 32;
+                try { ocx.AdvancedSettings2.SmartSizing = false; } catch { }
+                try { ocx.AdvancedSettings2.AudioRedirectionMode = 0; } catch { }
+                try { ocx.AdvancedSettings2.EnableAutoReconnect = true; } catch { }
+
                 ocx.Connect();
-                ConnState = (short)ocx.Connected;
                 LastError = "";
-                IsConnected = (ConnState == 1);
+                IsConnected = true;
             }
             catch (Exception ex)
             {
                 IsConnected = false;
-                LastError = step + ": " + ex.Message;
+                LastError = ex.Message;
             }
         }
     }
@@ -368,13 +251,9 @@ namespace MacWebKeyboard
                             using (NetworkStream ns = cli.GetStream())
                             {
                                 string safeErr = (form.LastError ?? "").Replace("\\", "\\\\").Replace("\"", "'").Replace("\r", " ").Replace("\n", " ");
-                                string safeEvt = (form.LastEvent ?? "").Replace("\\", "\\\\").Replace("\"", "'");
                                 string json = "{\"ok\":true,\"child_enabled\":" + (QueryChildEnabled() ? "true" : "false") +
                                               ",\"child_sid\":" + QueryChildSessionId() +
                                               ",\"connected\":" + (form.IsConnected ? "true" : "false") +
-                                              ",\"state\":" + form.ConnState +
-                                              ",\"last_event\":\"" + safeEvt + "\"" +
-                                              ",\"disc_reason\":" + form.LastDiscReason +
                                               ",\"last_error\":\"" + safeErr + "\"}\n";
                                 byte[] b = Encoding.UTF8.GetBytes(json);
                                 ns.Write(b, 0, b.Length);
@@ -437,7 +316,7 @@ namespace MacWebKeyboard
             }
 
             bool createdNew = false;
-            _singleInstanceMutex = new Mutex(true, "Global\\MacWebKeyboard_ChildHost_v1", out createdNew);
+            _singleInstanceMutex = new Mutex(true, "Local\\MacWebKeyboard_ChildHost_v1", out createdNew);
             if (!createdNew)
             {
                 return 0;

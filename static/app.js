@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.3";
+  const BUNDLED_BOOT_VER = "2.3.5";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -37,6 +37,7 @@
           } else {
             window.__MAC_KB_HOT_BOOTED__ = String(bundle.etag);
             window.__MAC_KB_HOT_VERSION__ = String(bundle.web_version || BUNDLED_BOOT_VER);
+            window.__MAC_KB_HOT_OK__ = false;
             document
               .querySelectorAll('link[rel="stylesheet"], style#hot-ota-style')
               .forEach((el) => el.remove());
@@ -48,12 +49,25 @@
             const sc = document.createElement("script");
             sc.textContent = bundle.app_js;
             document.body.appendChild(sc);
+            // Tự động tự cứu nếu gói hot-bundle bị lỗi runtime: xóa cache hỏng và tải lại bản gốc sạch!
+            if (window.__MAC_KB_HOT_OK__ !== true) {
+              try {
+                localStorage.removeItem("mac_kb_hot_bundle_v1");
+              } catch {
+                // ignore
+              }
+              window.location.reload();
+            }
             return;
           }
         }
       }
     } catch {
-      // fallback to bundled script
+      try {
+        localStorage.removeItem("mac_kb_hot_bundle_v1");
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -2365,6 +2379,9 @@
   const remoteScaleMenu = document.getElementById("remote-scale-menu");
   const rdpResBadge = document.getElementById("rdp-res-badge");
   const btnRemoteCoexist = document.getElementById("btn-remote-coexist");
+  const btnMacExtDisplay = document.getElementById("btn-mac-ext-display");
+  const lblMacExtDisplay = document.getElementById("lbl-mac-ext-display");
+  const btnRdpExtDisplay = document.getElementById("btn-rdp-ext-display");
   const btnRemoteKb = document.getElementById("btn-remote-kb");
   const btnRemoteZoomReset = document.getElementById("btn-remote-zoom-reset");
   const btnRemoteCfg = document.getElementById("btn-remote-cfg");
@@ -3697,7 +3714,32 @@
     }
   }
 
-  function startParallelRdpSession(macBase) {
+  let macExtDisplayActive = false;
+  let macExtDisplayBusy = false;
+
+  function syncMacExtDisplayUI() {
+    if (btnMacExtDisplay) {
+      btnMacExtDisplay.classList.toggle("is-active", macExtDisplayActive);
+      btnMacExtDisplay.disabled = macExtDisplayBusy;
+    }
+    if (lblMacExtDisplay) {
+      lblMacExtDisplay.textContent = macExtDisplayBusy
+        ? "Đang đổi..."
+        : macExtDisplayActive
+          ? "Màn phụ ✓"
+          : "Màn phụ";
+    }
+    if (btnRdpExtDisplay) {
+      btnRdpExtDisplay.disabled = macExtDisplayBusy;
+      btnRdpExtDisplay.textContent = macExtDisplayBusy
+        ? "Đang bật..."
+        : macExtDisplayActive
+          ? "Tắt màn phụ"
+          : "Màn phụ";
+    }
+  }
+
+  function startParallelRdpSession(macBase, wsPath = "/rdp-parallel-ws") {
     return new Promise((resolve, reject) => {
       closeParallelRdpWs();
       closeRdpAudioWs();
@@ -3710,7 +3752,8 @@
         rdpSession = null;
       }
 
-      const wsUrl = `${macBase.replace(/^http/, "ws")}/rdp-parallel-ws`;
+      const wsUrl = `${macBase.replace(/^http/, "ws")}${wsPath}`;
+      const isVdisp = wsPath === "/mac-virtual-display-ws";
       let settled = false;
       const sock = new WebSocket(wsUrl);
       sock.binaryType = "arraybuffer";
@@ -3762,6 +3805,16 @@
               rdpSpkRate = Number(msg.rate) || 44100;
               rdpSpkChannels = Number(msg.channels) || 2;
               rdpNextPlayTime = 0;
+            } else if (msg.type === "vdisp_ended") {
+              closeParallelRdpWs();
+              rdpActiveEngine = "none";
+              macExtDisplayActive = false;
+              syncMacExtDisplayUI();
+              syncRdpConnectionUI();
+              if (kbLayout === "remote" && remoteLoginOverlay) {
+                setRdpStatus("Đã tắt Màn hình phụ #2 trên MacBook.", false);
+                remoteLoginOverlay.classList.remove("is-hidden");
+              }
             } else if (msg.type === "parallel_ended") {
               closeParallelRdpWs();
               rdpActiveEngine = "none";
@@ -3812,6 +3865,16 @@
             rdpActiveEngine = "none";
           }
           syncRdpConnectionUI();
+          if (isVdisp) {
+            if (!rdpManualDisconnect && macExtDisplayActive && kbLayout === "remote") {
+              setTimeout(() => {
+                if (macExtDisplayActive && !rdpManualDisconnect && !isRemoteConnected()) {
+                  void startParallelRdpSession(macBase, "/mac-virtual-display-ws").catch(() => {});
+                }
+              }, 700);
+            }
+            return;
+          }
           if (settled && !rdpManualDisconnect && kbLayout === "remote") {
             if (canAutoReconnectRdp()) {
               setTimeout(async () => {
@@ -4127,10 +4190,89 @@
     }
   }
 
+  async function toggleMacExtDisplay(forceState = null) {
+    if (macExtDisplayBusy) return;
+    const want = typeof forceState === "boolean" ? forceState : !macExtDisplayActive;
+    const macBase = resolveMacHttpBase();
+    macExtDisplayBusy = true;
+    syncMacExtDisplayUI();
+    closeAllRemoteSubMenus();
+
+    if (want) {
+      setRdpStatus("Đang bật Màn phụ #2 trên MacBook & tự nối lại Windows App...", true);
+      if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
+      rdpManualDisconnect = false;
+      ensureRdpAudioContext();
+    } else {
+      setRdpStatus("Đang tắt Màn phụ #2 trên MacBook...", true);
+      closeParallelRdpWs();
+      rdpActiveEngine = "none";
+      syncRdpConnectionUI();
+    }
+
+    try {
+      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), 14000) : null;
+      let resData = null;
+      try {
+        const res = await fetch(`${macBase}/mac-virtual-display/toggle`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enable: want,
+            auto_reconnect_rdp: true,
+            logical_w: 1798,
+            logical_h: 864,
+            hidpi: true,
+          }),
+          signal: ctrl ? ctrl.signal : undefined,
+        });
+        resData = await res.json();
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+
+      if (want) {
+        if (!resData || !resData.ok || !resData.active) {
+          const msg = (resData && resData.error) || "Không bật được Màn phụ trên MacBook (kiểm tra server.py trên Mac đã cập nhật chưa).";
+          macExtDisplayActive = false;
+          setRdpStatus(msg, false);
+          if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
+          return;
+        }
+        macExtDisplayActive = true;
+        await startParallelRdpSession(macBase, "/mac-virtual-display-ws");
+      } else {
+        macExtDisplayActive = false;
+        setRdpStatus("Đã tắt Màn phụ #2 — MacBook về 1 màn hình.", false);
+        if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
+      }
+    } catch {
+      macExtDisplayActive = false;
+      setRdpStatus("Không gọi được MacBook (:5050) để bật/tắt Màn phụ.", false);
+      if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
+    } finally {
+      macExtDisplayBusy = false;
+      syncMacExtDisplayUI();
+      syncRdpConnectionUI();
+    }
+  }
+
   function disconnectRdpSession() {
     rdpManualDisconnect = true;
+    const wasVdisp = macExtDisplayActive;
+    macExtDisplayActive = false;
+    syncMacExtDisplayUI();
     closeParallelRdpWs();
     closeRdpAudioWs();
+    if (wasVdisp) {
+      const macBase = resolveMacHttpBase();
+      fetch(`${macBase}/mac-virtual-display/toggle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enable: false, auto_reconnect_rdp: true }),
+      }).catch(() => {});
+    }
     if (rdpSession) {
       try {
         rdpSession.shutdown();
@@ -5017,6 +5159,22 @@
     });
   }
 
+  if (btnMacExtDisplay) {
+    btnMacExtDisplay.addEventListener("click", (e) => {
+      e.stopPropagation();
+      triggerHaptic(8);
+      void toggleMacExtDisplay(null);
+    });
+  }
+
+  if (btnRdpExtDisplay) {
+    btnRdpExtDisplay.addEventListener("click", (e) => {
+      e.stopPropagation();
+      triggerHaptic(8);
+      void toggleMacExtDisplay(null);
+    });
+  }
+
   // ── Menu điều khiển hợp nhất duy nhất (Cảm ứng | Bàn rê ảo | Chuột: ĐT | Chuột: Nối 2 màn) ──
   if (btnRemoteControl) {
     btnRemoteControl.addEventListener("click", (e) => {
@@ -5277,7 +5435,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.4";
+  const BUNDLED_WEB_VERSION = "2.3.5";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
@@ -5599,4 +5757,5 @@
   setInterval(() => {
     void pollLiveUpdateManifest();
   }, 4200);
+  window.__MAC_KB_HOT_OK__ = true;
 })();
