@@ -2196,15 +2196,15 @@
   const RDP_PHYS_W_MM = 155;
   const RDP_PHYS_H_MM = 74;
   const VALID_RDP_SCALES = [100, 125, 150, 175];
-  const STORAGE_RDP_SCALE = "mac_kb_rdp_scale";
+  const STORAGE_RDP_SCALE = "mac_kb_rdp_scale_v2";
   const STORAGE_RDP_HOST = "mac_kb_rdp_host";
   const STORAGE_RDP_USER = "mac_kb_rdp_user";
   const STORAGE_RDP_PASS = "mac_kb_rdp_pass";
   const STORAGE_RDP_EDGE = "mac_kb_rdp_edge_mode";
 
-  let rdpDesktopScale = 150;
+  let rdpDesktopScale = 125;
   try {
-    const savedRdpScale = parseInt(localStorage.getItem(STORAGE_RDP_SCALE) || "150", 10);
+    const savedRdpScale = parseInt(localStorage.getItem(STORAGE_RDP_SCALE) || "125", 10);
     if (VALID_RDP_SCALES.includes(savedRdpScale)) {
       rdpDesktopScale = savedRdpScale;
     }
@@ -2370,11 +2370,10 @@
     if (remoteScaleMenu) remoteScaleMenu.classList.add("is-hidden");
   }
 
-  function setRemoteStageAspect(w, h) {
-    if (!remoteStage || !(w > 0) || !(h > 0)) return;
-    const ratio = w / h;
-    remoteStage.style.setProperty("--rdp-aspect", ratio.toFixed(5));
-    remoteStage.style.aspectRatio = `${w} / ${h}`;
+  function setRemoteStageAspect() {
+    // Cố định khung điện thoại theo đúng tỉ lệ chuẩn 2248×1080 của điện thoại, tuyệt đối không co bóp theo tỉ lệ màn hình Mac!
+    if (!remoteStage) return;
+    remoteStage.style.aspectRatio = `${RDP_TARGET_W} / ${RDP_TARGET_H}`;
     applyRdpStageTransform();
     updateOverlayCursorVisual();
   }
@@ -2419,7 +2418,7 @@
   }
 
   function setRemoteDesktopScale(rawScale) {
-    const parsed = parseInt(String(rawScale || "150"), 10);
+    const parsed = parseInt(String(rawScale || "125"), 10);
     if (!VALID_RDP_SCALES.includes(parsed)) return;
     const changed = parsed !== rdpDesktopScale;
     rdpDesktopScale = parsed;
@@ -5025,7 +5024,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.2.2";
+  const BUNDLED_WEB_VERSION = "2.2.3";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();

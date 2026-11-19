@@ -1377,12 +1377,12 @@ body.is-lowercase .key-alpha .key-main {
 }
 
 .remote-stage {
-  --rdp-aspect: 2.08148;
   position: relative;
-  width: min(100vw, calc(100vh * var(--rdp-aspect)));
-  height: min(100vh, calc(100vw / var(--rdp-aspect)));
-  width: min(100dvw, calc(100dvh * var(--rdp-aspect)));
-  height: min(100dvh, calc(100dvw / var(--rdp-aspect)));
+  width: min(100vw, calc(100vh * (2248 / 1080)));
+  height: min(100vh, calc(100vw * (1080 / 2248)));
+  width: min(100dvw, calc(100dvh * (2248 / 1080)));
+  height: min(100dvh, calc(100dvw * (1080 / 2248)));
+  aspect-ratio: 2248 / 1080;
   transform-origin: 0 0;
   will-change: transform;
 }

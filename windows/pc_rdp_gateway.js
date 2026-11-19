@@ -1160,7 +1160,7 @@ const server = http.createServer((req, res) => {
     const payload = JSON.stringify({
       ok: true,
       service: 'pc-rdp-gateway',
-      version: '2.2.2',
+      version: '2.2.3',
       hostname: os.hostname(),
       default_user: `${os.hostname()}\\${os.userInfo().username}`,
       port: LISTEN_PORT,
