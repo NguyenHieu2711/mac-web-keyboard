@@ -16,8 +16,10 @@ import hashlib
 import io
 import json
 import logging
+import os
 import plistlib
 import re
+import signal
 import socket
 import ssl
 import struct
@@ -4568,10 +4570,20 @@ async def mac_virtual_display_diag() -> dict:
                         mrd_bin = "/Applications/Windows App.app/Contents/MacOS/Windows App"
                     if Path(mrd_bin).exists():
                         rc_cli = subprocess.run(
-                            [mrd_bin, "--script", "bookmark", "write", "help"],
+                            [mrd_bin, "--script", "bookmark", "list"],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5,
                         )
-                        out["mrd_cli_list"] = ((rc_cli.stdout or "") + "\n" + (rc_cli.stderr or "")).strip()[1800:4800]
+                        list_txt = ((rc_cli.stdout or "") + "\n" + (rc_cli.stderr or "")).strip()
+                        m_u = re.search(r'"[^"]+",\s*([0-9A-Fa-f-]{36})', list_txt)
+                        if m_u:
+                            rc_ex = subprocess.run(
+                                [mrd_bin, "--script", "bookmark", "export", m_u.group(1).strip()],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5,
+                            )
+                            ex_s = ((rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")).strip()
+                            out["mrd_cli_list"] = (list_txt + "\n---\n" + ex_s)[:1800]
+                        else:
+                            out["mrd_cli_list"] = list_txt[:800]
                 except Exception as me:
                     out["mrd_bookmarks_err"] = str(me)[:120]
                 out["displays"] = disps
@@ -5711,10 +5723,8 @@ def _get_mrd_cli_info() -> Tuple[str, str]:
     return "", ""
 
 
-def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
-    """Dùng CLI chính chủ --script bookmark write của Microsoft Remote Desktop để:
-    - Khi Màn phụ Mac ĐANG BẬT: bật --useallmonitors true --fullscreen true (nhận đủ 2 màn, đẩy Obsidian sang ĐT).
-    - Khi Màn phụ Mac ĐANG TẮT: trả về --useallmonitors false --fullscreen false (mở dạng cửa sổ thường trên Mac, không mất tab!)."""
+def _list_mrd_bookmarks() -> List[Tuple[str, str]]:
+    """Chỉ đọc danh sách bookmark (100% read-only, không ghi đè cấu hình)."""
     if not IS_MACOS:
         return []
     mrd_bin, _ = _get_mrd_cli_info()
@@ -5728,33 +5738,88 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
         )
         out_txt = (rc.stdout or "") + "\n" + (rc.stderr or "")
         for m in re.finditer(r'"([^"]+)",\s*([0-9A-Fa-f-]{36})', out_txt):
-            bname, buuid = m.group(1).strip(), m.group(2).strip()
-            found.append((bname, buuid))
+            found.append((m.group(1).strip(), m.group(2).strip()))
+    except Exception:
+        pass
+    return found
+
+
+def _find_live_mrd_pids() -> List[int]:
+    """Lấy danh sách PID thật của Microsoft Remote Desktop / Windows App từ OS (kể cả khi ẩn hết cửa sổ)."""
+    if not IS_MACOS:
+        return []
+    pids: set = set()
+    rpid_w, _, _ = _rdp_probe_vdisp_state()
+    if rpid_w > 0:
+        pids.add(rpid_w)
+    try:
+        rc = subprocess.run(
+            ["pgrep", "-f", "Microsoft Remote Desktop.app/Contents/MacOS|Windows App.app/Contents/MacOS"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=1.5,
+        )
+        for ln in (rc.stdout or "").splitlines():
+            ln = ln.strip()
+            if ln.isdigit():
+                pv = int(ln)
+                if pv > 0 and pv != os.getpid():
+                    pids.add(pv)
+    except Exception:
+        pass
+    return sorted(pids)
+
+
+def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
+    """Dùng CLI chính chủ --script bookmark write của Microsoft Remote Desktop (chỉ gọi khi MRD đã đóng sạch):
+    - Luôn giữ BẬT --retina true (Optimize for Retina displays) + --dynamicdisplay true (Update session resolution on resize, xóa sạch lề phải 45px 1467x944) + --scaling true + --colordepth 32.
+    - Khi Màn phụ Mac ĐANG BẬT: bật --useallmonitors true --fullscreen true (nhận đủ 2 màn Retina, đẩy Obsidian sang ĐT).
+    - Khi Màn phụ Mac ĐANG TẮT: trả về --useallmonitors false --fullscreen false (mở cửa sổ Retina 1512x944 khít 100% màn MacBook)."""
+    if not IS_MACOS:
+        return []
+    mrd_bin, _ = _get_mrd_cli_info()
+    if not mrd_bin:
+        return []
+    found = _list_mrd_bookmarks()
+    try:
         flag = "true" if enable_multimon else "false"
         last_status = ""
         for bname, buuid in found:
-            w_args = [mrd_bin, "--script", "bookmark", "write", buuid, "--useallmonitors", flag, "--fullscreen", flag]
+            rc_ex = subprocess.run(
+                [mrd_bin, "--script", "bookmark", "export", buuid],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5,
+            )
+            ex_txt = (rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")
+            m_host = re.search(r"full address:s:([^\r\n]+)", ex_txt, re.IGNORECASE)
+            host_val = m_host.group(1).strip() if m_host else "192.168.52.230"
+
+            preserve_flags: List[str] = [
+                "--useallmonitors", flag,
+                "--fullscreen", flag,
+                "--retina", "true",
+                "--dynamicdisplay", "true",
+                "--scaling", "true",
+                "--colordepth", "32",
+            ]
+            if re.search(r"audiocapturemode:i:1", ex_txt, re.IGNORECASE):
+                preserve_flags += ["--redirectmicrophones", "true"]
+            if re.search(r"camerastoredirect:s:[^\r\n]+", ex_txt, re.IGNORECASE):
+                preserve_flags += ["--redirectcameras", "true"]
+            if re.search(r"drivestoredirect:s:[^\r\n]+", ex_txt, re.IGNORECASE):
+                preserve_flags += ["--redirectfolders", "true"]
+            if re.search(r"redirectprinters:i:1", ex_txt, re.IGNORECASE):
+                preserve_flags += ["--redirectprinters", "true"]
+
+            w_args = [mrd_bin, "--script", "bookmark", "write", buuid] + preserve_flags
             rc_w = subprocess.run(w_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3.0)
             w_msg = ((rc_w.stdout or "") + " " + (rc_w.stderr or "")).strip()
             if rc_w.returncode != 0 or "required" in w_msg.lower() or "error" in w_msg.lower():
-                # Dự phòng nếu CLI yêu cầu truyền kèm --hostname khi cập nhật bookmark
-                rc_ex = subprocess.run(
-                    [mrd_bin, "--script", "bookmark", "export", buuid],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5,
-                )
-                ex_txt = (rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")
-                m_host = re.search(r"full address:s:([^\r\n]+)", ex_txt, re.IGNORECASE)
-                host_val = m_host.group(1).strip() if m_host else "192.168.52.230"
                 w_args2 = [
                     mrd_bin, "--script", "bookmark", "write", buuid,
                     "--hostname", host_val,
                     "--friendlyname", bname,
-                    "--useallmonitors", flag,
-                    "--fullscreen", flag,
-                ]
+                ] + preserve_flags
                 rc_w = subprocess.run(w_args2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3.0)
                 w_msg = ((rc_w.stdout or "") + " " + (rc_w.stderr or "")).strip()
-            last_status = f"rc={rc_w.returncode}:{w_msg[:60]}"
+            last_status = f"rc={rc_w.returncode}:retina=1,dyn=1,mm={flag}:{w_msg[:40]}"
         _RDP_CLOSER_DIAG["multimon_bookmark"] = bool(enable_multimon)
         _RDP_CLOSER_DIAG["bmk_write_status"] = last_status
     except Exception as exc:
@@ -6052,16 +6117,12 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
     return launched
 
 
-def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
-    """Đóng êm phiên cũ -> khởi động lại sạch Microsoft Remote Desktop nạp CoreData mới -> tự nối lại target_sess."""
-    global _LAST_DOWNGRADED_1MON_PID
+def _quit_mrd_cleanly() -> None:
+    """Đóng êm các cửa sổ phiên đang mở rồi thoát sạch tiến trình MRD để giải phóng khóa CoreData SQLite."""
     import ctypes
     import AppKit  # type: ignore
     import objc  # type: ignore
-    from mac_virtual_display import _CGPoint, _CGSize
 
-    q = injector._quartz
-    _, app_name = _get_mrd_cli_info()
     rpid_cur, _, _ = _rdp_probe_vdisp_state()
     if rpid_cur > 0 and mac_vdisp is not None and mac_vdisp._init_ax_libs():
         try:
@@ -6103,20 +6164,111 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
         except Exception:
             pass
 
-    if rpid_cur > 0:
+    live_pids = _find_live_mrd_pids()
+    if not live_pids:
+        return
+    for mp in live_pids:
         try:
             with objc.autorelease_pool():
-                rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rpid_cur)
+                rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(mp)
                 if rapp is not None:
                     rapp.terminate()
         except Exception:
             pass
-        for _ in range(12):
-            time.sleep(0.15)
-            p_chk, _, _ = _rdp_probe_vdisp_state()
-            if p_chk <= 0:
-                break
+    for step_q in range(14):
+        time.sleep(0.15)
+        rem = _find_live_mrd_pids()
+        if not rem:
+            return
+        if step_q == 9:
+            for mp in rem:
+                try:
+                    os.kill(mp, signal.SIGTERM)
+                except Exception:
+                    pass
 
+
+def _apply_full_mac_window_bounds(target_pid: int, target_sess: str) -> Tuple[bool, float, float]:
+    """Đặt cửa sổ phiên 1 màn khít trọn màn MacBook (1512x944, không hở lề phải 45px). Trả về (matched, cur_w, cur_h)."""
+    import ctypes
+    import objc  # type: ignore
+    from mac_virtual_display import _CGPoint, _CGSize
+
+    q = injector._quartz
+    if not IS_MACOS or target_pid <= 0 or q is None or mac_vdisp is None or not mac_vdisp._init_ax_libs():
+        return False, 0.0, 0.0
+    mb = q.CGDisplayBounds(q.CGMainDisplayID())
+    mx, my, mw, mh = float(mb.origin.x), float(mb.origin.y), float(mb.size.width), float(mb.size.height)
+    ax = mac_vdisp._ax_lib
+    cf = mac_vdisp._cf_lib
+    t_low = target_sess.strip().lower()
+    a_ax = ax.AXUIElementCreateApplication(target_pid)
+    if not a_ax:
+        return False, 0.0, 0.0
+    sw_k = cf.CFStringCreateWithCString(None, b"AXWindows", 0x08000100)
+    st_k = cf.CFStringCreateWithCString(None, b"AXTitle", 0x08000100)
+    sp_k = cf.CFStringCreateWithCString(None, b"AXPosition", 0x08000100)
+    ss_k = cf.CFStringCreateWithCString(None, b"AXSize", 0x08000100)
+    sf_k = cf.CFStringCreateWithCString(None, b"AXFullScreen", 0x08000100)
+    matched = False
+    cur_w, cur_h = 0.0, 0.0
+    try:
+        wr = ctypes.c_void_p()
+        if ax.AXUIElementCopyAttributeValue(a_ax, sw_k, ctypes.byref(wr)) == 0 and wr.value:
+            try:
+                for wi in range(cf.CFArrayGetCount(wr.value)):
+                    wel = cf.CFArrayGetValueAtIndex(wr.value, wi)
+                    if not wel:
+                        continue
+                    tr = ctypes.c_void_p()
+                    wt = ""
+                    if ax.AXUIElementCopyAttributeValue(wel, st_k, ctypes.byref(tr)) == 0 and tr.value:
+                        with objc.autorelease_pool():
+                            wt = str(objc.objc_object(c_void_p=tr.value) or "").strip().lower()
+                        cf.CFRelease(tr.value)
+                    if wt == t_low or (t_low and t_low in wt and wt != "microsoft remote desktop"):
+                        fr = ctypes.c_void_p()
+                        is_fs = False
+                        if ax.AXUIElementCopyAttributeValue(wel, sf_k, ctypes.byref(fr)) == 0 and fr.value:
+                            is_fs = bool(cf.CFBooleanGetValue(fr.value))
+                            cf.CFRelease(fr.value)
+                        if is_fs:
+                            break
+                        npt = _CGPoint(mx, my + 38.0)
+                        nsz = _CGSize(mw, max(600.0, mh - 38.0))
+                        v_pt = ax.AXValueCreate(1, ctypes.byref(npt))
+                        v_sz = ax.AXValueCreate(2, ctypes.byref(nsz))
+                        if v_pt:
+                            ax.AXUIElementSetAttributeValue(wel, sp_k, v_pt)
+                            cf.CFRelease(v_pt)
+                        if v_sz:
+                            ax.AXUIElementSetAttributeValue(wel, ss_k, v_sz)
+                            cf.CFRelease(v_sz)
+                        time.sleep(0.12)
+                        sr_after = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(wel, ss_k, ctypes.byref(sr_after)) == 0 and sr_after.value:
+                            sz_out = _CGSize()
+                            if ax.AXValueGetValue(sr_after.value, 2, ctypes.byref(sz_out)):
+                                cur_w, cur_h = float(sz_out.w), float(sz_out.h)
+                            cf.CFRelease(sr_after.value)
+                        matched = True
+                        break
+            finally:
+                cf.CFRelease(wr.value)
+    finally:
+        cf.CFRelease(a_ax)
+        for k_ref in (sw_k, st_k, sp_k, ss_k, sf_k):
+            if k_ref:
+                cf.CFRelease(k_ref)
+    return matched, cur_w, cur_h
+
+
+def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
+    """Đóng êm phiên cũ -> thoát sạch MRD -> ghi bookmark mới (giữ nguyên Retina + Dynamic Display) -> tự nối lại target_sess."""
+    global _LAST_DOWNGRADED_1MON_PID
+
+    _, app_name = _get_mrd_cli_info()
+    _quit_mrd_cleanly()
     sync_mrd_bookmark_multimon(enable_multimon)
     if not app_name:
         return
@@ -6139,114 +6291,81 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
     time.sleep(0.35)
     _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
 
-    # Nếu vừa hạ về 1 màn cửa sổ thường (không full-screen): tự bung khung cửa sổ khít gọn màn MacBook (1512x944), xóa sạch khung lùn 1511x459 cũ!
-    if not enable_multimon and q is not None and mac_vdisp is not None and mac_vdisp._init_ax_libs():
-        mb = q.CGDisplayBounds(q.CGMainDisplayID())
-        mx, my, mw, mh = float(mb.origin.x), float(mb.origin.y), float(mb.size.width), float(mb.size.height)
-        ax = mac_vdisp._ax_lib
-        cf = mac_vdisp._cf_lib
-        t_low = target_sess.strip().lower()
-        for _ in range(14):
+    # Khi về 1 màn cửa sổ thường: bung khít 1512x944 ngay khi cửa sổ mở và lặp lại sau khi kênh Dynamic Display bắt tay xong!
+    if not enable_multimon:
+        first_matched = False
+        for _ in range(16):
             time.sleep(0.22)
-            a_ax2 = ax.AXUIElementCreateApplication(new_pid)
-            if not a_ax2:
-                continue
-            sw_k = cf.CFStringCreateWithCString(None, b"AXWindows", 0x08000100)
-            st_k = cf.CFStringCreateWithCString(None, b"AXTitle", 0x08000100)
-            sp_k = cf.CFStringCreateWithCString(None, b"AXPosition", 0x08000100)
-            ss_k = cf.CFStringCreateWithCString(None, b"AXSize", 0x08000100)
-            resized = False
-            try:
-                wr = ctypes.c_void_p()
-                if ax.AXUIElementCopyAttributeValue(a_ax2, sw_k, ctypes.byref(wr)) == 0 and wr.value:
-                    try:
-                        for wi in range(cf.CFArrayGetCount(wr.value)):
-                            wel = cf.CFArrayGetValueAtIndex(wr.value, wi)
-                            if not wel:
-                                continue
-                            tr = ctypes.c_void_p()
-                            wt = ""
-                            if ax.AXUIElementCopyAttributeValue(wel, st_k, ctypes.byref(tr)) == 0 and tr.value:
-                                with objc.autorelease_pool():
-                                    wt = str(objc.objc_object(c_void_p=tr.value) or "").strip().lower()
-                                cf.CFRelease(tr.value)
-                            if wt == t_low or (t_low and t_low in wt and wt != "microsoft remote desktop"):
-                                npt = _CGPoint(mx, my + 38.0)
-                                nsz = _CGSize(mw, max(600.0, mh - 38.0))
-                                v_pt = ax.AXValueCreate(1, ctypes.byref(npt))
-                                v_sz = ax.AXValueCreate(2, ctypes.byref(nsz))
-                                if v_pt:
-                                    ax.AXUIElementSetAttributeValue(wel, sp_k, v_pt)
-                                    cf.CFRelease(v_pt)
-                                if v_sz:
-                                    ax.AXUIElementSetAttributeValue(wel, ss_k, v_sz)
-                                    cf.CFRelease(v_sz)
-                                resized = True
-                                break
-                    finally:
-                        cf.CFRelease(wr.value)
-            finally:
-                cf.CFRelease(a_ax2)
-                for k_ref in (sw_k, st_k, sp_k, ss_k):
-                    if k_ref:
-                        cf.CFRelease(k_ref)
-            if resized:
+            ok_m, _, _ = _apply_full_mac_window_bounds(new_pid, target_sess)
+            if ok_m:
+                first_matched = True
                 break
+        if first_matched:
+            for extra_wait in (0.55, 0.70):
+                time.sleep(extra_wait)
+                _apply_full_mac_window_bounds(new_pid, target_sess)
 
 
 def trigger_smart_rdp_multimon_sync(
     enable_multimon: bool,
     upgrade_running: bool = False,
     downgrade_running: bool = False,
+    repair_clamped: bool = False,
 ) -> None:
-    """Điều phối thông minh 1 màn <-> 2 màn hai chiều cho Microsoft Remote Desktop:
-    - Tắt Màn phụ Mac hoặc thu nhỏ khỏi Full-Screen: tự chuyển phiên về 1 màn cửa sổ chuẩn (--useallmonitors false --fullscreen false), KHÔNG bị chia đôi 2 màn bé tí!
-    - Bật Màn phụ Mac hoặc phóng Full-Screen: tự chuyển phiên sang 2 màn Full-Screen (--useallmonitors true --fullscreen true), đẩy Obsidian sang ĐT!"""
+    """Điều phối thông minh 1 màn <-> 2 màn hai chiều cho Microsoft Remote Desktop (luôn giữ Retina + Dynamic Display):
+    - Tắt Màn phụ Mac hoặc thu nhỏ khỏi Full-Screen: tự chuyển phiên về 1 màn cửa sổ Retina 1512x944 khít 100% màn MacBook!
+    - Bật Màn phụ Mac hoặc phóng Full-Screen: tự chuyển phiên sang 2 màn Retina Full-Screen, đẩy Obsidian sang ĐT!"""
     if not IS_MACOS:
         return
 
     def _worker() -> None:
         global _RDP_RECONNECT_UNTIL, _LAST_MULTIMON_UPGRADE_AT
-        import AppKit  # type: ignore
-        import objc  # type: ignore
 
         with _SMART_MULTIMON_LOCK:
-            bookmarks = sync_mrd_bookmark_multimon(enable_multimon)
+            bookmarks = _list_mrd_bookmarks()
             default_title = bookmarks[0][0] if bookmarks else "PC Hieu"
 
             if not enable_multimon:
                 rpid, sess, _ = _rdp_probe_vdisp_state()
-                if downgrade_running and sess:
+                need_downgrade = bool(downgrade_running and sess)
+                if not need_downgrade and repair_clamped and sess and injector._quartz is not None:
+                    mb = injector._quartz.CGDisplayBounds(injector._quartz.CGMainDisplayID())
+                    mw, mh = float(mb.size.width), float(mb.size.height)
+                    ok_m, cw, ch = _apply_full_mac_window_bounds(rpid, sess[0])
+                    # Nếu cửa sổ đang cao sát trần (ch >= mh - 65) nhưng bị kẹp ngang không kéo ra được (VD: 1467x944 do mất dynamicdisplay) -> tự sửa ngay!
+                    if ok_m and ch >= (mh - 65.0) and cw > 400.0 and cw <= (mw - 20.0):
+                        need_downgrade = True
+
+                if need_downgrade and sess:
                     now_d = time.monotonic()
                     if (now_d - _LAST_MULTIMON_UPGRADE_AT) < 4.5:
                         return
                     _LAST_MULTIMON_UPGRADE_AT = now_d
                     target_sess = sess[0] if sess else default_title
-                    _RDP_RECONNECT_UNTIL = time.monotonic() + 7.5
+                    _RDP_RECONNECT_UNTIL = time.monotonic() + 8.5
                     try:
-                        time.sleep(0.35)
+                        time.sleep(0.25)
                         _restart_mrd_and_connect(enable_multimon=False, target_sess=target_sess)
                         _RDP_CLOSER_DIAG["last_reconnect"] = f"downgraded_1mon:{target_sess}@{time.strftime('%H:%M:%S')}"
                     finally:
                         _RDP_RECONNECT_UNTIL = time.monotonic() + 0.6
                     return
 
-                # Nếu không có phiên nào đang mở, khởi động lại ngầm MRD nếu đang chạy không để xả cache CoreData cũ
-                if rpid > 0 and not sess:
-                    try:
-                        with objc.autorelease_pool():
-                            rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rpid)
-                            if rapp is not None:
-                                rapp.terminate()
-                        time.sleep(0.45)
-                        sync_mrd_bookmark_multimon(False)
-                    except Exception:
-                        pass
-                _RDP_CLOSER_DIAG["last_reconnect"] = f"set_1mon@{time.strftime('%H:%M:%S')}"
+                # Chỉ ghi bookmark khi không có phiên đang mở (đóng sạch MRD trước để không đụng CoreData cache)
+                if not sess:
+                    if _find_live_mrd_pids():
+                        _quit_mrd_cleanly()
+                    sync_mrd_bookmark_multimon(False)
+                    _RDP_CLOSER_DIAG["last_reconnect"] = f"set_1mon@{time.strftime('%H:%M:%S')}"
                 return
 
             if not upgrade_running:
-                _RDP_CLOSER_DIAG["last_reconnect"] = f"set_2mon_idle@{time.strftime('%H:%M:%S')}"
+                _, sess_idle, _ = _rdp_probe_vdisp_state()
+                if not sess_idle:
+                    if _find_live_mrd_pids():
+                        _quit_mrd_cleanly()
+                    sync_mrd_bookmark_multimon(True)
+                    _RDP_CLOSER_DIAG["last_reconnect"] = f"set_2mon_idle@{time.strftime('%H:%M:%S')}"
                 return
 
             now_m = time.monotonic()
@@ -6265,16 +6384,9 @@ def trigger_smart_rdp_multimon_sync(
 
             rpid, sess, has_vdisp = _rdp_probe_vdisp_state()
             if not sess:
-                if rpid > 0:
-                    try:
-                        with objc.autorelease_pool():
-                            rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rpid)
-                            if rapp is not None:
-                                rapp.terminate()
-                        time.sleep(0.5)
-                        sync_mrd_bookmark_multimon(True)
-                    except Exception:
-                        pass
+                if _find_live_mrd_pids():
+                    _quit_mrd_cleanly()
+                sync_mrd_bookmark_multimon(True)
                 _RDP_CLOSER_DIAG["last_reconnect"] = f"ready_2mon_no_sess@{time.strftime('%H:%M:%S')}"
                 return
             if has_vdisp:
@@ -6282,7 +6394,7 @@ def trigger_smart_rdp_multimon_sync(
                 return
 
             target_sess = sess[0] if sess else default_title
-            _RDP_RECONNECT_UNTIL = time.monotonic() + 7.5
+            _RDP_RECONNECT_UNTIL = time.monotonic() + 8.5
             try:
                 _restart_mrd_and_connect(enable_multimon=True, target_sess=target_sess)
                 _RDP_CLOSER_DIAG["last_reconnect"] = f"upgraded_2mon:{target_sess}@{time.strftime('%H:%M:%S')}"
@@ -6611,17 +6723,6 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                             en = _get_bool(m_el, s_enabled)
                                             if len(dbg) < 40:
                                                 dbg.append(f"{bt}:{mt_raw}[m={mk}|e={int(en)}]")
-                                            if en and not mk and (
-                                                "fit session to window" in mt_l
-                                                or "fit to window" in mt_l
-                                                or "scale to fit" in mt_l
-                                                or "dynamic resolution" in mt_l
-                                            ):
-                                                rc_f = ax.AXUIElementPerformAction(m_el, s_press)
-                                                if rc_f == 0:
-                                                    _RDP_CLOSER_DIAG["last_action"] = f"fit:{mt_raw}@{time.strftime('%H:%M:%S')}"
-                                                    _RDP_CLOSER_DIAG["win_menu_debug"] = dbg
-                                                    return True
                                     finally:
                                         cf.CFRelease(items_arr.value)
                                 finally:
@@ -6855,7 +6956,7 @@ if __name__ == "__main__":
     check_macos_screen_recording(prompt=True)
     start_notification_auto_dismisser(max_seconds=4.0)
     start_clipboard_retina_normalizer(poll_sec=0.25)
-    trigger_smart_rdp_multimon_sync(enable_multimon=False, upgrade_running=False)
+    trigger_smart_rdp_multimon_sync(enable_multimon=False, upgrade_running=False, repair_clamped=True)
     start_rdp_launcher_auto_closer(poll_sec=0.15)
     start_git_auto_updater(check_every_sec=45.0)
     banner_ips = detect_network_ips()
