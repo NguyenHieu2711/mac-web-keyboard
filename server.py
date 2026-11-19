@@ -5734,7 +5734,7 @@ def _list_mrd_bookmarks() -> List[Tuple[str, str]]:
     try:
         rc = subprocess.run(
             [mrd_bin, "--script", "bookmark", "list"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=6.0,
         )
         out_txt = (rc.stdout or "") + "\n" + (rc.stderr or "")
         for m in re.finditer(r'"([^"]+)",\s*([0-9A-Fa-f-]{36})', out_txt):
@@ -5779,7 +5779,7 @@ def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bo
         _, buuid = bookmarks[0]
         rc_ex = subprocess.run(
             [mrd_bin, "--script", "bookmark", "export", buuid],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=6.0,
         )
         ex_txt = (rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")
         if "full address:s:" not in ex_txt.lower():
@@ -6365,85 +6365,90 @@ def trigger_smart_rdp_multimon_sync(
     def _worker() -> None:
         global _RDP_RECONNECT_UNTIL, _LAST_MULTIMON_UPGRADE_AT
 
-        with _SMART_MULTIMON_LOCK:
-            bookmarks = _list_mrd_bookmarks()
-            default_title = bookmarks[0][0] if bookmarks else "PC Hieu"
+        try:
+            with _SMART_MULTIMON_LOCK:
+                bookmarks = _list_mrd_bookmarks()
+                default_title = bookmarks[0][0] if bookmarks else "PC Hieu"
+                _RDP_CLOSER_DIAG["worker_trace"] = f"start:mm={int(enable_multimon)},up={int(upgrade_running)},dn={int(downgrade_running)},rep={int(repair_clamped)},bmk={len(bookmarks)}"
 
-            if not enable_multimon:
-                rpid, sess, _ = _rdp_probe_vdisp_state()
-                need_downgrade = bool(downgrade_running and sess)
-                if not need_downgrade and repair_clamped and sess:
-                    if _bookmark_needs_retina_or_dyn_repair(bookmarks):
-                        need_downgrade = True
-                    else:
-                        ok_m, cw, ch = _apply_full_mac_window_bounds(rpid, sess[0])
-                        if ok_m and ch >= 880.0 and 400.0 < cw <= 1492.0:
+                if not enable_multimon:
+                    rpid, sess, _ = _rdp_probe_vdisp_state()
+                    need_downgrade = bool(downgrade_running and sess)
+                    if not need_downgrade and repair_clamped and sess:
+                        if _bookmark_needs_retina_or_dyn_repair(bookmarks):
                             need_downgrade = True
+                        else:
+                            ok_m, cw, ch = _apply_full_mac_window_bounds(rpid, sess[0])
+                            if ok_m and ch >= 880.0 and 400.0 < cw <= 1492.0:
+                                need_downgrade = True
+                    _RDP_CLOSER_DIAG["worker_trace"] += f"|rpid={rpid},sess={len(sess)},nd={int(need_downgrade)}"
 
-                if need_downgrade and sess:
-                    now_d = time.monotonic()
-                    if (now_d - _LAST_MULTIMON_UPGRADE_AT) < 4.5:
+                    if need_downgrade and sess:
+                        now_d = time.monotonic()
+                        if (now_d - _LAST_MULTIMON_UPGRADE_AT) < 4.5:
+                            return
+                        _LAST_MULTIMON_UPGRADE_AT = now_d
+                        target_sess = sess[0] if sess else default_title
+                        _RDP_RECONNECT_UNTIL = time.monotonic() + 9.5
+                        try:
+                            time.sleep(0.25)
+                            _restart_mrd_and_connect(enable_multimon=False, target_sess=target_sess)
+                            _RDP_CLOSER_DIAG["last_reconnect"] = f"downgraded_1mon:{target_sess}@{time.strftime('%H:%M:%S')}"
+                        finally:
+                            _RDP_RECONNECT_UNTIL = time.monotonic() + 0.6
                         return
-                    _LAST_MULTIMON_UPGRADE_AT = now_d
-                    target_sess = sess[0] if sess else default_title
-                    _RDP_RECONNECT_UNTIL = time.monotonic() + 8.5
-                    try:
-                        time.sleep(0.25)
-                        _restart_mrd_and_connect(enable_multimon=False, target_sess=target_sess)
-                        _RDP_CLOSER_DIAG["last_reconnect"] = f"downgraded_1mon:{target_sess}@{time.strftime('%H:%M:%S')}"
-                    finally:
-                        _RDP_RECONNECT_UNTIL = time.monotonic() + 0.6
+
+                    # Chỉ ghi bookmark khi không có phiên đang mở (đóng sạch MRD trước để không đụng CoreData cache)
+                    if not sess:
+                        if _find_live_mrd_pids():
+                            _quit_mrd_cleanly()
+                        sync_mrd_bookmark_multimon(False)
+                        _RDP_CLOSER_DIAG["last_reconnect"] = f"set_1mon@{time.strftime('%H:%M:%S')}"
                     return
 
-                # Chỉ ghi bookmark khi không có phiên đang mở (đóng sạch MRD trước để không đụng CoreData cache)
+                if not upgrade_running:
+                    _, sess_idle, _ = _rdp_probe_vdisp_state()
+                    if not sess_idle:
+                        if _find_live_mrd_pids():
+                            _quit_mrd_cleanly()
+                        sync_mrd_bookmark_multimon(True)
+                        _RDP_CLOSER_DIAG["last_reconnect"] = f"set_2mon_idle@{time.strftime('%H:%M:%S')}"
+                    return
+
+                now_m = time.monotonic()
+                if (now_m - _LAST_MULTIMON_UPGRADE_AT) < 5.0:
+                    return
+                _LAST_MULTIMON_UPGRADE_AT = now_m
+
+                # Chờ Phone Display đăng ký xong với WindowServer
+                for _ in range(12):
+                    if mac_vdisp is not None and mac_vdisp.is_active():
+                        break
+                    time.sleep(0.15)
+                time.sleep(0.55)
+                if mac_vdisp is None or not mac_vdisp.is_active():
+                    return
+
+                rpid, sess, has_vdisp = _rdp_probe_vdisp_state()
                 if not sess:
                     if _find_live_mrd_pids():
                         _quit_mrd_cleanly()
-                    sync_mrd_bookmark_multimon(False)
-                    _RDP_CLOSER_DIAG["last_reconnect"] = f"set_1mon@{time.strftime('%H:%M:%S')}"
-                return
-
-            if not upgrade_running:
-                _, sess_idle, _ = _rdp_probe_vdisp_state()
-                if not sess_idle:
-                    if _find_live_mrd_pids():
-                        _quit_mrd_cleanly()
                     sync_mrd_bookmark_multimon(True)
-                    _RDP_CLOSER_DIAG["last_reconnect"] = f"set_2mon_idle@{time.strftime('%H:%M:%S')}"
-                return
+                    _RDP_CLOSER_DIAG["last_reconnect"] = f"ready_2mon_no_sess@{time.strftime('%H:%M:%S')}"
+                    return
+                if has_vdisp and not _bookmark_needs_retina_or_dyn_repair(bookmarks):
+                    _RDP_CLOSER_DIAG["last_reconnect"] = f"already_2mon@{time.strftime('%H:%M:%S')}"
+                    return
 
-            now_m = time.monotonic()
-            if (now_m - _LAST_MULTIMON_UPGRADE_AT) < 5.0:
-                return
-            _LAST_MULTIMON_UPGRADE_AT = now_m
-
-            # Chờ Phone Display đăng ký xong với WindowServer
-            for _ in range(12):
-                if mac_vdisp is not None and mac_vdisp.is_active():
-                    break
-                time.sleep(0.15)
-            time.sleep(0.55)
-            if mac_vdisp is None or not mac_vdisp.is_active():
-                return
-
-            rpid, sess, has_vdisp = _rdp_probe_vdisp_state()
-            if not sess:
-                if _find_live_mrd_pids():
-                    _quit_mrd_cleanly()
-                sync_mrd_bookmark_multimon(True)
-                _RDP_CLOSER_DIAG["last_reconnect"] = f"ready_2mon_no_sess@{time.strftime('%H:%M:%S')}"
-                return
-            if has_vdisp:
-                _RDP_CLOSER_DIAG["last_reconnect"] = f"already_2mon@{time.strftime('%H:%M:%S')}"
-                return
-
-            target_sess = sess[0] if sess else default_title
-            _RDP_RECONNECT_UNTIL = time.monotonic() + 8.5
-            try:
-                _restart_mrd_and_connect(enable_multimon=True, target_sess=target_sess)
-                _RDP_CLOSER_DIAG["last_reconnect"] = f"upgraded_2mon:{target_sess}@{time.strftime('%H:%M:%S')}"
-            finally:
-                _RDP_RECONNECT_UNTIL = time.monotonic() + 0.8
+                target_sess = sess[0] if sess else default_title
+                _RDP_RECONNECT_UNTIL = time.monotonic() + 9.5
+                try:
+                    _restart_mrd_and_connect(enable_multimon=True, target_sess=target_sess)
+                    _RDP_CLOSER_DIAG["last_reconnect"] = f"upgraded_2mon:{target_sess}@{time.strftime('%H:%M:%S')}"
+                finally:
+                    _RDP_RECONNECT_UNTIL = time.monotonic() + 0.8
+        except Exception as w_exc:
+            _RDP_CLOSER_DIAG["last_err"] = f"smart_worker:{repr(w_exc)[:140]}"
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -6556,6 +6561,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                 main_b = q.CGDisplayBounds(q.CGMainDisplayID())
                 main_x = float(main_b.origin.x)
                 main_w = float(main_b.size.width)
+                main_h = float(main_b.size.height)
 
                 rdp_pid = 0
                 rdp_app = None
@@ -6885,8 +6891,10 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                         has_fs_session = True
                                     elif sub_s == "AXStandardWindow":
                                         has_windowed_session = True
-                                        # Phát hiện cửa sổ bị ép ngang 2 màn hình chia đôi (VD: 1511x459, tỷ lệ ~3.3:1) sau khi thoát Full-Screen!
+                                        # Phát hiện cửa sổ bị ép ngang 2 màn hình chia đôi (VD: 1511x459) hoặc bị khóa tỷ lệ hở lề phải 45px (VD: 1467x944 khi mất dynamicdisplay)!
                                         if sw >= 800.0 and sh > 120.0 and sw >= sh * 2.15:
+                                            has_squished_2mon_window = True
+                                        elif sh >= (main_h - 50.0) and (main_w - 65.0) <= sw <= (main_w - 25.0):
                                             has_squished_2mon_window = True
                                 if (
                                     not is_fs
