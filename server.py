@@ -5963,7 +5963,7 @@ def _get_secondary_mac_display_bounds(quartz: Any = None) -> Optional[Dict[str, 
 
 
 def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bool:
-    """Kiểm tra trực tiếp qua bookmark export xem --retina (forcehidpioptimizations=1), --dynamicdisplay (dynamic resolution=1), hoặc --scaling (smart sizing=0) đã chuẩn chưa."""
+    """Kiểm tra trực tiếp qua bookmark export xem --retina (forcehidpioptimizations=1) và --dynamicdisplay (dynamic resolution=1) đã chuẩn chưa."""
     if not IS_MACOS or not bookmarks:
         return False
     mrd_bin, _ = _get_mrd_cli_info()
@@ -5980,17 +5980,43 @@ def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bo
             return False
         has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
         has_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
-        zero_w_in_1mon = (_get_secondary_mac_display_bounds(None) is None) and bool(re.search(r"desktopwidth:i:0\b", ex_txt, re.IGNORECASE))
-        return (not has_retina) or (not has_dyn) or zero_w_in_1mon
+        return (not has_retina) or (not has_dyn)
+    except Exception:
+        return False
+
+
+def _bookmark_already_matches(bookmarks: List[Tuple[str, str]], want_multimon: bool) -> bool:
+    """Kiểm tra bookmark đã khớp đúng chế độ 1 màn / 2 màn + Retina + Dynamic Display chưa để KHÔNG ghi lại bookmark hay tắt MRD vô ích."""
+    if not IS_MACOS or not bookmarks:
+        return False
+    mrd_bin, _ = _get_mrd_cli_info()
+    if not mrd_bin:
+        return False
+    try:
+        _, buuid = bookmarks[0]
+        rc_ex = subprocess.run(
+            [mrd_bin, "--script", "bookmark", "export", buuid],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=4.0,
+        )
+        ex_txt = (rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")
+        if "full address:s:" not in ex_txt.lower():
+            return False
+        has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
+        has_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
+        mm_val = 1 if want_multimon else 0
+        sm_val = 2 if want_multimon else 1
+        has_mm = bool(re.search(rf"use multimon:i:{mm_val}\b", ex_txt, re.IGNORECASE))
+        has_sm = bool(re.search(rf"screen mode id:i:{sm_val}\b", ex_txt, re.IGNORECASE))
+        return has_retina and has_dyn and has_mm and has_sm
     except Exception:
         return False
 
 
 def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
-    """Dùng CLI chính chủ --script bookmark write của Microsoft Remote Desktop (chỉ gọi khi MRD đã đóng sạch):
-    - Luôn giữ BẬT --retina true (Optimize for Retina displays) + --dynamicdisplay true (Update session resolution on resize, xóa sạch lề phải 45px 1467x944) + --scaling true + --colordepth 32.
-    - Khi Màn phụ Mac ĐANG BẬT: bật --useallmonitors true --fullscreen true (nhận đủ 2 màn Retina, đẩy Obsidian sang ĐT).
-    - Khi Màn phụ Mac ĐANG TẮT: trả về --useallmonitors false --fullscreen false (mở cửa sổ Retina 1512x944 khít 100% màn MacBook)."""
+    """Dùng CLI chính chủ --script bookmark write của Microsoft Remote Desktop (chỉ gọi khi thực sự đổi 1<->2 màn và MRD đã đóng sạch):
+    - Luôn giữ BẬT --retina true + --dynamicdisplay true + --scaling false + --colordepth 32.
+    - Khi có màn phụ (2 màn): --useallmonitors true --fullscreen true.
+    - Khi chỉ 1 màn: --useallmonitors false --fullscreen false."""
     if not IS_MACOS:
         return []
     mrd_bin, _ = _get_mrd_cli_info()
@@ -6018,20 +6044,6 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
                 "--scaling", "false",
                 "--colordepth", "32",
             ]
-            if not enable_multimon:
-                win_ret_w, win_ret_h = 3024, 1832
-                try:
-                    q_loc = injector._quartz
-                    if q_loc is None:
-                        import Quartz as q_loc  # type: ignore
-                    mb_loc = q_loc.CGDisplayBounds(q_loc.CGMainDisplayID())
-                    mw_l, mh_l = float(mb_loc.size.width), float(mb_loc.size.height)
-                    if mw_l >= 800.0 and mh_l >= 600.0:
-                        win_ret_w = int(round(mw_l * 2.0))
-                        win_ret_h = int(round(max(500.0, mh_l - 66.0) * 2.0))
-                except Exception:
-                    pass
-                preserve_flags += ["--resolution", f"{win_ret_w} {win_ret_h}"]
             if re.search(r"audiocapturemode:i:1", ex_txt, re.IGNORECASE):
                 preserve_flags += ["--redirectmicrophones", "true"]
             if re.search(r"camerastoredirect:s:[^\r\n]+", ex_txt, re.IGNORECASE):
@@ -6107,7 +6119,8 @@ def _rdp_probe_vdisp_state() -> Tuple[int, List[str], bool]:
             wh = float(wb.get("Height", 0))
             wname = str(w.get("kCGWindowName", "") or "").strip()
             wl = wname.lower()
-            if not wname or ww < 320.0 or wh < 220.0:
+            # Ngưỡng >= 620x360 để KHÔNG BAO GIỜ nhận nhầm hộp Connecting (550x184) hoặc bảng mật khẩu (550x320) là phiên đã mở!
+            if not wname or ww < 620.0 or wh < 360.0:
                 continue
             if wl in launcher_set or any(k in wl for k in dialog_kw):
                 continue
@@ -6717,10 +6730,9 @@ def trigger_smart_rdp_multimon_sync(
                             _RDP_RECONNECT_UNTIL = time.monotonic() + 2.5
                         return
 
-                    # Chỉ ghi bookmark khi thực sự đang ở chế độ 2 màn cũ hoặc mất cờ Retina/Dynamic Display
+                    # Chỉ ghi bookmark khi thực sự đang ở chế độ 2 màn cũ (KHÔNG đụng MRD nếu bookmark đã đúng 1 màn!)
                     if not sess:
-                        need_bmk_fix = (_RDP_CLOSER_DIAG.get("multimon_bookmark") is not False) or _bookmark_needs_retina_or_dyn_repair(bookmarks)
-                        if need_bmk_fix:
+                        if not _bookmark_already_matches(bookmarks, want_multimon=False):
                             had_live = bool(_find_live_mrd_pids())
                             if had_live:
                                 _quit_mrd_cleanly()
@@ -6732,7 +6744,7 @@ def trigger_smart_rdp_multimon_sync(
 
                 if not upgrade_running:
                     _, sess_idle, _ = _rdp_probe_vdisp_state()
-                    if not sess_idle:
+                    if not sess_idle and not _bookmark_already_matches(bookmarks, want_multimon=True):
                         if _find_live_mrd_pids():
                             _quit_mrd_cleanly()
                         sync_mrd_bookmark_multimon(True)
@@ -6755,14 +6767,15 @@ def trigger_smart_rdp_multimon_sync(
 
                 rpid, sess, has_vdisp = _rdp_probe_vdisp_state()
                 if not sess:
-                    had_live_mrd = bool(_find_live_mrd_pids())
-                    if had_live_mrd:
-                        _quit_mrd_cleanly()
-                    sync_mrd_bookmark_multimon(True)
-                    if had_live_mrd:
-                        _, app_name = _get_mrd_cli_info()
-                        if app_name:
-                            subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if not _bookmark_already_matches(bookmarks, want_multimon=True):
+                        had_live_mrd = bool(_find_live_mrd_pids())
+                        if had_live_mrd:
+                            _quit_mrd_cleanly()
+                        sync_mrd_bookmark_multimon(True)
+                        if had_live_mrd:
+                            _, app_name = _get_mrd_cli_info()
+                            if app_name:
+                                subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     _RDP_CLOSER_DIAG["last_reconnect"] = f"ready_2mon_no_sess@{time.strftime('%H:%M:%S')}"
                     return
                 if has_vdisp and not _bookmark_needs_retina_or_dyn_repair(bookmarks):
@@ -6857,28 +6870,37 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
             try:
                 q = injector._quartz
                 if q is not None:
-                    cur_sec_disp = (_get_secondary_mac_display_bounds(q) is not None)
-                    _RDP_CLOSER_DIAG["sec_display_active"] = cur_sec_disp
-                    if prev_sec_disp is None:
-                        prev_sec_disp = cur_sec_disp
-                    elif cur_sec_disp != prev_sec_disp:
-                        if sec_disp_flip_at <= 0.0:
-                            sec_disp_flip_at = time.monotonic()
-                        elif (time.monotonic() - sec_disp_flip_at) >= 0.30:
+                    # Bỏ qua lúc màn hình MacBook đang khóa (Display Shield -> CGGetActiveDisplayList trả 0 màn)
+                    active_cnt = 1
+                    try:
+                        res_dl = q.CGGetActiveDisplayList(8, None, None)
+                        if isinstance(res_dl, tuple) and len(res_dl) == 3 and res_dl[0] == 0:
+                            active_cnt = int(res_dl[2])
+                    except Exception:
+                        active_cnt = 1
+                    if active_cnt > 0 or (mac_vdisp is not None and mac_vdisp.is_active()):
+                        cur_sec_disp = (_get_secondary_mac_display_bounds(q) is not None)
+                        _RDP_CLOSER_DIAG["sec_display_active"] = cur_sec_disp
+                        if prev_sec_disp is None:
                             prev_sec_disp = cur_sec_disp
+                        elif cur_sec_disp != prev_sec_disp:
+                            if sec_disp_flip_at <= 0.0:
+                                sec_disp_flip_at = time.monotonic()
+                            elif (time.monotonic() - sec_disp_flip_at) >= 0.30:
+                                prev_sec_disp = cur_sec_disp
+                                sec_disp_flip_at = 0.0
+                                if cur_sec_disp:
+                                    # Vừa kết nối điện thoại làm màn hình phụ (1 màn -> 2 màn) -> tự reload phiên Remote đang mở!
+                                    trigger_smart_rdp_multimon_sync(enable_multimon=True, upgrade_running=True)
+                                else:
+                                    # Vừa ngắt màn hình phụ điện thoại (2 màn -> 1 màn) -> tự reload phiên Remote về lại 1 cửa sổ MacBook!
+                                    trigger_smart_rdp_multimon_sync(
+                                        enable_multimon=False,
+                                        upgrade_running=False,
+                                        downgrade_running=True,
+                                    )
+                        else:
                             sec_disp_flip_at = 0.0
-                            if cur_sec_disp:
-                                # Vừa kết nối điện thoại làm màn hình phụ (1 màn -> 2 màn) -> tự reload phiên Remote đang mở!
-                                trigger_smart_rdp_multimon_sync(enable_multimon=True, upgrade_running=True)
-                            else:
-                                # Vừa ngắt màn hình phụ điện thoại (2 màn -> 1 màn) -> tự reload phiên Remote về lại 1 cửa sổ MacBook!
-                                trigger_smart_rdp_multimon_sync(
-                                    enable_multimon=False,
-                                    upgrade_running=False,
-                                    downgrade_running=True,
-                                )
-                    else:
-                        sec_disp_flip_at = 0.0
 
                 if time.monotonic() < _RDP_RECONNECT_UNTIL:
                     continue
@@ -6956,7 +6978,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                             all_has_dialog = True
                         elif wname_l in launcher_titles:
                             all_has_launcher = True
-                        elif wname_raw and ww >= 320.0 and wh >= 220.0:
+                        elif wname_raw and ww >= 620.0 and wh >= 360.0:
                             rdp_pid = pid_w
                             if wname_l not in session_titles_lower:
                                 session_titles_lower.add(wname_l)
@@ -6995,20 +7017,19 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                 _RDP_CLOSER_DIAG["launcher_seen"] = bool(all_has_launcher or all_has_unnamed_big)
 
                 if not session_titles:
-                    if prev_had_sessions and (_get_secondary_mac_display_bounds(q) is None):
-                        trigger_smart_rdp_multimon_sync(enable_multimon=False, upgrade_running=False)
                     prev_had_sessions = False
                     session_first_seen_at = 0.0
                     continue
                 prev_had_sessions = True
                 if session_first_seen_at <= 0.0:
                     session_first_seen_at = now_m
-                if all_has_dialog or (now_m - session_first_seen_at) < 0.25:
+                if all_has_dialog or (now_m - session_first_seen_at) < 0.35:
                     continue
 
                 want_check_close = (
                     (all_has_launcher or all_has_unnamed_big)
-                    and (now_m - last_close_try_at) >= 0.45
+                    and (now_m - session_first_seen_at) >= 1.8
+                    and (now_m - last_close_try_at) >= 0.55
                 )
                 want_check_jump = (
                     front_pid == rdp_pid
@@ -7254,13 +7275,13 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                     and title_l not in session_titles_lower
                                     and (
                                         title_l in launcher_titles
-                                        or (title_l == "" and sw >= 500.0 and sh >= 320.0)
+                                        or (title_l == "" and 680.0 <= sw <= 980.0 and 480.0 <= sh <= 720.0)
                                     )
                                 ):
                                     launcher_wins.append((w_ax, title_raw or "<empty>"))
 
                             _RDP_CLOSER_DIAG["last_ax_wins"] = ax_summary[:10]
-                            if not ax_has_dialog and launcher_wins and (now_m - last_close_try_at) >= 0.45:
+                            if not ax_has_dialog and launcher_wins and (now_m - session_first_seen_at) >= 1.8 and (now_m - last_close_try_at) >= 0.55:
                                 last_close_try_at = now_m
                                 for lw, ltitle in launcher_wins:
                                     btn_ref = ctypes.c_void_p()
@@ -7354,7 +7375,7 @@ if __name__ == "__main__":
     trigger_smart_rdp_multimon_sync(
         enable_multimon=_init_has_2mon,
         upgrade_running=_init_has_2mon,
-        repair_clamped=(not _init_has_2mon),
+        repair_clamped=False,
     )
     start_rdp_launcher_auto_closer(poll_sec=0.15)
     start_git_auto_updater(check_every_sec=45.0)
