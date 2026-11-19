@@ -1460,8 +1460,12 @@ class KeyboardInjector:
             iy,
             ix,
         )
-        # kCGScrollWheelEventIsContinuous = 88: đánh dấu cuộn mượt từng pixel chuẩn Trackpad (tắt nhảy nấc 3 dòng của chuột cơ)
+        # kCGScrollWheelEventIsContinuous = 88, PointDelta = 96/97, ScrollPhase = 99 (2=Changed):
+        # Giả lập đúng 100% Apple Magic Trackpad gốc để Mos không chặn/nuốt xung cuộn nhỏ và Microsoft Remote Desktop nhận mượt từng pixel!
         q.CGEventSetIntegerValueField(ev, 88, 1)
+        q.CGEventSetIntegerValueField(ev, 96, iy)
+        q.CGEventSetIntegerValueField(ev, 97, ix)
+        q.CGEventSetIntegerValueField(ev, 99, 2)
         if self.held_modifiers:
             q.CGEventSetFlags(ev, self._compute_quartz_flags())
         q.CGEventPost(q.kCGHIDEventTap, ev)
@@ -4333,11 +4337,12 @@ def _dispatch_parallel_rdp_input(
         elif mtype == "ptr_wheel":
             _activate_mac_pid_if_needed(pid)
             q.CGWarpMouseCursorPosition((sx, sy))
+            phase = int(data.get("phase", 2) or 2)
             now_w = time.monotonic()
             last_wx = float(state.get("last_wheel_sx", -9999.0))
             last_wy = float(state.get("last_wheel_sy", -9999.0))
             last_wt = float(state.get("last_wheel_ev_at", 0.0))
-            if (now_w - last_wt) > 0.12 or abs(sx - last_wx) > 2.0 or abs(sy - last_wy) > 2.0:
+            if phase == 1 or (now_w - last_wt) > 0.12 or abs(sx - last_wx) > 2.0 or abs(sy - last_wy) > 2.0:
                 state["last_wheel_sx"] = sx
                 state["last_wheel_sy"] = sy
                 mv = q.CGEventCreateMouseEvent(
@@ -4353,14 +4358,23 @@ def _dispatch_parallel_rdp_input(
             wy_d = int(round(acc_y)) if abs(acc_y) >= 1.0 else 0
             state["wheel_rem_x"] = acc_x - wx_d
             state["wheel_rem_y"] = acc_y - wy_d
-            if wx_d == 0 and wy_d == 0:
+            if wx_d == 0 and wy_d == 0 and phase != 4:
                 return
 
             ev = q.CGEventCreateScrollWheelEvent(
                 injector._event_source, q.kCGScrollEventUnitPixel, 2, wy_d, wx_d
             )
-            # kCGScrollWheelEventIsContinuous = 88: chuẩn Trackpad macOS (đi xuyên qua Mos và Microsoft Remote Desktop mượt)
+            # Đầy đủ chữ ký Apple Magic Trackpad (IsContinuous=88, PointDelta=96/97, ScrollPhase=99, MomentumPhase=123)
+            # để Mos (PID 775) nhận diện đúng là Trackpad thật (không triệt tiêu xung nhỏ) và Microsoft Remote Desktop cuộn mượt tức thì!
             q.CGEventSetIntegerValueField(ev, 88, 1)
+            q.CGEventSetIntegerValueField(ev, 96, wy_d)
+            q.CGEventSetIntegerValueField(ev, 97, wx_d)
+            if phase == 8:
+                q.CGEventSetIntegerValueField(ev, 99, 0)
+                q.CGEventSetIntegerValueField(ev, 123, 2)
+            else:
+                q.CGEventSetIntegerValueField(ev, 99, phase if phase in (1, 2, 4) else 2)
+                q.CGEventSetIntegerValueField(ev, 123, 0)
             try:
                 q.CGEventSetLocation(ev, (sx, sy))
             except Exception:
@@ -4892,12 +4906,116 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
         bh = float(b["content_h"])
         return (bx <= px < bx + bw) and (by <= py < by + bh)
 
+    def _resolve_vdisp_top_pid(px: float, py: float, b: Dict[str, Any], state: Dict[str, Any]) -> int:
+        q = injector._quartz
+        if q is None:
+            return 0
+        now_p = time.monotonic()
+        if (now_p - float(state.get("hit_pid_at", 0.0))) < 0.35 and int(state.get("hit_pid", 0)) > 0:
+            return int(state["hit_pid"])
+        found_pid = 0
+        try:
+            import objc  # type: ignore
+            with objc.autorelease_pool():
+                wlist = q.CGWindowListCopyWindowInfo(
+                    q.kCGWindowListOptionOnScreenOnly | q.kCGWindowListExcludeDesktopElements,
+                    q.kCGNullWindowID,
+                ) or []
+                for w in wlist:
+                    if int(w.get("kCGWindowLayer", -1)) != 0:
+                        continue
+                    wb = w.get("kCGWindowBounds") or {}
+                    wx = float(wb.get("X", 0))
+                    wy = float(wb.get("Y", 0))
+                    ww = float(wb.get("Width", 0))
+                    wh = float(wb.get("Height", 0))
+                    if ww >= 120.0 and wh >= 80.0 and (wx <= px < wx + ww) and (wy <= py < wy + wh):
+                        found_pid = int(w.get("kCGWindowOwnerPID", 0) or 0)
+                        break
+        except Exception:
+            found_pid = 0
+        state["hit_pid"] = found_pid
+        state["hit_pid_at"] = now_p
+        return found_pid
+
+    def _focus_vdisp_window_for_scroll(target_pid: int, b: Dict[str, Any]) -> None:
+        """Cấp focus cửa sổ Màn phụ #2 qua AXMain/AXFocused (không click chuột giả) để Microsoft Remote Desktop nhận sự kiện cuộn ngay cả khi trước đó đang gõ trên MacBook."""
+        if target_pid <= 0 or mac_vdisp is None or not mac_vdisp._init_ax_libs():
+            return
+        try:
+            import ctypes
+            from mac_virtual_display import _CGPoint, _CGSize
+            ax = mac_vdisp._ax_lib
+            cf = mac_vdisp._cf_lib
+            app_ax = ax.AXUIElementCreateApplication(target_pid)
+            if not app_ax:
+                return
+            bx, by, bw, bh = float(b["content_x"]), float(b["content_y"]), float(b["content_w"]), float(b["content_h"])
+            sw_k = cf.CFStringCreateWithCString(None, b"AXWindows", 0x08000100)
+            sp_k = cf.CFStringCreateWithCString(None, b"AXPosition", 0x08000100)
+            ss_k = cf.CFStringCreateWithCString(None, b"AXSize", 0x08000100)
+            sm_k = cf.CFStringCreateWithCString(None, b"AXMain", 0x08000100)
+            sf_k = cf.CFStringCreateWithCString(None, b"AXFocused", 0x08000100)
+            kTrue = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
+            try:
+                wr = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(app_ax, sw_k, ctypes.byref(wr)) == 0 and wr.value:
+                    try:
+                        for wi in range(cf.CFArrayGetCount(wr.value)):
+                            wel = cf.CFArrayGetValueAtIndex(wr.value, wi)
+                            if not wel:
+                                continue
+                            pr, sr = ctypes.c_void_p(), ctypes.c_void_p()
+                            in_v = False
+                            if (
+                                ax.AXUIElementCopyAttributeValue(wel, sp_k, ctypes.byref(pr)) == 0 and pr.value
+                                and ax.AXUIElementCopyAttributeValue(wel, ss_k, ctypes.byref(sr)) == 0 and sr.value
+                            ):
+                                pt, sz = _CGPoint(), _CGSize()
+                                if ax.AXValueGetValue(pr.value, 1, ctypes.byref(pt)) and ax.AXValueGetValue(sr.value, 2, ctypes.byref(sz)):
+                                    cx_w, cy_w = pt.x + sz.w * 0.5, pt.y + sz.h * 0.5
+                                    in_v = (bx <= cx_w < bx + bw) and (by <= cy_w < by + bh)
+                            if pr.value:
+                                cf.CFRelease(pr.value)
+                            if sr.value:
+                                cf.CFRelease(sr.value)
+                            if in_v:
+                                ax.AXUIElementSetAttributeValue(wel, sm_k, kTrue)
+                                ax.AXUIElementSetAttributeValue(wel, sf_k, kTrue)
+                                break
+                    finally:
+                        cf.CFRelease(wr.value)
+            finally:
+                cf.CFRelease(app_ax)
+                for kr in (sw_k, sp_k, ss_k, sm_k, sf_k):
+                    if kr:
+                        cf.CFRelease(kr)
+        except Exception:
+            pass
+
     def _dispatch_mac_ext_touch(b: Dict[str, Any], data: Dict[str, Any], state: Dict[str, Any]) -> None:
         """Tách biệt cảm ứng trên Màn phụ với con trỏ chuột MacBook:
         Nếu chuột vật lý đang ở màn chính MacBook, chạm/cuộn trên điện thoại xong sẽ tự trả
         con trỏ về đúng vị trí cũ trên MacBook để không bao giờ bị cướp chuột."""
         q = injector._quartz
         mtype = str(data.get("type", ""))
+        target_b = b
+        if q is not None and mtype in ("ptr_down", "ptr_wheel"):
+            rx_h = max(0.0, min(1.0, float(data.get("rx", 0.5))))
+            ry_h = max(0.0, min(1.0, float(data.get("ry", 0.5))))
+            hx = float(b["content_x"]) + rx_h * float(b["content_w"])
+            hy = float(b["content_y"]) + ry_h * float(b["content_h"])
+            hit_pid = _resolve_vdisp_top_pid(hx, hy, b, state)
+            if hit_pid > 0:
+                target_b = dict(b)
+                target_b["pid"] = hit_pid
+                if mtype == "ptr_wheel" and (int(data.get("phase", 2) or 2) == 1 or state.get("focused_scroll_pid") != hit_pid):
+                    state["focused_scroll_pid"] = hit_pid
+                    _activate_mac_pid_if_needed(hit_pid)
+                    _focus_vdisp_window_for_scroll(hit_pid, b)
+                elif mtype == "ptr_down":
+                    state["focused_scroll_pid"] = hit_pid
+
         if q is not None and mtype == "ptr_down":
             cur_xy = _get_mac_cursor_xy()
             if cur_xy is not None and not _is_inside_vdisp(cur_xy[0], cur_xy[1], b):
@@ -4913,7 +5031,7 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
                     state["touch_busy"] = True
             state["last_wheel_at"] = time.monotonic()
 
-        _dispatch_parallel_rdp_input(b, data, state)
+        _dispatch_parallel_rdp_input(target_b, data, state)
 
         if q is not None and mtype == "ptr_up":
             rpos = state.pop("restore_pos", None)

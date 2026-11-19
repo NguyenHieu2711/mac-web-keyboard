@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.38";
+  const BUNDLED_BOOT_VER = "2.3.59";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -3179,13 +3179,13 @@
     applyRdpDeviceEvents(evs);
   }
 
-  function rdpSendWheel(dxPx, dyPx, unit = 0, targetX = null, targetY = null) {
+  function rdpSendWheel(dxPx, dyPx, unit = 0, targetX = null, targetY = null, phase = 2) {
     if (!isRemoteConnected()) return;
     let movedTarget = false;
     if (targetX !== null && targetY !== null) {
       const nx = Math.max(0, Math.min((remoteCanvas.width || RDP_TARGET_W) - 1, Math.round(targetX)));
       const ny = Math.max(0, Math.min((remoteCanvas.height || RDP_TARGET_H) - 1, Math.round(targetY)));
-      if (Math.abs(nx - kvmX) > 2 || Math.abs(ny - kvmY) > 2) {
+      if (Math.abs(nx - kvmX) > 2 || Math.abs(ny - kvmY) > 2 || phase === 1) {
         movedTarget = true;
       }
       kvmX = nx;
@@ -3200,6 +3200,7 @@
         ry: norm.ry,
         dx: dxPx * mul,
         dy: dyPx * mul,
+        phase,
       });
       return;
     }
@@ -3208,8 +3209,9 @@
     if (movedTarget) {
       evs.push(rdpMod.DeviceEvent.mouseMove(kvmX, kvmY));
     }
-    const iy = Math.round(dyPx);
-    const ix = Math.round(dxPx);
+    const nativeScale = unit === 0 ? 3.2 : 1.0;
+    const iy = Math.round(dyPx * nativeScale);
+    const ix = Math.round(dxPx * nativeScale);
     if (iy !== 0) evs.push(rdpMod.DeviceEvent.wheelRotations(true, iy, unit));
     if (ix !== 0) evs.push(rdpMod.DeviceEvent.wheelRotations(false, ix, unit));
     if (evs.length > 0) applyRdpDeviceEvents(evs);
@@ -4793,8 +4795,10 @@
       remoteTouchRing.classList.remove("is-drag");
     };
 
-    const flushAccumulatedScroll = (anchorX = null, anchorY = null) => {
-      const minStep = 2;
+    let rScrollPhaseStarted = false;
+
+    const flushAccumulatedScroll = (anchorX = null, anchorY = null, isMomentum = false) => {
+      const minStep = 1;
       const py = Math.trunc(rScrollAccY);
       const px = Math.trunc(rScrollAccX);
       let sdx = 0;
@@ -4808,14 +4812,21 @@
         sdx = px;
       }
       if (sdx !== 0 || sdy !== 0) {
-        rdpSendWheel(sdx, sdy, 0, anchorX, anchorY);
+        let ph = 2;
+        if (isMomentum) {
+          ph = 8;
+        } else if (!rScrollPhaseStarted) {
+          rScrollPhaseStarted = true;
+          ph = 1;
+        }
+        rdpSendWheel(sdx, sdy, 0, anchorX, anchorY, ph);
       }
     };
 
     const startRdpScrollInertia = (vx, vy, anchorX = null, anchorY = null) => {
       stopRdpScrollInertia();
-      let curVx = Math.max(-68, Math.min(68, vx));
-      let curVy = Math.max(-68, Math.min(68, vy));
+      let curVx = Math.max(-74, Math.min(74, vx));
+      let curVy = Math.max(-74, Math.min(74, vy));
       let lastTs = performance.now();
       const step = (ts) => {
         if (!isRemoteConnected()) {
@@ -4824,16 +4835,16 @@
         }
         const dt = Math.max(8, Math.min(34, ts - lastTs));
         lastTs = ts;
-        const decay = Math.pow(0.92, dt / 16.67);
+        const decay = Math.pow(0.93, dt / 16.67);
         curVx *= decay;
         curVy *= decay;
-        if (Math.hypot(curVx, curVy) < 0.75) {
+        if (Math.hypot(curVx, curVy) < 0.7) {
           rScrollInertiaRaf = null;
           return;
         }
         rScrollAccX += curVx * (dt / 16.67);
         rScrollAccY += curVy * (dt / 16.67);
-        flushAccumulatedScroll(anchorX, anchorY);
+        flushAccumulatedScroll(anchorX, anchorY, true);
         rScrollInertiaRaf = requestAnimationFrame(step);
       };
       rScrollInertiaRaf = requestAnimationFrame(step);
@@ -4887,6 +4898,7 @@
           rTwoLastMidY = (t0.clientY + t1.clientY) / 2;
           rScrollAccY = 0;
           rScrollAccX = 0;
+          rScrollPhaseStarted = false;
           const midPt = clientToRemoteCoords(rTwoLastMidX, rTwoLastMidY);
           rScrollAnchorX = midPt.x;
           rScrollAnchorY = midPt.y;
@@ -4909,15 +4921,14 @@
           rLongFired = false;
           rScrollAccX = 0;
           rScrollAccY = 0;
+          rScrollPhaseStarted = false;
           hideTouchRing();
-          const nearPrevTap =
-            Math.hypot(t.clientX - rLastTapClientX, t.clientY - rLastTapClientY) < 36;
-          rPendingDoubleTapDrag =
-            now - rLastTapAt < 290 && (isPointerModeActive() || nearPrevTap);
+          // CHỈ dùng double-tap-drag ở chế độ Trackpad (`pointer`), TUYỆT ĐỐI không bật ở chế độ Cảm ứng để chạm + di ngón tay luôn cuộn 100%!
+          rPendingDoubleTapDrag = isPointerModeActive() && now - rLastTapAt < 290;
           clearRdpLongTimer();
 
-          const holdDelay = isPointerModeActive() ? 235 : 280;
-          const holdMaxMove = isPointerModeActive() ? 8 : 11;
+          const holdDelay = isPointerModeActive() ? 235 : 580;
+          const holdMaxMove = isPointerModeActive() ? 8 : 4.2;
           rLongTimer = setTimeout(() => {
             rLongTimer = null;
             if (rTouchMode === "single" && !rMoved && rTotalMoved < holdMaxMove) {
@@ -5046,25 +5057,28 @@
             return;
           }
 
-          // ── NHÁNH B: CHẾ ĐỘ CẢM ỨNG (`touch` — Vuốt 1 ngón = Cuộn mượt; Ấn giữ + kéo = Bôi đen / Kéo thả) ──
-          const moveThreshold = rLongFired ? 6.5 : 10.5;
+          // ── NHÁNH B: CHẾ ĐỘ CẢM ỨNG (`touch` — Chạm & di 1 ngón = Cuộn mượt tức thì; Ấn giữ yên 0.58s + kéo = Bôi đen / Kéo thả) ──
+          const moveThreshold = rLongFired ? 6.0 : 3.5;
+          let initScrollDx = 0;
+          let initScrollDy = 0;
           if (!rMoved && distFromStart > moveThreshold) {
             rMoved = true;
             clearRdpLongTimer();
             const startPt = clientToRemoteCoords(rStartX, rStartY);
-            if (rLongFired || rPendingDoubleTapDrag) {
+            if (rLongFired) {
               rPendingDoubleTapDrag = false;
               rTouchMode = "drag";
-              if (!rLongFired) triggerHaptic(12);
               showTouchRing(t.clientX, t.clientY, true);
               rdpSendMouseDown(startPt.x, startPt.y, 0, 1);
             } else {
-              // Vuốt 1 ngón trực tiếp -> Cuộn nội dung ngay tại vùng dưới ngón tay
+              // Vuốt 1 ngón trực tiếp -> Cuộn nội dung ngay lập tức (không nuốt quãng di chuyển đầu tiên!)
               hideTouchRing();
               rTouchMode = "scroll";
               rScrollAnchorX = startPt.x;
               rScrollAnchorY = startPt.y;
               localPointerVisible = false;
+              initScrollDx = (t.clientX - rStartX) - dx;
+              initScrollDy = (t.clientY - rStartY) - dy;
               if (kbLayout !== "mac_ext") {
                 rdpSendMouseMove(rScrollAnchorX, rScrollAnchorY);
               }
@@ -5076,15 +5090,15 @@
             const pt = clientToRemoteCoords(t.clientX, t.clientY);
             rdpSendMouseMove(pt.x, pt.y);
           } else if (rTouchMode === "scroll") {
-            const gain = isStreamInputEngine() ? 2.25 : 2.75;
-            const stepX = dx * gain * 0.85;
-            const stepY = dy * gain;
+            const gain = isStreamInputEngine() ? 2.65 : 2.85;
+            const stepX = (dx + initScrollDx) * gain * 0.85;
+            const stepY = (dy + initScrollDy) * gain;
             rScrollAccY += stepY;
             rScrollAccX += stepX;
             const normDt = 16.67 / dt;
-            rScrollVelY = rScrollVelY * 0.42 + stepY * normDt * 0.58;
-            rScrollVelX = rScrollVelX * 0.42 + stepX * normDt * 0.58;
-            flushAccumulatedScroll(rScrollAnchorX, rScrollAnchorY);
+            rScrollVelY = rScrollVelY * 0.38 + stepY * normDt * 0.62;
+            rScrollVelX = rScrollVelX * 0.38 + stepX * normDt * 0.62;
+            flushAccumulatedScroll(rScrollAnchorX, rScrollAnchorY, false);
           }
         }
       },
@@ -5159,7 +5173,10 @@
       }
 
       if (rTouchMode === "scroll") {
-        if (now - rPrevAt < 75 && Math.hypot(rScrollVelX, rScrollVelY) > 2.2) {
+        if (rScrollPhaseStarted && isStreamInputEngine()) {
+          rdpSendWheel(0, 0, 0, rScrollAnchorX, rScrollAnchorY, 4);
+        }
+        if (now - rPrevAt < 90 && Math.hypot(rScrollVelX, rScrollVelY) > 1.8) {
           startRdpScrollInertia(rScrollVelX, rScrollVelY, rScrollAnchorX, rScrollAnchorY);
         }
         rTouchMode = "none";
@@ -5723,7 +5740,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.38";
+  const BUNDLED_WEB_VERSION = "2.3.59";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
