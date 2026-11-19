@@ -4563,28 +4563,17 @@ async def mac_virtual_display_diag() -> dict:
                             "px_h": int(q.CGDisplayPixelsHigh(did)),
                         })
                 try:
-                    import glob as _glob
-                    import sqlite3 as _sqlite3
-                    mrd_dbs = _glob.glob(str(Path.home() / "Library/Group Containers/*com.microsoft.rdc*/**/*.sqlite*"), recursive=True)
-                    mrd_disp_info = []
-                    for dbp in mrd_dbs[:4]:
-                        if dbp.endswith("-wal") or dbp.endswith("-shm"):
-                            continue
-                        try:
-                            con = _sqlite3.connect(f"file:{dbp}?mode=ro", uri=True, timeout=1.0)
-                            cur = con.cursor()
-                            tbls = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-                            for tn in tbls:
-                                cols = [c[1] for c in cur.execute(f"PRAGMA table_info({tn})").fetchall()]
-                                disp_cols = [c for c in cols if any(k in c.lower() for k in ("name", "title", "retina", "scale", "zoom", "monitor", "full", "res", "width", "height", "fit", "dynamic"))]
-                                if len(disp_cols) >= 3:
-                                    rows = cur.execute(f"SELECT {','.join(disp_cols[:12])} FROM {tn} LIMIT 5").fetchall()
-                                    if rows:
-                                        mrd_disp_info.append({"tbl": tn, "cols": disp_cols[:12], "rows": [list(r) for r in rows]})
-                            con.close()
-                        except Exception as de:
-                            mrd_disp_info.append({"db": Path(dbp).name, "err": str(de)[:80]})
-                    out["mrd_bookmarks_disp"] = mrd_disp_info[:4]
+                    mrd_bin = "/Applications/Microsoft Remote Desktop.app/Contents/MacOS/Microsoft Remote Desktop"
+                    if not Path(mrd_bin).exists():
+                        mrd_bin = "/Applications/Windows App.app/Contents/MacOS/Windows App"
+                    if Path(mrd_bin).exists():
+                        for k_cli, args_cli in [
+                            ("mrd_cli_help", [mrd_bin, "--script", "bookmark", "help"]),
+                            ("mrd_cli_write_help", [mrd_bin, "--script", "bookmark", "write", "help"]),
+                            ("mrd_cli_list", [mrd_bin, "--script", "bookmark", "list"]),
+                        ]:
+                            rc_cli = subprocess.run(args_cli, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5)
+                            out[k_cli] = ((rc_cli.stdout or "") + "\n" + (rc_cli.stderr or "")).strip()[:2400]
                 except Exception as me:
                     out["mrd_bookmarks_err"] = str(me)[:120]
                 out["displays"] = disps
