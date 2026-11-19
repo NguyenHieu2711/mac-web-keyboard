@@ -5736,6 +5736,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
         session_first_seen_at = 0.0
         last_close_try_at = 0.0
         last_jump_try_at = 0.0
+        last_fit_try_at = 0.0
         rdp_became_front_at = 0.0
         prev_front_pid = 0
         jump_attempt_idx = 0
@@ -5858,7 +5859,12 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                         )
                     )
                 )
-                if not want_check_close and not want_check_jump:
+                want_check_fit = (
+                    front_pid == rdp_pid
+                    and on_screen_session_main
+                    and (now_m - last_fit_try_at) >= 3.0
+                )
+                if not want_check_close and not want_check_jump and not want_check_fit:
                     continue
 
                 # Bước 2: Dùng AXWindows đóng Connection Center thừa + AXMenuBar -> Window -> <session> để trượt thẳng vào PC Hieu!
@@ -5911,6 +5917,75 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                 s_press = _cfstr("AXPress")
                 s_menubar = _cfstr("AXMenuBar")
                 s_children = _cfstr("AXChildren")
+                s_mark = _cfstr("AXMenuItemMarkChar")
+                s_enabled = _cfstr("AXEnabled")
+
+                def _ensure_fit_window_menu() -> bool:
+                    mb_ref = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(app_ax, s_menubar, ctypes.byref(mb_ref)) != 0 or not mb_ref.value:
+                        return False
+                    try:
+                        bar_items_ref = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(mb_ref.value, s_children, ctypes.byref(bar_items_ref)) != 0 or not bar_items_ref.value:
+                            return False
+                        try:
+                            n_bar = cf.CFArrayGetCount(bar_items_ref.value)
+                            dbg = []
+                            for bi in range(n_bar):
+                                b_el = cf.CFArrayGetValueAtIndex(bar_items_ref.value, bi)
+                                if not b_el:
+                                    continue
+                                bt = _get_str(b_el, s_title).strip().lower()
+                                if bt not in ("window", "view", "cửa sổ", "xem"):
+                                    continue
+                                sub_arr = ctypes.c_void_p()
+                                if ax.AXUIElementCopyAttributeValue(b_el, s_children, ctypes.byref(sub_arr)) != 0 or not sub_arr.value:
+                                    continue
+                                try:
+                                    if cf.CFArrayGetCount(sub_arr.value) <= 0:
+                                        continue
+                                    menu_el = cf.CFArrayGetValueAtIndex(sub_arr.value, 0)
+                                    if not menu_el:
+                                        continue
+                                    items_arr = ctypes.c_void_p()
+                                    if ax.AXUIElementCopyAttributeValue(menu_el, s_children, ctypes.byref(items_arr)) != 0 or not items_arr.value:
+                                        continue
+                                    try:
+                                        n_items = cf.CFArrayGetCount(items_arr.value)
+                                        for mi in range(n_items):
+                                            m_el = cf.CFArrayGetValueAtIndex(items_arr.value, mi)
+                                            if not m_el:
+                                                continue
+                                            mt_raw = _get_str(m_el, s_title).strip()
+                                            if not mt_raw:
+                                                continue
+                                            mt_l = mt_raw.lower()
+                                            mk = _get_str(m_el, s_mark).strip()
+                                            en = _get_bool(m_el, s_enabled)
+                                            if len(dbg) < 20:
+                                                dbg.append(f"{mt_raw}[m={mk}|e={int(en)}]")
+                                            if en and not mk and (
+                                                "fit session to window" in mt_l
+                                                or "fit to window" in mt_l
+                                                or "scale to fit" in mt_l
+                                                or "dynamic resolution" in mt_l
+                                            ):
+                                                rc_f = ax.AXUIElementPerformAction(m_el, s_press)
+                                                if rc_f == 0:
+                                                    _RDP_CLOSER_DIAG["last_action"] = f"fit:{mt_raw}@{time.strftime('%H:%M:%S')}"
+                                                    _RDP_CLOSER_DIAG["win_menu_debug"] = dbg
+                                                    return True
+                                    finally:
+                                        cf.CFRelease(items_arr.value)
+                                finally:
+                                    cf.CFRelease(sub_arr.value)
+                            if dbg:
+                                _RDP_CLOSER_DIAG["win_menu_debug"] = dbg
+                        finally:
+                            cf.CFRelease(bar_items_ref.value)
+                    finally:
+                        cf.CFRelease(mb_ref.value)
+                    return False
 
                 def _jump_via_window_menu(attempt_idx: int) -> bool:
                     mb_ref = ctypes.c_void_p()
@@ -5991,6 +6066,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                 try:
                     ax_has_dialog = False
                     closed_any = False
+                    has_windowed_session = False
                     wins_ref = ctypes.c_void_p()
                     if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wins_ref)) == 0 and wins_ref.value:
                         try:
@@ -6010,6 +6086,8 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                 if sub_s in ("AXDialog", "AXSheet") or any(k in title_l for k in dialog_keywords):
                                     ax_has_dialog = True
                                     break
+                                if not is_fs and sub_s == "AXStandardWindow" and title_l in session_titles_lower:
+                                    has_windowed_session = True
                                 if (
                                     not is_fs
                                     and sub_s == "AXStandardWindow"
@@ -6042,6 +6120,15 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                             cf.CFRelease(btn_ref.value)
                         finally:
                             cf.CFRelease(wins_ref.value)
+
+                    # Khi PC Hieu đang ở cửa sổ thường (fs=0): tự bật Fit Session to Window nếu bị bỏ tích để không bị phóng to 2x cắt màn hình!
+                    if (
+                        not ax_has_dialog
+                        and has_windowed_session
+                        and want_check_fit
+                    ):
+                        last_fit_try_at = now_m
+                        _ensure_fit_window_menu()
 
                     # Khi bấm quay lại Microsoft Remote Desktop mà PC Hieu chưa hiện trên màn chính -> trượt thẳng vào PC Hieu!
                     if (
@@ -6078,7 +6165,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                     cf.CFRelease(app_ax)
                     for s_ref in (
                         s_wins, s_title, s_subrole, s_fullscreen, s_size,
-                        s_close_btn, s_press, s_menubar, s_children,
+                        s_close_btn, s_press, s_menubar, s_children, s_mark, s_enabled,
                     ):
                         if s_ref:
                             cf.CFRelease(s_ref)
