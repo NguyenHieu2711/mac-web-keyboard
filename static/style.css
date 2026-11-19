@@ -1420,13 +1420,12 @@ body.is-lowercase .key-alpha .key-main {
   position: absolute;
   left: 0;
   top: 0;
-  width: 32px;
-  height: 32px;
+  width: 24px;
+  height: 24px;
   transform-origin: 0 0;
   pointer-events: none;
   z-index: 40;
   will-change: transform;
-  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.8));
 }
 
 .remote-kvm-cursor.is-hidden,

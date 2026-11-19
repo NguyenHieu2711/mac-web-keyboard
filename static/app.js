@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.12";
+  const BUNDLED_BOOT_VER = "2.3.13";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -2853,18 +2853,18 @@
     }
     const cw = remoteCanvas.offsetWidth || RDP_TARGET_W;
     const ch = remoteCanvas.offsetHeight || RDP_TARGET_H;
-    const stageScale = cw / (remoteCanvas.width || RDP_TARGET_W);
+    const canvasW = remoteCanvas.width || RDP_TARGET_W;
+    const canvasH = remoteCanvas.height || RDP_TARGET_H;
+    const stageScale = cw / canvasW;
     const usingFallbackSvg =
       !remoteCursorImg || remoteCursorImg.classList.contains("is-hidden");
-    const minCursorScale = usingFallbackSvg ? 0.56 : 0.36;
-    const cursorScale = Math.max(minCursorScale, Math.min(1.0, stageScale * 1.18));
-    const px =
-      (kvmX / (remoteCanvas.width || RDP_TARGET_W)) * cw -
-      cursorHotspotX * cursorScale;
-    const py =
-      (kvmY / (remoteCanvas.height || RDP_TARGET_H)) * ch -
-      cursorHotspotY * cursorScale;
-    remoteKvmCursor.style.transform = `translate3d(${px.toFixed(1)}px, ${py.toFixed(1)}px, 0) scale(${cursorScale.toFixed(3)})`;
+    const cursorScale =
+      kbLayout === "mac_ext" && usingFallbackSvg
+        ? 0.82
+        : Math.max(usingFallbackSvg ? 0.65 : 0.36, Math.min(1.0, stageScale * 1.18));
+    const px = (kvmX / canvasW) * cw - cursorHotspotX * cursorScale;
+    const py = (kvmY / canvasH) * ch - cursorHotspotY * cursorScale;
+    remoteKvmCursor.style.transform = `translate3d(${px.toFixed(2)}px, ${py.toFixed(2)}px, 0) scale(${cursorScale.toFixed(3)})`;
     remoteKvmCursor.classList.remove("is-hidden");
   }
 
@@ -3842,7 +3842,7 @@
         settled = true;
         clearTimeout(openTimer);
         cursorHiddenByServer = false;
-        cursorHotspotX = 2;
+        cursorHotspotX = 1;
         cursorHotspotY = 1;
         if (remoteCursorImg) remoteCursorImg.classList.add("is-hidden");
         if (remoteCursorSvg) remoteCursorSvg.classList.remove("is-hidden");
@@ -3872,8 +3872,8 @@
               if (macExtCursorVisible && remoteCanvas) {
                 const cw = remoteCanvas.width || RDP_TARGET_W;
                 const ch = remoteCanvas.height || RDP_TARGET_H;
-                kvmX = Math.max(0, Math.min(cw - 1, Math.round((Number(msg.rx) || 0) * cw)));
-                kvmY = Math.max(0, Math.min(ch - 1, Math.round((Number(msg.ry) || 0) * ch)));
+                kvmX = Math.max(0, Math.min(cw, (Number(msg.rx) || 0) * cw));
+                kvmY = Math.max(0, Math.min(ch, (Number(msg.ry) || 0) * ch));
               }
               updateOverlayCursorVisual();
             } else if (msg.type === "vdisp_ended") {
@@ -3951,7 +3951,7 @@
         clearTimeout(openTimer);
         rdpActiveEngine = "parallel";
         cursorHiddenByServer = false;
-        cursorHotspotX = 2;
+        cursorHotspotX = 1;
         cursorHotspotY = 1;
         if (remoteCursorImg) remoteCursorImg.classList.add("is-hidden");
         if (remoteCursorSvg) remoteCursorSvg.classList.remove("is-hidden");
@@ -5634,7 +5634,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.12";
+  const BUNDLED_WEB_VERSION = "2.3.13";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
