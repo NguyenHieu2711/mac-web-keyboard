@@ -2156,6 +2156,7 @@ class MacVirtualDisplayManager:
                             continue
                         try:
                             cnt = cf.CFArrayGetCount(wins_ref.value)
+                            app_rescued = False
                             for i in range(cnt):
                                 w_ax = cf.CFArrayGetValueAtIndex(wins_ref.value, i)
                                 if not w_ax:
@@ -2195,11 +2196,18 @@ class MacVirtualDisplayManager:
                                                     ax.AXUIElementSetAttributeValue(w_ax, s_size, v_sz)
                                                     cf.CFRelease(v_sz)
                                             rescued += 1
+                                            app_rescued = True
                                 else:
                                     if pos_ref.value:
                                         cf.CFRelease(pos_ref.value)
                                     if size_ref.value:
                                         cf.CFRelease(size_ref.value)
+                            if app_rescued:
+                                try:
+                                    if bool(rapp.isHidden()):
+                                        rapp.unhide()
+                                except Exception:
+                                    pass
                         finally:
                             cf.CFRelease(wins_ref.value)
                     finally:

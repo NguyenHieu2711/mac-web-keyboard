@@ -4729,6 +4729,7 @@ async def mac_virtual_display_toggle(req: Request) -> dict:
     def _run_toggle() -> dict:
         # Màn phụ Mac là tính năng tách biệt hoàn toàn với Windows App / Remote PC:
         # CHỈ tạo hoặc hủy màn hình ảo macOS, tuyệt đối KHÔNG đóng/kích lại Windows App!
+        _cancel_orphan_vdisp_shutdown()
         if want_enable:
             mac_vdisp.start(logical_w=logical_w, logical_h=logical_h, hidpi=hidpi)
         else:
@@ -4739,6 +4740,49 @@ async def mac_virtual_display_toggle(req: Request) -> dict:
 
 
 _ACTIVE_MAC_EXT_WS_COUNT = 0
+_ORPHAN_VDISP_TIMER: Optional[threading.Timer] = None
+_ORPHAN_VDISP_LOCK = threading.Lock()
+
+
+def _cancel_orphan_vdisp_shutdown() -> None:
+    global _ORPHAN_VDISP_TIMER
+    with _ORPHAN_VDISP_LOCK:
+        if _ORPHAN_VDISP_TIMER is not None:
+            try:
+                _ORPHAN_VDISP_TIMER.cancel()
+            except Exception:
+                pass
+            _ORPHAN_VDISP_TIMER = None
+
+
+def _schedule_orphan_vdisp_shutdown(delay_sec: float = 15.0) -> None:
+    """Nếu điện thoại ngắt kết nối (đóng app, xóa dữ liệu, khóa máy...) quá 15 giây mà không nối lại,
+    tự động tắt màn hình ảo macOS & kéo toàn bộ app (Chrome, Settings...) về màn chính MacBook."""
+    global _ORPHAN_VDISP_TIMER
+    if mac_vdisp is None or not IS_MACOS:
+        return
+
+    def _fire() -> None:
+        global _ORPHAN_VDISP_TIMER
+        with _ORPHAN_VDISP_LOCK:
+            _ORPHAN_VDISP_TIMER = None
+        if _ACTIVE_MAC_EXT_WS_COUNT <= 0 and mac_vdisp is not None and mac_vdisp.is_active():
+            try:
+                logger.info("Không còn điện thoại kết nối Màn phụ Mac sau %.0fs -> tự hủy màn ảo & kéo app về MacBook.", delay_sec)
+                mac_vdisp.stop()
+            except Exception:
+                pass
+
+    with _ORPHAN_VDISP_LOCK:
+        if _ORPHAN_VDISP_TIMER is not None:
+            try:
+                _ORPHAN_VDISP_TIMER.cancel()
+            except Exception:
+                pass
+        t = threading.Timer(delay_sec, _fire)
+        t.daemon = True
+        t.start()
+        _ORPHAN_VDISP_TIMER = t
 
 
 @app.websocket("/mac-virtual-display-ws")
@@ -4754,6 +4798,7 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
         return
 
     _ACTIVE_MAC_EXT_WS_COUNT += 1
+    _cancel_orphan_vdisp_shutdown()
     running = True
     cur_bounds: Dict[str, Any] = {}
     input_state: Dict[str, Any] = {"held_btn": -1}
@@ -4954,6 +4999,8 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
         pass
     finally:
         _ACTIVE_MAC_EXT_WS_COUNT = max(0, _ACTIVE_MAC_EXT_WS_COUNT - 1)
+        if _ACTIVE_MAC_EXT_WS_COUNT <= 0 and mac_vdisp is not None and mac_vdisp.is_active():
+            _schedule_orphan_vdisp_shutdown(delay_sec=15.0)
         running = False
         c_task.cancel()
         v_task.cancel()
