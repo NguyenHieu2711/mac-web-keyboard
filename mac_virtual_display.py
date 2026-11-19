@@ -207,6 +207,7 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
     NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
 
     if (!isVis || !isAct) {
+        if (winId > 0) [self.knownWins removeObjectForKey:@(winId)];
         if (rapp) {
             [rapp unhide];
             [rapp activateWithOptions:NSApplicationActivateIgnoringOtherApps];
@@ -214,6 +215,7 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
         fprintf(stdout, "DOCK_ACTIVATE %d %u\n", (int)pid, winId);
         fflush(stdout);
     } else {
+        if (winId > 0) self.knownWins[@(winId)] = @(pid);
         fprintf(stdout, "DOCK_MINIMIZE %d %u\n", (int)pid, winId);
         fflush(stdout);
     }
@@ -275,11 +277,12 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
         if (!rapp || rapp.activationPolicy != NSApplicationActivationPolicyRegular) continue;
 
         BOOL trackedVisible = (isOnscreen && alpha > 0.05);
+        // CHỈ giữ icon mờ khi chính người dùng bấm thu nhỏ từ Dock phụ (tránh giữ icon ma khi app đã đóng/đổi Space!)
         BOOL trackedMinimized = (!isOnscreen && self.knownWins[winIdNum] != nil);
         if (!trackedVisible && !trackedMinimized) continue;
 
         if (trackedVisible) {
-            self.knownWins[winIdNum] = @(pid);
+            [self.knownWins removeObjectForKey:winIdNum];
             if (topVdispPid == 0) topVdispPid = pid;
             if (wb.size.width >= vb.size.width - 4.0 && wb.size.height >= vb.size.height - 4.0) {
                 hasFullscreen = YES;
@@ -632,6 +635,8 @@ class MacVirtualDisplayManager:
             ax.AXUIElementPerformAction.restype = ctypes.c_int32
             ax.AXValueGetValue.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p]
             ax.AXValueGetValue.restype = ctypes.c_bool
+            ax.AXValueCreate.argtypes = [ctypes.c_int32, ctypes.c_void_p]
+            ax.AXValueCreate.restype = ctypes.c_void_p
 
             self._ax_lib = ax
             self._cf_lib = cf
@@ -928,8 +933,118 @@ class MacVirtualDisplayManager:
             threading.Thread(target=self._stdout_reader_loop, args=(proc,), daemon=True).start()
             return self.status()
 
+    def rescue_windows_to_main_display(self, quartz: Any = None) -> int:
+        """Kéo toàn bộ cửa sổ đang nằm ngoài màn chính MacBook (x < 0 hoặc lạc ngoài vùng hiển thị)
+        về giữa màn chính MacBook để không bao giờ xảy ra tình trạng bật app mà không thấy đâu."""
+        if not IS_MACOS or not self._init_ax_libs():
+            return 0
+        try:
+            q = quartz
+            if q is None:
+                import Quartz as q  # type: ignore
+            import AppKit  # type: ignore
+
+            mb = q.CGDisplayBounds(q.CGMainDisplayID())
+            mw = max(800.0, float(mb.size.width))
+            mh = max(600.0, float(mb.size.height))
+            ax = self._ax_lib
+            cf = self._cf_lib
+            kCFStringEncodingUTF8 = 0x08000100
+
+            def _cfstr(s: str) -> ctypes.c_void_p:
+                return cf.CFStringCreateWithCString(None, s.encode("utf-8"), kCFStringEncodingUTF8)
+
+            s_wins = _cfstr("AXWindows")
+            s_pos = _cfstr("AXPosition")
+            s_size = _cfstr("AXSize")
+            rescued = 0
+            try:
+                apps = AppKit.NSWorkspace.sharedWorkspace().runningApplications() or []
+                for rapp in apps:
+                    try:
+                        if int(rapp.activationPolicy()) != 0:
+                            continue
+                        pid = int(rapp.processIdentifier())
+                        if pid <= 0 or pid == os.getpid():
+                            continue
+                    except Exception:
+                        continue
+                    app_ax = ax.AXUIElementCreateApplication(pid)
+                    if not app_ax:
+                        continue
+                    try:
+                        wins_ref = ctypes.c_void_p()
+                        if (
+                            ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wins_ref)) != 0
+                            or not wins_ref.value
+                        ):
+                            continue
+                        try:
+                            cnt = cf.CFArrayGetCount(wins_ref.value)
+                            for i in range(cnt):
+                                w_ax = cf.CFArrayGetValueAtIndex(wins_ref.value, i)
+                                if not w_ax:
+                                    continue
+                                pos_ref = ctypes.c_void_p()
+                                size_ref = ctypes.c_void_p()
+                                if (
+                                    ax.AXUIElementCopyAttributeValue(w_ax, s_pos, ctypes.byref(pos_ref)) == 0
+                                    and pos_ref.value
+                                    and ax.AXUIElementCopyAttributeValue(w_ax, s_size, ctypes.byref(size_ref)) == 0
+                                    and size_ref.value
+                                ):
+                                    pt = _CGPoint()
+                                    sz = _CGSize()
+                                    ok_p = ax.AXValueGetValue(pos_ref.value, 1, ctypes.byref(pt))
+                                    ok_s = ax.AXValueGetValue(size_ref.value, 2, ctypes.byref(sz))
+                                    cf.CFRelease(pos_ref.value)
+                                    cf.CFRelease(size_ref.value)
+                                    if ok_p and ok_s and sz.w >= 120 and sz.h >= 80:
+                                        cx = pt.x + sz.w * 0.5
+                                        cy = pt.y + sz.h * 0.5
+                                        off_main = (cx < 0.0) or (cx >= mw) or (cy < 0.0) or (cy >= mh)
+                                        if off_main:
+                                            new_w = min(sz.w, mw - 80.0)
+                                            new_h = min(sz.h, mh - 100.0)
+                                            new_x = max(24.0, (mw - new_w) * 0.5)
+                                            new_y = max(36.0, (mh - new_h) * 0.5)
+                                            new_pt = _CGPoint(new_x, new_y)
+                                            v_pt = ax.AXValueCreate(1, ctypes.byref(new_pt))
+                                            if v_pt:
+                                                ax.AXUIElementSetAttributeValue(w_ax, s_pos, v_pt)
+                                                cf.CFRelease(v_pt)
+                                            if new_w < sz.w - 4.0 or new_h < sz.h - 4.0:
+                                                new_sz = _CGSize(new_w, new_h)
+                                                v_sz = ax.AXValueCreate(2, ctypes.byref(new_sz))
+                                                if v_sz:
+                                                    ax.AXUIElementSetAttributeValue(w_ax, s_size, v_sz)
+                                                    cf.CFRelease(v_sz)
+                                            rescued += 1
+                                else:
+                                    if pos_ref.value:
+                                        cf.CFRelease(pos_ref.value)
+                                    if size_ref.value:
+                                        cf.CFRelease(size_ref.value)
+                        finally:
+                            cf.CFRelease(wins_ref.value)
+                    finally:
+                        cf.CFRelease(app_ax)
+            finally:
+                for s_ref in (s_wins, s_pos, s_size):
+                    if s_ref:
+                        cf.CFRelease(s_ref)
+            return rescued
+        except Exception:
+            return 0
+
     def stop(self) -> Dict[str, Any]:
         with self._lock:
+            # Trước khi hủy màn ảo, kéo toàn bộ cửa sổ đang ở màn phụ về màn chính MacBook để không bao giờ bị mất tích!
+            if self._display_id > 0:
+                try:
+                    self.rescue_windows_to_main_display()
+                except Exception:
+                    pass
             proc = self._proc
             self._proc = None
             self._display_id = 0

@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.9";
+  const BUNDLED_BOOT_VER = "2.3.10";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -3697,6 +3697,19 @@
     return { available: false, macBase };
   }
 
+  function clearRemoteCanvas() {
+    if (!remoteCanvas) return;
+    try {
+      const ctx2d = remoteCanvas.getContext("2d", { alpha: false });
+      if (ctx2d) {
+        ctx2d.fillStyle = "#090c12";
+        ctx2d.fillRect(0, 0, remoteCanvas.width || 1, remoteCanvas.height || 1);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   function closeParallelRdpWs() {
     parallelQueuedBuf = null;
     if (rdpParallelWs) {
@@ -3803,6 +3816,7 @@
       }
       macExtWs = null;
     }
+    clearRemoteCanvas();
     updateOverlayCursorVisual();
   }
 
@@ -4420,6 +4434,7 @@
     rdpManualDisconnect = true;
     closeParallelRdpWs();
     closeRdpAudioWs();
+    clearRemoteCanvas();
     if (rdpSession) {
       try {
         rdpSession.shutdown();
@@ -5619,7 +5634,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.9";
+  const BUNDLED_WEB_VERSION = "2.3.10";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();

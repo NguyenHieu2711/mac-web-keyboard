@@ -4500,6 +4500,15 @@ async def mac_virtual_display_status() -> dict:
     return await asyncio.to_thread(mac_vdisp.status, injector._quartz)
 
 
+@app.post("/mac-virtual-display/rescue")
+@app.get("/mac-virtual-display/rescue")
+async def mac_virtual_display_rescue() -> dict:
+    if mac_vdisp is None or not IS_MACOS:
+        return {"ok": False, "rescued": 0}
+    moved = await asyncio.to_thread(mac_vdisp.rescue_windows_to_main_display, injector._quartz)
+    return {"ok": True, "rescued": moved}
+
+
 @app.post("/mac-virtual-display/toggle")
 async def mac_virtual_display_toggle(req: Request) -> dict:
     if mac_vdisp is None or not IS_MACOS:
@@ -4760,7 +4769,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.3.9",
+        "version": "2.3.10",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
