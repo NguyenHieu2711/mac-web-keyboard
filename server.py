@@ -6111,6 +6111,9 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                         ax.AXUIElementPerformAction(wel, s_raise)
             finally:
                 cf.CFRelease(w_cc.value)
+        if not exited_cc_fs and not close_existing_session:
+            if _click_menu_item(("window", "view", "cửa sổ", "xem"), "exit full screen"):
+                exited_cc_fs = True
         if exited_cc_fs:
             time.sleep(1.05)
             try:
@@ -6222,6 +6225,8 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                             q.CGWarpMouseCursorPosition((float(orig_pt.x), float(orig_pt.y)))
                         except Exception:
                             pass
+                    time.sleep(0.22)
+                    _click_menu_item(("window", "cửa sổ"), target_title.strip().lower())
                     launched = True
     finally:
         cf.CFRelease(app_ax)
@@ -6385,9 +6390,43 @@ def _apply_full_mac_window_bounds(target_pid: int, target_sess: str) -> Tuple[bo
     return matched, cur_w, cur_h
 
 
+def _has_rdp_session_or_connecting(target_pid: int, target_sess: str) -> bool:
+    """Kiểm tra xem cửa sổ phiên hoặc hộp thoại Đang kết nối / Nhập mật khẩu (VD: PC Hieu 550x184) đã mở chưa."""
+    if not IS_MACOS or target_pid <= 0:
+        return False
+    q = injector._quartz
+    if q is None:
+        try:
+            import Quartz as q  # type: ignore
+        except Exception:
+            return False
+    import objc  # type: ignore
+
+    t_low = target_sess.strip().lower()
+    with objc.autorelease_pool():
+        wlist = q.CGWindowListCopyWindowInfo(
+            q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements,
+            q.kCGNullWindowID,
+        ) or []
+        for w in wlist:
+            if int(w.get("kCGWindowOwnerPID", 0) or 0) != target_pid:
+                continue
+            if int(w.get("kCGWindowLayer", -1)) != 0:
+                continue
+            wb = w.get("kCGWindowBounds") or {}
+            ww = float(wb.get("Width", 0))
+            wh = float(wb.get("Height", 0))
+            wn = str(w.get("kCGWindowName", "") or "").strip().lower()
+            if ww >= 350.0 and wh >= 120.0 and wn and (wn == t_low or (t_low and t_low in wn and wn not in ("microsoft remote desktop", "windows app", "connection center"))):
+                return True
+    return False
+
+
 def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
     """Đóng êm phiên cũ -> thoát sạch MRD -> ghi bookmark mới (giữ nguyên Retina + Dynamic Display) -> tự nối lại target_sess."""
     global _LAST_DOWNGRADED_1MON_PID
+    import AppKit  # type: ignore
+    import objc  # type: ignore
 
     _, app_name = _get_mrd_cli_info()
     _quit_mrd_cleanly()
@@ -6397,9 +6436,13 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
 
     subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     new_pid = 0
-    for _ in range(18):
+    for _ in range(20):
         time.sleep(0.18)
         p_chk, _, _ = _rdp_probe_vdisp_state()
+        if p_chk <= 0:
+            live_p = _find_live_mrd_pids()
+            if live_p:
+                p_chk = live_p[0]
         if p_chk > 0:
             new_pid = p_chk
             break
@@ -6410,13 +6453,36 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
     else:
         _LAST_DOWNGRADED_1MON_PID = 0
 
+    # Đưa Microsoft Remote Desktop lên tiền cảnh và chờ trượt Space xong trước khi thao tác Connection Center
+    try:
+        with objc.autorelease_pool():
+            rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(new_pid)
+            if rapp is not None:
+                rapp.unhide()
+                rapp.activateWithOptions_(3)
+    except Exception:
+        pass
+    time.sleep(0.75)
+
     for _ in range(4):
-        time.sleep(0.35)
-        _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
-        time.sleep(0.65)
-        _, sess_now, _ = _rdp_probe_vdisp_state()
-        if sess_now:
+        if _has_rdp_session_or_connecting(new_pid, target_sess):
             break
+        _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
+        for _ in range(6):
+            time.sleep(0.18)
+            if _has_rdp_session_or_connecting(new_pid, target_sess):
+                break
+        if _has_rdp_session_or_connecting(new_pid, target_sess):
+            break
+
+    # Đảm bảo cửa sổ PC Hieu (kể cả hộp Connecting 550x184) nổi hẳn lên trên Connection Center
+    try:
+        with objc.autorelease_pool():
+            rapp2 = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(new_pid)
+            if rapp2 is not None:
+                rapp2.activateWithOptions_(3)
+    except Exception:
+        pass
 
     # Khi về 1 màn cửa sổ thường: bung khít 1512x944 ngay khi cửa sổ mở và lặp lại sau khi kênh Dynamic Display bắt tay xong!
     if not enable_multimon:
