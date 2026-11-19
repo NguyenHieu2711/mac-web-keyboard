@@ -5728,12 +5728,32 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
             bname, buuid = m.group(1).strip(), m.group(2).strip()
             found.append((bname, buuid))
         flag = "true" if enable_multimon else "false"
-        for _, buuid in found:
-            subprocess.run(
-                [mrd_bin, "--script", "bookmark", "write", buuid, "--useallmonitors", flag, "--fullscreen", flag],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3.0,
-            )
+        last_status = ""
+        for bname, buuid in found:
+            w_args = [mrd_bin, "--script", "bookmark", "write", buuid, "--useallmonitors", flag, "--fullscreen", flag]
+            rc_w = subprocess.run(w_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3.0)
+            w_msg = ((rc_w.stdout or "") + " " + (rc_w.stderr or "")).strip()
+            if rc_w.returncode != 0 or "required" in w_msg.lower() or "error" in w_msg.lower():
+                # Dự phòng nếu CLI yêu cầu truyền kèm --hostname khi cập nhật bookmark
+                rc_ex = subprocess.run(
+                    [mrd_bin, "--script", "bookmark", "export", buuid],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5,
+                )
+                ex_txt = (rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")
+                m_host = re.search(r"full address:s:([^\r\n]+)", ex_txt, re.IGNORECASE)
+                host_val = m_host.group(1).strip() if m_host else "192.168.52.230"
+                w_args2 = [
+                    mrd_bin, "--script", "bookmark", "write", buuid,
+                    "--hostname", host_val,
+                    "--friendlyname", bname,
+                    "--useallmonitors", flag,
+                    "--fullscreen", flag,
+                ]
+                rc_w = subprocess.run(w_args2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3.0)
+                w_msg = ((rc_w.stdout or "") + " " + (rc_w.stderr or "")).strip()
+            last_status = f"rc={rc_w.returncode}:{w_msg[:60]}"
         _RDP_CLOSER_DIAG["multimon_bookmark"] = bool(enable_multimon)
+        _RDP_CLOSER_DIAG["bmk_write_status"] = last_status
     except Exception as exc:
         _RDP_CLOSER_DIAG["last_err"] = f"bmk_sync:{str(exc)[:100]}"
     return found
@@ -5874,7 +5894,7 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
     s_children = _cfstr("AXChildren")
     s_enabled = _cfstr("AXEnabled")
 
-    def _click_menu_item(bar_names: Tuple[str, ...], item_substr: str) -> bool:
+    def _click_menu_item(bar_names: Tuple[str, ...], item_exact: str) -> bool:
         mb = ctypes.c_void_p()
         if ax.AXUIElementCopyAttributeValue(app_ax, s_menubar, ctypes.byref(mb)) != 0 or not mb.value:
             return False
@@ -5906,7 +5926,8 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                                     if not iel:
                                         continue
                                     it_l = _gs(iel, s_title).strip().lower()
-                                    if item_substr in it_l and _gb(iel, s_enabled):
+                                    # BẮT BUỘC khớp chính xác 100% (tránh "connect" khớp nhầm "pc quick connect"!)
+                                    if it_l == item_exact and _gb(iel, s_enabled):
                                         if ax.AXUIElementPerformAction(iel, s_press) == 0:
                                             return True
                             finally:
@@ -6099,51 +6120,80 @@ def trigger_smart_rdp_multimon_sync(enable_multimon: bool, upgrade_running: bool
                 return
 
             target_sess = sess[0] if sess else default_title
-            _RDP_RECONNECT_UNTIL = time.monotonic() + 7.5
+            _RDP_RECONNECT_UNTIL = time.monotonic() + 7.0
             try:
-                # Tầng 1: Nâng cấp nhanh tại chỗ (~1.2s)
-                _ax_close_session_and_relaunch(rpid, target_sess, close_existing_session=True)
-                ok_2mon = False
-                for _ in range(11):
-                    time.sleep(0.25)
-                    _, _, hv = _rdp_probe_vdisp_state()
-                    if hv:
-                        ok_2mon = True
-                        break
+                # 1) Đóng êm cửa sổ phiên 1 màn trước (tránh hộp thoại hỏi xác nhận thoát khi gọi terminate)
+                _, app_name = _get_mrd_cli_info()
+                rpid_cur, _, _ = _rdp_probe_vdisp_state()
+                if rpid_cur > 0 and mac_vdisp is not None and mac_vdisp._init_ax_libs():
+                    try:
+                        import ctypes
+                        ax = mac_vdisp._ax_lib
+                        cf = mac_vdisp._cf_lib
+                        a_ax = ax.AXUIElementCreateApplication(rpid_cur)
+                        if a_ax:
+                            sw_k = cf.CFStringCreateWithCString(None, b"AXWindows", 0x08000100)
+                            st_k = cf.CFStringCreateWithCString(None, b"AXTitle", 0x08000100)
+                            sc_k = cf.CFStringCreateWithCString(None, b"AXCloseButton", 0x08000100)
+                            sp_k = cf.CFStringCreateWithCString(None, b"AXPress", 0x08000100)
+                            try:
+                                wr = ctypes.c_void_p()
+                                if ax.AXUIElementCopyAttributeValue(a_ax, sw_k, ctypes.byref(wr)) == 0 and wr.value:
+                                    try:
+                                        for wi in range(cf.CFArrayGetCount(wr.value)):
+                                            wel = cf.CFArrayGetValueAtIndex(wr.value, wi)
+                                            if not wel:
+                                                continue
+                                            tr = ctypes.c_void_p()
+                                            wt = ""
+                                            if ax.AXUIElementCopyAttributeValue(wel, st_k, ctypes.byref(tr)) == 0 and tr.value:
+                                                with objc.autorelease_pool():
+                                                    wt = str(objc.objc_object(c_void_p=tr.value) or "").strip().lower()
+                                                cf.CFRelease(tr.value)
+                                            if wt and wt not in ("microsoft remote desktop", "windows app", "connection center"):
+                                                br = ctypes.c_void_p()
+                                                if ax.AXUIElementCopyAttributeValue(wel, sc_k, ctypes.byref(br)) == 0 and br.value:
+                                                    ax.AXUIElementPerformAction(br.value, sp_k)
+                                                    cf.CFRelease(br.value)
+                                    finally:
+                                        cf.CFRelease(wr.value)
+                            finally:
+                                cf.CFRelease(a_ax)
+                                for k_ref in (sw_k, st_k, sc_k, sp_k):
+                                    if k_ref:
+                                        cf.CFRelease(k_ref)
+                        time.sleep(0.25)
+                    except Exception:
+                        pass
 
-                # Tầng 2 (Đảm bảo 100%): Nếu MRD đang chạy giữ cache CoreData cũ chưa bật màn #2 -> làm mới app & tự nối lại ngay
-                if not ok_2mon and mac_vdisp is not None and mac_vdisp.is_active():
-                    _, app_name = _get_mrd_cli_info()
-                    rpid_cur, _, _ = _rdp_probe_vdisp_state()
-                    if rpid_cur > 0:
-                        try:
-                            with objc.autorelease_pool():
-                                rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rpid_cur)
-                                if rapp is not None:
-                                    rapp.terminate()
-                        except Exception:
-                            pass
-                        for _ in range(10):
-                            time.sleep(0.15)
-                            p_chk, _, _ = _rdp_probe_vdisp_state()
-                            if p_chk <= 0:
-                                break
-                    sync_mrd_bookmark_multimon(True)
-                    if app_name:
-                        subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        new_pid = 0
-                        for _ in range(16):
-                            time.sleep(0.18)
-                            p_chk, _, _ = _rdp_probe_vdisp_state()
-                            if p_chk > 0:
-                                new_pid = p_chk
-                                break
-                        if new_pid > 0:
-                            time.sleep(0.30)
-                            _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
-                    _RDP_CLOSER_DIAG["last_reconnect"] = f"upgraded_tier2:{target_sess}@{time.strftime('%H:%M:%S')}"
-                else:
-                    _RDP_CLOSER_DIAG["last_reconnect"] = f"upgraded_tier1:{target_sess}@{time.strftime('%H:%M:%S')}"
+                # 2) Làm mới sạch Microsoft Remote Desktop để nạp 100% cấu hình CoreData 2 màn hình mới + tự nối lại PC Hieu ngay
+                if rpid_cur > 0:
+                    try:
+                        with objc.autorelease_pool():
+                            rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rpid_cur)
+                            if rapp is not None:
+                                rapp.terminate()
+                    except Exception:
+                        pass
+                    for _ in range(12):
+                        time.sleep(0.15)
+                        p_chk, _, _ = _rdp_probe_vdisp_state()
+                        if p_chk <= 0:
+                            break
+                sync_mrd_bookmark_multimon(True)
+                if app_name:
+                    subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    new_pid = 0
+                    for _ in range(18):
+                        time.sleep(0.18)
+                        p_chk, _, _ = _rdp_probe_vdisp_state()
+                        if p_chk > 0:
+                            new_pid = p_chk
+                            break
+                    if new_pid > 0:
+                        time.sleep(0.35)
+                        _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
+                _RDP_CLOSER_DIAG["last_reconnect"] = f"upgraded_2mon:{target_sess}@{time.strftime('%H:%M:%S')}"
             finally:
                 _RDP_RECONNECT_UNTIL = time.monotonic() + 0.8
 
