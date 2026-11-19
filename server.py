@@ -4559,7 +4559,34 @@ async def mac_virtual_display_diag() -> dict:
                             "y": float(b.origin.y),
                             "w": float(b.size.width),
                             "h": float(b.size.height),
+                            "px_w": int(q.CGDisplayPixelsWide(did)),
+                            "px_h": int(q.CGDisplayPixelsHigh(did)),
                         })
+                try:
+                    import glob as _glob
+                    import sqlite3 as _sqlite3
+                    mrd_dbs = _glob.glob(str(Path.home() / "Library/Group Containers/*com.microsoft.rdc*/**/*.sqlite*"), recursive=True)
+                    mrd_disp_info = []
+                    for dbp in mrd_dbs[:4]:
+                        if dbp.endswith("-wal") or dbp.endswith("-shm"):
+                            continue
+                        try:
+                            con = _sqlite3.connect(f"file:{dbp}?mode=ro", uri=True, timeout=1.0)
+                            cur = con.cursor()
+                            tbls = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+                            for tn in tbls:
+                                cols = [c[1] for c in cur.execute(f"PRAGMA table_info({tn})").fetchall()]
+                                disp_cols = [c for c in cols if any(k in c.lower() for k in ("name", "title", "retina", "scale", "zoom", "monitor", "full", "res", "width", "height", "fit", "dynamic"))]
+                                if len(disp_cols) >= 3:
+                                    rows = cur.execute(f"SELECT {','.join(disp_cols[:12])} FROM {tn} LIMIT 5").fetchall()
+                                    if rows:
+                                        mrd_disp_info.append({"tbl": tn, "cols": disp_cols[:12], "rows": [list(r) for r in rows]})
+                            con.close()
+                        except Exception as de:
+                            mrd_disp_info.append({"db": Path(dbp).name, "err": str(de)[:80]})
+                    out["mrd_bookmarks_disp"] = mrd_disp_info[:4]
+                except Exception as me:
+                    out["mrd_bookmarks_err"] = str(me)[:120]
                 out["displays"] = disps
                 ov_wins = []
                 rdp_wins = []
@@ -5978,8 +6005,8 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                             mt_l = mt_raw.lower()
                                             mk = _get_str(m_el, s_mark).strip()
                                             en = _get_bool(m_el, s_enabled)
-                                            if len(dbg) < 20:
-                                                dbg.append(f"{mt_raw}[m={mk}|e={int(en)}]")
+                                            if len(dbg) < 40:
+                                                dbg.append(f"{bt}:{mt_raw}[m={mk}|e={int(en)}]")
                                             if en and not mk and (
                                                 "fit session to window" in mt_l
                                                 or "fit to window" in mt_l
