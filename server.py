@@ -5808,8 +5808,7 @@ def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bo
             return False
         has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
         has_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
-        has_smart_lock = bool(re.search(r"smart sizing:i:1", ex_txt, re.IGNORECASE))
-        return (not has_retina) or (not has_dyn) or has_smart_lock
+        return (not has_retina) or (not has_dyn)
     except Exception:
         return False
 
@@ -6071,10 +6070,45 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
         return False
 
     launched = False
+    s_fs = _cfstr("AXFullScreen")
+    s_main = _cfstr("AXMain")
+    s_focused = _cfstr("AXFocused")
+    s_selected = _cfstr("AXSelected")
+    s_raise = _cfstr("AXRaise")
+    kTrue = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
+    kFalse = ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value
     try:
-        # 1) Bật Connection Center lên trước để không bị trắng cửa sổ khi đóng phiên cũ
+        # 1) Bật Connection Center lên trước + thoát Full-Screen nếu Connection Center bị kẹt ở Space riêng!
         _click_menu_item(("window", "cửa sổ"), "connection center")
-        time.sleep(0.22)
+        time.sleep(0.20)
+        w_cc = ctypes.c_void_p()
+        exited_cc_fs = False
+        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_cc)) == 0 and w_cc.value:
+            try:
+                for wi in range(cf.CFArrayGetCount(w_cc.value)):
+                    wel = cf.CFArrayGetValueAtIndex(w_cc.value, wi)
+                    if not wel:
+                        continue
+                    wt = _gs(wel, s_title).strip().lower()
+                    if wt in ("microsoft remote desktop", "windows app", "connection center", "pcs"):
+                        if _gb(wel, s_fs):
+                            ax.AXUIElementSetAttributeValue(wel, s_fs, kFalse)
+                            exited_cc_fs = True
+                        ax.AXUIElementSetAttributeValue(wel, s_main, kTrue)
+                        ax.AXUIElementSetAttributeValue(wel, s_focused, kTrue)
+                        ax.AXUIElementPerformAction(wel, s_raise)
+            finally:
+                cf.CFRelease(w_cc.value)
+        if exited_cc_fs:
+            time.sleep(0.70)
+            try:
+                with objc.autorelease_pool():
+                    rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
+                    if rapp is not None:
+                        rapp.activateWithOptions_(3)
+            except Exception:
+                pass
+            time.sleep(0.18)
 
         # 2) Đóng cửa sổ phiên 1 màn cũ (nếu có)
         if close_existing_session:
@@ -6145,7 +6179,11 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
 
             if candidates:
                 bx, by, bw, bh, bel = candidates[0]
-                if ax.AXUIElementPerformAction(bel, s_open) == 0:
+                ax.AXUIElementSetAttributeValue(bel, s_selected, kTrue)
+                ax.AXUIElementSetAttributeValue(bel, s_focused, kTrue)
+                if _click_menu_item(("connections", "connection"), "connect"):
+                    launched = True
+                elif ax.AXUIElementPerformAction(bel, s_open) == 0:
                     launched = True
                 elif q is not None:
                     # Bấm vào góc trên-trái của thẻ (tránh nút bút chì Edit ở góc dưới-phải) rồi gọi Connect / double-click
@@ -6173,7 +6211,10 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                     launched = True
     finally:
         cf.CFRelease(app_ax)
-        for sr in (s_wins, s_title, s_desc, s_val, s_pos, s_size, s_close, s_press, s_open, s_menubar, s_children, s_enabled):
+        for sr in (
+            s_wins, s_title, s_desc, s_val, s_pos, s_size, s_close, s_press,
+            s_open, s_menubar, s_children, s_enabled, s_fs, s_main, s_focused, s_selected, s_raise,
+        ):
             if sr:
                 cf.CFRelease(sr)
     return launched
