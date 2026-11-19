@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.2.8";
+  const BUNDLED_BOOT_VER = "2.2.9";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -468,7 +468,7 @@
     syncModeUI();
     pushConfigToServer();
     if (kbLayout === "remote") {
-      if (typeof onEnterRemoteLayout === "function") onEnterRemoteLayout();
+      if (typeof onEnterRemoteLayout === "function") onEnterRemoteLayout(true);
     } else if (prevLayout === "remote") {
       if (typeof onLeaveRemoteLayout === "function") onLeaveRemoteLayout();
     }
@@ -2909,6 +2909,33 @@
     return false;
   }
 
+  function isTransientSocketRdpDrop(err) {
+    if (!err || isAuthFailureRdpError(err)) return false;
+    let combined = String(err.message || err || "").toLowerCase();
+    try {
+      if (typeof err.backtrace === "function") {
+        combined += " " + String(err.backtrace() || "").toLowerCase();
+      }
+    } catch {
+      // ignore
+    }
+    if (
+      combined.includes("other connection") ||
+      combined.includes("another user") ||
+      combined.includes("replaced") ||
+      combined.includes("0x00000005")
+    ) {
+      return false;
+    }
+    return (
+      combined.includes("not enough bytes") ||
+      combined.includes("read frame") ||
+      combined.includes("unexpected eof") ||
+      combined.includes("websocket") ||
+      combined.includes("broken pipe")
+    );
+  }
+
   function formatIronRdpError(err) {
     if (!err) return "Lỗi kết nối không xác định";
     try {
@@ -3685,15 +3712,8 @@
               closeParallelRdpWs();
               rdpActiveEngine = "none";
               syncRdpConnectionUI();
-              if (!rdpManualDisconnect && kbLayout === "remote") {
-                const hasPass = Boolean(rdpPassInput && rdpPassInput.value);
-                if (hasPass) {
-                  void connectRdpSession();
-                  return;
-                }
-              }
               if (kbLayout === "remote" && remoteLoginOverlay) {
-                setRdpStatus("MacBook đã đóng phiên Remote. Nhập mật khẩu để kết nối trực tiếp.", false);
+                setRdpStatus("Đã nhường phiên cho PC chính (bấm Kết nối khi muốn mở lại trên ĐT).", false);
                 remoteLoginOverlay.classList.remove("is-hidden");
               }
             }
@@ -3721,9 +3741,16 @@
           syncRdpConnectionUI();
           if (settled && !rdpManualDisconnect && kbLayout === "remote") {
             if (canAutoReconnectRdp()) {
-              setTimeout(() => {
-                if (!rdpManualDisconnect && kbLayout === "remote" && !isRemoteConnected() && !rdpConnecting) {
+              setTimeout(async () => {
+                if (rdpManualDisconnect || kbLayout !== "remote" || isRemoteConnected() || rdpConnecting) {
+                  return;
+                }
+                const chk = await checkMacParallelAvailable();
+                if (chk.available) {
                   void connectRdpSession();
+                } else if (remoteLoginOverlay) {
+                  setRdpStatus("Phiên Remote đã tạm dừng để không khóa PC chính.", false);
+                  remoteLoginOverlay.classList.remove("is-hidden");
                 }
               }, 550);
               return;
@@ -3995,14 +4022,19 @@
               }
             }
           }
-          // 2. Nếu Mac không mở Remote mà chỉ ngắt mạng tạm thời -> tự nối lại ngầm
-          if (!isAuthFailureRdpError(errObj) && canAutoReconnectRdp()) {
+          // 2. Chỉ tự nối lại khi rớt mạng socket bất ngờ; TUYỆT ĐỐI KHÔNG tự giật lại cổng :3389 khi người dùng mở khóa PC chính (`errObj === null` / nhường phiên)!
+          if (isTransientSocketRdpDrop(errObj) && canAutoReconnectRdp()) {
             void connectRdpSession();
             return;
           }
         }
         if (kbLayout === "remote" && remoteLoginOverlay) {
-          setRdpStatus(errObj ? formatIronRdpError(errObj) : "Phiên Remote PC đã ngắt.", false);
+          setRdpStatus(
+            errObj
+              ? formatIronRdpError(errObj)
+              : "Đã nhường phiên cho PC chính (bấm Kết nối khi muốn dùng lại trên ĐT).",
+            false
+          );
           remoteLoginOverlay.classList.remove("is-hidden");
         }
       };
@@ -5086,7 +5118,7 @@
     });
   }
 
-  onEnterRemoteLayout = () => {
+  onEnterRemoteLayout = (userInitiated = false) => {
     setRemoteHudExpanded(false);
     ensureRdpAudioContext();
     if (
@@ -5101,7 +5133,18 @@
     }
     pushKvmConfigToServer();
     syncRdpConnectionUI();
+    let resumeAfterHotUpdate = false;
+    try {
+      resumeAfterHotUpdate = sessionStorage.getItem("mac_kb_hot_reload_active_rdp") === "1";
+      sessionStorage.removeItem("mac_kb_hot_reload_active_rdp");
+    } catch {
+      // ignore
+    }
     if (!isRemoteConnected() && !rdpConnecting) {
+      if (!userInitiated && !resumeAfterHotUpdate) {
+        if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
+        return;
+      }
       const hasSavedPass = Boolean(rdpPassInput && rdpPassInput.value);
       if (hasSavedPass) {
         void connectRdpSession();
@@ -5143,7 +5186,7 @@
   });
 
   if (kbLayout === "remote") {
-    onEnterRemoteLayout();
+    onEnterRemoteLayout(false);
   } else {
     // Nạp sẵn bộ giải mã WASM dưới nền để khi chuyển sang tab Remote PC sẽ kết nối tức thì (~0.3s)
     setTimeout(() => {
@@ -5156,7 +5199,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.2.8";
+  const BUNDLED_WEB_VERSION = "2.2.9";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
@@ -5289,6 +5332,11 @@
       return;
     }
     pendingHotBundleReady = false;
+    try {
+      sessionStorage.setItem("mac_kb_hot_reload_active_rdp", isRemoteConnected() ? "1" : "0");
+    } catch {
+      // ignore
+    }
     rdpManualDisconnect = true;
     closeParallelRdpWs();
     closeRdpAudioWs();
