@@ -2550,9 +2550,13 @@
       .trim();
 
     const rawUrls = [];
-    // Nếu đang có kênh WebSocket bàn phím mở sẵn tới MacBook -> đưa lên ưu tiên số 1
+    // Nếu đang có kênh WebSocket bàn phím mở sẵn tới MacBook -> dùng thẳng tức thì (0ms, không chờ probe)
     if (ws && ws.readyState === WebSocket.OPEN && ws.url) {
-      rawUrls.push(ws.url.replace(/\/ws(\?.*)?$/, "/rdp-ws"));
+      const liveProxy = ws.url.replace(/\/ws(\?.*)?$/, "/rdp-ws");
+      if (pcIp) {
+        return [liveProxy, `ws://${pcIp}:5051`];
+      }
+      return [liveProxy];
     }
     if (pcIp) {
       rawUrls.push(`ws://${pcIp}:5051`);
@@ -2565,18 +2569,17 @@
     const uniqueUrls = Array.from(new Set(rawUrls));
     if (uniqueUrls.length === 0) return [];
 
-    // Đua mở WebSocket thật song song: cổng nào mở ngay trong vài mili-giây sẽ thắng tức thì,
-    // loại bỏ hoàn toàn cổng bị tường lửa giữ gói tin (tránh treo chờ 2-3 phút của TCP SYN retry)
+    // Đua mở WebSocket thật song song khi chưa có kênh ws sẵn:
     try {
       const fastest = await Promise.any(
         uniqueUrls.map(
           (u) =>
             new Promise((res, rej) => {
-              probeWsOpen(u, 1100).then((r) => (r.ok ? res(r.wsUrl) : rej()));
+              probeWsOpen(u, 900).then((r) => (r.ok ? res(r.wsUrl) : rej()));
             })
         )
       );
-      return [fastest];
+      return [fastest, ...uniqueUrls.filter((u) => u !== fastest)];
     } catch {
       return uniqueUrls.slice(0, 1);
     }
@@ -3171,7 +3174,7 @@
   async function checkMacParallelAvailable() {
     const macBase = resolveMacHttpBase();
     const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-    const t = ctrl ? setTimeout(() => ctrl.abort(), 580) : null;
+    const t = ctrl ? setTimeout(() => ctrl.abort(), 1200) : null;
     try {
       const res = await fetch(`${macBase}/rdp-mode-check`, {
         cache: "no-store",
@@ -3512,7 +3515,15 @@
             updateOverlayCursorVisual();
           });
 
-          connectedSession = await builder.connect();
+          connectedSession = await Promise.race([
+            builder.connect(),
+            new Promise((_, rej) =>
+              setTimeout(
+                () => rej(new Error("Quá thời gian bắt tay RDP (7.5s).")),
+                7500
+              )
+            ),
+          ]);
           break;
         } catch (err) {
           closeRdpAudioWs();
@@ -4389,7 +4400,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.1.5";
+  const BUNDLED_WEB_VERSION = "2.1.6";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();

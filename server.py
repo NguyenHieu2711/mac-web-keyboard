@@ -2352,11 +2352,11 @@ class _RdpAudioSession:
         self.send_audin_dvc_data(b"\x06" + pcm_bytes)
 
     @staticmethod
-    def _extract_next_pdu(buf: bytearray) -> Optional[bytes]:
+    def _extract_next_pdu(buf: bytearray, pre_mcs: bool = False) -> Optional[bytes]:
         blen = len(buf)
         if blen < 2:
             return None
-        if buf[0] == 0x03:
+        if buf[0] == 0x03 and buf[1] == 0x00:
             if blen < 4:
                 return None
             plen = (buf[2] << 8) | buf[3]
@@ -2368,6 +2368,37 @@ class _RdpAudioSession:
                 return None
             out = bytes(buf[:plen])
             del buf[:plen]
+            return out
+
+        # Giai đoạn xác thực CredSSP / NLA (trước MCS Connect Initial): khung tin là ASN.1 DER TSRequest (0x30)
+        if pre_mcs:
+            if buf[0] == 0x30:
+                b1 = buf[1]
+                if (b1 & 0x80) == 0:
+                    plen = 2 + b1
+                else:
+                    num_oct = b1 & 0x7F
+                    if num_oct == 0 or num_oct > 4:
+                        out = bytes(buf)
+                        buf.clear()
+                        return out
+                    if blen < 2 + num_oct:
+                        return None
+                    body_len = int.from_bytes(buf[2 : 2 + num_oct], "big")
+                    plen = 2 + num_oct + body_len
+                if blen < plen:
+                    return None
+                out = bytes(buf[:plen])
+                del buf[:plen]
+                return out
+            out = bytes(buf)
+            buf.clear()
+            return out
+
+        # Sau MCS Connect Initial: chỉ còn Fast-Path PDU (action bits 0..1 == 0)
+        if (buf[0] & 0x03) != 0x00:
+            out = bytes(buf)
+            buf.clear()
             return out
         b1 = buf[1]
         if (b1 & 0x80) == 0:
@@ -2390,7 +2421,9 @@ class _RdpAudioSession:
         self.client_buf.extend(chunk)
         out_pkts: List[bytes] = []
         while True:
-            pkt = self._extract_next_pdu(self.client_buf)
+            pkt = self._extract_next_pdu(
+                self.client_buf, pre_mcs=(not self.cs_net_names)
+            )
             if pkt is None:
                 break
             if (
@@ -2428,7 +2461,9 @@ class _RdpAudioSession:
         self.server_buf.extend(chunk)
         out_pkts: List[bytes] = []
         while True:
-            pkt = self._extract_next_pdu(self.server_buf)
+            pkt = self._extract_next_pdu(
+                self.server_buf, pre_mcs=(not self.cs_net_names)
+            )
             if pkt is None:
                 break
             if (
@@ -3041,33 +3076,74 @@ async def pc_bridge_ws(ws: WebSocket) -> None:
             pass
 
 
-def _pid_has_established_rdp_socket(pid: int) -> bool:
-    now = time.monotonic()
-    cached = _RDP_PID_TCP_CACHE.get(pid)
-    if cached is not None and (now - cached[0]) < 0.65:
-        return cached[1]
-    ok = False
+_ACTIVE_RDP_3389_PIDS: Set[int] = set()
+_RDP_WATCHER_STARTED: bool = False
+_RDP_WATCHER_READY: bool = False
+
+
+def _refresh_active_rdp_pids_once() -> None:
+    global _ACTIVE_RDP_3389_PIDS, _RDP_WATCHER_READY
+    if not IS_MACOS:
+        return
+    my_pid = None
+    try:
+        import os
+
+        my_pid = os.getpid()
+    except Exception:
+        pass
+    found_pids: Set[int] = set()
     for lsof_bin in ("/usr/sbin/lsof", "lsof"):
         try:
             out = subprocess.check_output(
-                [lsof_bin, "-Pan", "-p", str(pid), "-iTCP", "-sTCP:ESTABLISHED"],
+                [lsof_bin, "-Pan", "-iTCP:3389", "-sTCP:ESTABLISHED", "-Fp"],
                 stderr=subprocess.DEVNULL,
                 text=True,
-                timeout=0.5,
+                timeout=1.8,
             )
-            if ":3389" in out:
-                ok = True
+            for line in out.splitlines():
+                if line.startswith("p"):
+                    try:
+                        p_val = int(line[1:].strip())
+                        if p_val > 0 and p_val != my_pid:
+                            found_pids.add(p_val)
+                    except ValueError:
+                        pass
             break
         except FileNotFoundError:
             continue
         except subprocess.CalledProcessError:
-            # lsof trả về mã 1 khi tiến trình không có kết nối TCP ESTABLISHED nào
-            ok = False
             break
         except Exception:
-            break
-    _RDP_PID_TCP_CACHE[pid] = (now, ok)
-    return ok
+            return
+    _ACTIVE_RDP_3389_PIDS = found_pids
+    _RDP_WATCHER_READY = True
+
+
+def _ensure_rdp_socket_watcher() -> None:
+    global _RDP_WATCHER_STARTED
+    if _RDP_WATCHER_STARTED or not IS_MACOS:
+        return
+    _RDP_WATCHER_STARTED = True
+
+    def _loop() -> None:
+        while True:
+            _refresh_active_rdp_pids_once()
+            time.sleep(0.9)
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
+_ensure_rdp_socket_watcher()
+
+
+def _pid_has_established_rdp_socket(pid: int) -> bool:
+    if not IS_MACOS or pid <= 0:
+        return False
+    _ensure_rdp_socket_watcher()
+    if not _RDP_WATCHER_READY:
+        _refresh_active_rdp_pids_once()
+    return pid in _ACTIVE_RDP_3389_PIDS
 
 
 def find_mac_rdp_window() -> Optional[Dict[str, Any]]:
@@ -3411,6 +3487,7 @@ async def close_mac_rdp_session() -> dict:
     except Exception:
         pass
     _RDP_PID_TCP_CACHE.clear()
+    _ACTIVE_RDP_3389_PIDS.clear()
     return {"ok": True}
 
 
@@ -3527,7 +3604,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.1.5",
+        "version": "2.1.6",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,

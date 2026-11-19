@@ -601,14 +601,38 @@ class RdpAudioSession {
     this.sendAudinDvcData(dataPdu);
   }
 
-  _extractNextRdpPdu(buf) {
+  _extractNextRdpPdu(buf, preMcs = false) {
     if (buf.length < 2) return null;
-    if (buf[0] === 0x03) {
+    if (buf[0] === 0x03 && buf[1] === 0x00) {
       if (buf.length < 4) return null;
       const len = (buf[2] << 8) | buf[3];
       if (len < 4) return { pkt: buf, rest: Buffer.alloc(0) };
       if (buf.length < len) return null;
       return { pkt: Buffer.from(buf.subarray(0, len)), rest: buf.subarray(len) };
+    }
+    if (preMcs) {
+      if (buf[0] === 0x30) {
+        const b1 = buf[1];
+        let len = 0;
+        if ((b1 & 0x80) === 0) {
+          len = 2 + b1;
+        } else {
+          const numOct = b1 & 0x7f;
+          if (numOct === 0 || numOct > 4) return { pkt: buf, rest: Buffer.alloc(0) };
+          if (buf.length < 2 + numOct) return null;
+          let bodyLen = 0;
+          for (let i = 0; i < numOct; i++) {
+            bodyLen = (bodyLen << 8) | buf[2 + i];
+          }
+          len = 2 + numOct + bodyLen;
+        }
+        if (buf.length < len) return null;
+        return { pkt: Buffer.from(buf.subarray(0, len)), rest: buf.subarray(len) };
+      }
+      return { pkt: buf, rest: Buffer.alloc(0) };
+    }
+    if ((buf[0] & 0x03) !== 0x00) {
+      return { pkt: buf, rest: Buffer.alloc(0) };
     }
     const b1 = buf[1];
     let len = 0;
@@ -629,7 +653,7 @@ class RdpAudioSession {
       : Buffer.concat([this.clientStreamBuf, chunk]);
 
     while (this.clientStreamBuf.length > 0) {
-      const parsed = this._extractNextRdpPdu(this.clientStreamBuf);
+      const parsed = this._extractNextRdpPdu(this.clientStreamBuf, this.csNetNames.length === 0);
       if (!parsed) break;
       this.clientStreamBuf = parsed.rest;
       const pkt = parsed.pkt;
@@ -669,7 +693,7 @@ class RdpAudioSession {
       : Buffer.concat([this.serverStreamBuf, chunk]);
 
     while (this.serverStreamBuf.length > 0) {
-      const parsed = this._extractNextRdpPdu(this.serverStreamBuf);
+      const parsed = this._extractNextRdpPdu(this.serverStreamBuf, this.csNetNames.length === 0);
       if (!parsed) break;
       this.serverStreamBuf = parsed.rest;
       const pkt = parsed.pkt;
@@ -1112,7 +1136,7 @@ const server = http.createServer((req, res) => {
     const payload = JSON.stringify({
       ok: true,
       service: 'pc-rdp-gateway',
-      version: '2.1.5',
+      version: '2.1.6',
       hostname: os.hostname(),
       default_user: `${os.hostname()}\\${os.userInfo().username}`,
       port: LISTEN_PORT,
