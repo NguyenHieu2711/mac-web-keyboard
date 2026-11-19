@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.2.5";
+  const BUNDLED_BOOT_VER = "2.2.6";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -2373,6 +2373,7 @@
   let kvmActive = false;
   let kvmButtonsMask = 0;
   let kvmBridgeReturnPush = 0;
+  let kvmBridgeEntryEdge = "right";
   let localPointerVisible = false;
   let localPointerHideTimer = null;
   let kvmX = RDP_TARGET_W / 2;
@@ -2728,10 +2729,8 @@
 
   function updateOverlayCursorVisual() {
     if (!remoteKvmCursor || !remoteCanvas) return;
-    const shouldShow =
-      rdpInputMode === "pointer" ||
-      kvmActive ||
-      (rdpInputMode === "touch" && localPointerVisible);
+    // Chỉ hiện con trỏ trên Điện thoại khi chuột vật lý đang thuộc về Điện thoại (`kvmActive`) hoặc ngón tay đang rê Trackpad (`localPointerVisible`)
+    const shouldShow = kvmActive || localPointerVisible;
     if (!shouldShow || cursorHiddenByServer) {
       remoteKvmCursor.classList.add("is-hidden");
       return;
@@ -4054,6 +4053,7 @@
     }
     if (rdpMouseMode === "mac") {
       kvmActive = false;
+      localPointerVisible = false;
     }
     // Giữ nguyên kết nối hiện tại (Song song hoặc Độc quyền), tuyệt đối KHÔNG đóng hay đá phiên Remote trên Mac!
     syncSmartKvmButtonsUI();
@@ -4102,10 +4102,16 @@
       kvmActive = true;
       kvmButtonsMask = 0;
       kvmBridgeReturnPush = 0;
+      const yr = Math.max(0.02, Math.min(0.98, Number(msg.y_ratio) || 0.5));
       if (msg.enter_edge === "right") {
         // Di từ mép TRÁI của MacBook -> đi vào mép PHẢI của Điện thoại đúng cao độ y_ratio
-        const yr = Math.max(0.02, Math.min(0.98, Number(msg.y_ratio) || 0.5));
+        kvmBridgeEntryEdge = "right";
         kvmX = Math.max(0, cw - 4);
+        kvmY = Math.round(yr * (ch - 1));
+      } else if (msg.enter_edge === "left") {
+        // Di từ mép PHẢI của MacBook -> đi vào mép TRÁI của Điện thoại đúng cao độ y_ratio
+        kvmBridgeEntryEdge = "left";
+        kvmX = Math.min(cw - 1, 4);
         kvmY = Math.round(yr * (ch - 1));
       } else if (kvmX <= 4 || kvmX >= cw - 4 || kvmY <= 4 || kvmY >= ch - 4) {
         kvmX = Math.round(cw * 0.5);
@@ -4127,13 +4133,14 @@
         const dx = (Number(msg.dx) || 0) * scale;
         const dy = (Number(msg.dy) || 0) * scale;
 
-        // Chế độ 3 (`bridge`): đang ở màn Điện thoại, di chuột chạm mép PHẢI -> trả về mép TRÁI của MacBook
+        // Chế độ 3 (`bridge`): di ngược qua mép nối -> ẩn hẳn chuột trên Điện thoại và trả về đúng mép của MacBook
         if (rdpMouseMode === "bridge" && kvmButtonsMask === 0) {
-          if (kvmX >= cw - 3 && dx > 0) {
+          if (kvmBridgeEntryEdge === "right" && kvmX >= cw - 3 && dx > 0) {
             kvmBridgeReturnPush += dx;
             if (kvmBridgeReturnPush >= 6) {
               const exitYRatio = kvmY / Math.max(1, ch - 1);
               kvmActive = false;
+              localPointerVisible = false;
               kvmBridgeReturnPush = 0;
               syncSmartKvmButtonsUI();
               updateOverlayCursorVisual();
@@ -4146,11 +4153,35 @@
               }
               sendPayload({
                 type: "kvm_bridge_return",
+                return_edge: "left",
                 y_ratio: +Math.max(0.02, Math.min(0.98, exitYRatio)).toFixed(4),
               });
               return;
             }
-          } else if (kvmX < cw - 10) {
+          } else if (kvmBridgeEntryEdge === "left" && kvmX <= 3 && dx < 0) {
+            kvmBridgeReturnPush += -dx;
+            if (kvmBridgeReturnPush >= 6) {
+              const exitYRatio = kvmY / Math.max(1, ch - 1);
+              kvmActive = false;
+              localPointerVisible = false;
+              kvmBridgeReturnPush = 0;
+              syncSmartKvmButtonsUI();
+              updateOverlayCursorVisual();
+              if (rdpSession) {
+                try {
+                  rdpSession.releaseAllInputs();
+                } catch {
+                  // ignore
+                }
+              }
+              sendPayload({
+                type: "kvm_bridge_return",
+                return_edge: "right",
+                y_ratio: +Math.max(0.02, Math.min(0.98, exitYRatio)).toFixed(4),
+              });
+              return;
+            }
+          } else if (kvmX > 10 && kvmX < cw - 10) {
             kvmBridgeReturnPush = 0;
           }
         }
@@ -4473,6 +4504,7 @@
             const gain = computeMacTrackpadGain(rSmoothedVel) * baseScale;
             kvmX = Math.max(0, Math.min(cw - 1, kvmX + dx * gain));
             kvmY = Math.max(0, Math.min(ch - 1, kvmY + dy * gain));
+            showLocalRemoteCursor(kvmX, kvmY, 1600);
             autoPanViewportForCursor();
             rdpSendMouseMove(kvmX, kvmY);
             return;
@@ -5099,7 +5131,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.2.5";
+  const BUNDLED_WEB_VERSION = "2.2.6";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();

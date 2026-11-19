@@ -9,6 +9,7 @@ Lắng nghe tại 0.0.0.0:5050, phục vụ giao diện PWA / Android WebView v�
 from __future__ import annotations
 
 import asyncio
+import atexit
 import ctypes
 import ctypes.util
 import hashlib
@@ -1693,15 +1694,85 @@ class MacKvmBridge:
         self._send_queue: Optional[asyncio.Queue] = None
         self._saved_pos: Tuple[float, float] = (600.0, 400.0)
         self._left_edge_push: float = 0.0
+        self._right_edge_push: float = 0.0
         self._last_cross_at: float = 0.0
         self._bounds_cache: Tuple[float, float, float, float] = (0.0, 0.0, 1440.0, 900.0)
         self._bounds_at: float = 0.0
         self._quartz: Any = None
         self._tap: Any = None
+        self._cursor_hidden: bool = False
+        self._bg_cursor_ready: bool = False
         self._lock = threading.Lock()
 
         if IS_MACOS:
+            self._enable_background_cursor_control()
             self._start_tap_thread()
+            atexit.register(self._restore_cursor_on_exit)
+
+    def _enable_background_cursor_control(self) -> None:
+        if not IS_MACOS:
+            return
+        try:
+            import Foundation  # type: ignore
+            import objc  # type: ignore
+
+            app_svc_path = ctypes.util.find_library("ApplicationServices")
+            cf_path = ctypes.util.find_library("CoreFoundation")
+            if not app_svc_path or not cf_path:
+                return
+            app_svc = ctypes.cdll.LoadLibrary(app_svc_path)
+            cf = ctypes.cdll.LoadLibrary(cf_path)
+            cgs_fn = getattr(app_svc, "_CGSDefaultConnection", None) or getattr(
+                app_svc, "CGSDefaultConnectionForThread", None
+            )
+            set_prop = getattr(app_svc, "CGSSetConnectionProperty", None)
+            if cgs_fn is None or set_prop is None:
+                return
+            cgs_fn.argtypes = []
+            cgs_fn.restype = ctypes.c_uint32
+            cid = cgs_fn()
+            if not cid:
+                return
+            ns_key = Foundation.NSString.stringWithString_("SetsCursorInBackground")
+            k_true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
+            set_prop.argtypes = [
+                ctypes.c_uint32,
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            set_prop.restype = ctypes.c_int32
+            set_prop(cid, cid, objc.pyobjc_id(ns_key), k_true)
+            self._bg_cursor_ready = True
+        except Exception as exc:
+            logger.debug("SetsCursorInBackground init skipped: %s", exc)
+
+    def _set_mac_cursor_hidden(self, hide: bool) -> None:
+        q = self._quartz
+        if q is None or not IS_MACOS:
+            return
+        try:
+            self._enable_background_cursor_control()
+            disp_id = q.CGMainDisplayID()
+            if hide and not self._cursor_hidden:
+                q.CGDisplayHideCursor(disp_id)
+                self._cursor_hidden = True
+            elif not hide and self._cursor_hidden:
+                q.CGDisplayShowCursor(disp_id)
+                self._cursor_hidden = False
+        except Exception as exc:
+            logger.debug("Cursor visibility toggle error: %s", exc)
+
+    def _restore_cursor_on_exit(self) -> None:
+        try:
+            q = self._quartz
+            if q is not None:
+                q.CGAssociateMouseAndMouseCursorPosition(True)
+                if self._cursor_hidden:
+                    q.CGDisplayShowCursor(q.CGMainDisplayID())
+                    self._cursor_hidden = False
+        except Exception:
+            pass
 
     def _get_desktop_bounds(self) -> Tuple[float, float, float, float]:
         now = time.monotonic()
@@ -1848,12 +1919,13 @@ class MacKvmBridge:
                             self._saved_pos = (float(loc.x), float(loc.y))
                         except Exception:
                             pass
-                    # Giấu mũi tên sát viền phải (cách góc dưới 28px để tránh Hot Corner của macOS)
                     q.CGWarpMouseCursorPosition(
                         (max_x - 1.0, max(min_y + 40.0, max_y - 28.0))
                     )
                     q.CGAssociateMouseAndMouseCursorPosition(False)
+                    self._set_mac_cursor_hidden(True)
                 else:
+                    self._set_mac_cursor_hidden(False)
                     q.CGAssociateMouseAndMouseCursorPosition(True)
                     rx, ry = self._saved_pos
                     rx = max(min_x + 3.0, min(max_x - 8.0, rx))
@@ -1872,14 +1944,20 @@ class MacKvmBridge:
             }
         )
 
-    def bridge_return_to_mac(self, y_ratio: float = 0.5) -> None:
+    def bridge_return_to_mac(
+        self, y_ratio: float = 0.5, return_edge: str = "left"
+    ) -> None:
         with self._lock:
             min_x, min_y, max_x, max_y = self._get_desktop_bounds()
             clamped_r = max(0.02, min(0.98, float(y_ratio)))
             ry = min_y + clamped_r * max(1.0, max_y - min_y)
-            self._saved_pos = (min_x + 4.0, ry)
+            if return_edge == "right":
+                self._saved_pos = (max_x - 6.0, ry)
+            else:
+                self._saved_pos = (min_x + 5.0, ry)
             self._last_cross_at = time.monotonic()
             self._left_edge_push = 0.0
+            self._right_edge_push = 0.0
             self._set_captured_locked(False, save_cur_pos=False)
 
     def emergency_release_to_mac(self) -> None:
@@ -1888,6 +1966,7 @@ class MacKvmBridge:
                 self.mode = "mac"
             self._last_cross_at = time.monotonic()
             self._left_edge_push = 0.0
+            self._right_edge_push = 0.0
             self._set_captured_locked(False, save_cur_pos=False)
 
     def set_captured(self, target: bool) -> None:
@@ -1901,6 +1980,7 @@ class MacKvmBridge:
 
                 self._quartz = Quartz
                 q = Quartz
+                self._enable_background_cursor_control()
                 self._disable_warp_suppression()
 
                 def _cb(proxy, event_type, event, refcon):
@@ -1941,7 +2021,7 @@ class MacKvmBridge:
                         dx = float(q.CGEventGetIntegerValueField(event, q.kCGMouseEventDeltaX))
                         dy = float(q.CGEventGetIntegerValueField(event, q.kCGMouseEventDeltaY))
 
-                        # Chế độ 3 (`bridge`): đang ở màn Mac, di chuột chạm mép TRÁI của Mac -> sang mép PHẢI của điện thoại
+                        # Chế độ 3 (`bridge`): đang ở màn Mac, di chuột chạm mép TRÁI hoặc PHẢI của Mac -> sang màn Điện thoại và ẩn hẳn chuột trên Mac!
                         if not self.captured:
                             if (
                                 self.mode == "bridge"
@@ -1951,12 +2031,10 @@ class MacKvmBridge:
                                 cur_x = float(loc.x)
                                 cur_y = float(loc.y)
                                 min_x, min_y, max_x, max_y = self._get_desktop_bounds()
-                                if (
-                                    cur_x <= min_x + 2.0
-                                    and dx < 0.0
-                                    and (time.monotonic() - self._last_cross_at) > 0.12
-                                ):
+                                cooldown_ok = (time.monotonic() - self._last_cross_at) > 0.12
+                                if cur_x <= min_x + 2.0 and dx < 0.0 and cooldown_ok:
                                     self._left_edge_push += -dx
+                                    self._right_edge_push = 0.0
                                     if self._left_edge_push >= 4.0:
                                         y_r = max(
                                             0.02,
@@ -1977,8 +2055,34 @@ class MacKvmBridge:
                                                 save_cur_pos=False,
                                             )
                                         return None
-                                elif cur_x > min_x + 10.0:
+                                elif cur_x >= max_x - 2.0 and dx > 0.0 and cooldown_ok:
+                                    self._right_edge_push += dx
                                     self._left_edge_push = 0.0
+                                    if self._right_edge_push >= 4.0:
+                                        y_r = max(
+                                            0.02,
+                                            min(
+                                                0.98,
+                                                (cur_y - min_y)
+                                                / max(1.0, max_y - min_y),
+                                            ),
+                                        )
+                                        with self._lock:
+                                            self._right_edge_push = 0.0
+                                            self._saved_pos = (max_x - 6.0, cur_y)
+                                            self._last_cross_at = time.monotonic()
+                                            self._set_captured_locked(
+                                                True,
+                                                enter_edge="left",
+                                                y_ratio=y_r,
+                                                save_cur_pos=False,
+                                            )
+                                        return None
+                                else:
+                                    if cur_x > min_x + 10.0:
+                                        self._left_edge_push = 0.0
+                                    if cur_x < max_x - 10.0:
+                                        self._right_edge_push = 0.0
                             return event
 
                         if event_type in (
@@ -3832,7 +3936,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.2.5",
+        "version": "2.2.6",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
@@ -4079,7 +4183,10 @@ async def keyboard_ws(ws: WebSocket) -> None:
                 kvm_mode = str(data.get("mode", "mac"))
                 kvm_bridge.attach_client(ws, cur_loop, kvm_queue, kvm_on, kvm_mode)
             elif msg_type == "kvm_bridge_return":
-                kvm_bridge.bridge_return_to_mac(float(data.get("y_ratio", 0.5)))
+                kvm_bridge.bridge_return_to_mac(
+                    float(data.get("y_ratio", 0.5)),
+                    str(data.get("return_edge", "left")),
+                )
             elif msg_type == "kvm_set":
                 kvm_bridge.set_captured(bool(data.get("captured", False)))
             elif msg_type == "kvm_return":
