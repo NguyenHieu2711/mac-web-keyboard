@@ -4551,6 +4551,27 @@ async def mac_virtual_display_diag() -> dict:
                             "h": float(b.size.height),
                         })
                 out["displays"] = disps
+                ov_wins = []
+                wlist = q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionOnScreenOnly, q.kCGNullWindowID) or []
+                for w in wlist:
+                    ly = int(w.get("kCGWindowLayer", 0))
+                    owner = str(w.get("kCGWindowOwnerName", "") or "")
+                    wb = w.get("kCGWindowBounds") or {}
+                    ww = float(wb.get("Width", 0))
+                    wh = float(wb.get("Height", 0))
+                    if ly >= 15 or "dock" in owner.lower() or "sidebar" in owner.lower() or "menubar" in owner.lower():
+                        if ww >= 20 and wh >= 20:
+                            ov_wins.append({
+                                "owner": owner,
+                                "pid": int(w.get("kCGWindowOwnerPID", 0) or 0),
+                                "layer": ly,
+                                "name": str(w.get("kCGWindowName", "") or "")[:40],
+                                "x": float(wb.get("X", 0)),
+                                "y": float(wb.get("Y", 0)),
+                                "w": ww,
+                                "h": wh,
+                            })
+                out["overlay_windows"] = ov_wins[:40]
         except Exception as e:
             out["displays_err"] = str(e)
         return out
