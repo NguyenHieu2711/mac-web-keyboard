@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.36";
+  const BUNDLED_BOOT_VER = "2.3.38";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -4016,9 +4016,9 @@
               rdpActiveEngine = "none";
               syncRdpConnectionUI();
               if (!rdpManualDisconnect && kbLayout === "remote") {
-                // Tự chuyển mượt giữa PC chính <-> MacBook khi đổi máy mà không làm thoát Remote trên Điện thoại!
+                // Tự nối lại mượt khi PC/Mac đang đổi độ phân giải, thu phóng hoặc reconnect Remote (chịu trễ tới ~20s trước khi hiện nút Kết nối)
                 void (async () => {
-                  for (const waitMs of [250, 800, 1600]) {
+                  for (const waitMs of [300, 650, 1000, 1400, 2000, 2500, 3000, 4000, 5000]) {
                     await new Promise((r) => setTimeout(r, waitMs));
                     if (rdpManualDisconnect || kbLayout !== "remote" || isRemoteConnected() || rdpConnecting) return;
                     const chk = await checkMacParallelAvailable();
@@ -4027,9 +4027,22 @@
                       return;
                     }
                   }
-                  if (kbLayout === "remote" && remoteLoginOverlay && !isRemoteConnected()) {
-                    setRdpStatus("Màn hình nguồn đã đóng — bấm Kết nối khi muốn mở lại trên ĐT.", false);
+                  if (kbLayout === "remote" && remoteLoginOverlay && !isRemoteConnected() && !rdpManualDisconnect) {
+                    setRdpStatus("Màn hình nguồn tạm ngắt — đang chờ tự nối lại (hoặc bấm Kết nối).", false);
                     remoteLoginOverlay.classList.remove("is-hidden");
+                    // Vẫn dò ngầm định kỳ mỗi 4s để tự vào lại ngay khi PC/Mac mở lại màn hình nguồn
+                    const bgWait = async () => {
+                      for (let k = 0; k < 20; k++) {
+                        await new Promise((r) => setTimeout(r, 4000));
+                        if (rdpManualDisconnect || kbLayout !== "remote" || isRemoteConnected() || rdpConnecting) return;
+                        const chk2 = await checkMacParallelAvailable();
+                        if (chk2.available) {
+                          void connectRdpSession();
+                          return;
+                        }
+                      }
+                    };
+                    void bgWait();
                   }
                 })();
                 return;
@@ -4063,18 +4076,23 @@
           syncRdpConnectionUI();
           if (settled && !rdpManualDisconnect && kbLayout === "remote") {
             if (canAutoReconnectRdp()) {
-              setTimeout(async () => {
-                if (rdpManualDisconnect || kbLayout !== "remote" || isRemoteConnected() || rdpConnecting) {
-                  return;
+              void (async () => {
+                for (const waitMs of [450, 900, 1500, 2500, 3500]) {
+                  await new Promise((r) => setTimeout(r, waitMs));
+                  if (rdpManualDisconnect || kbLayout !== "remote" || isRemoteConnected() || rdpConnecting) {
+                    return;
+                  }
+                  const chk = await checkMacParallelAvailable();
+                  if (chk.available) {
+                    void connectRdpSession();
+                    return;
+                  }
                 }
-                const chk = await checkMacParallelAvailable();
-                if (chk.available) {
-                  void connectRdpSession();
-                } else if (remoteLoginOverlay) {
+                if (remoteLoginOverlay && !isRemoteConnected() && kbLayout === "remote" && !rdpManualDisconnect) {
                   setRdpStatus("Phiên Remote đã tạm dừng để không khóa PC chính.", false);
                   remoteLoginOverlay.classList.remove("is-hidden");
                 }
-              }, 550);
+              })();
               return;
             }
             if (remoteLoginOverlay) {
@@ -5705,7 +5723,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.36";
+  const BUNDLED_WEB_VERSION = "2.3.38";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();

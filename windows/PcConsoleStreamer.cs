@@ -602,7 +602,7 @@ namespace MacWebKeyboard
                         if (!IsConsoleActiveAndUnlocked())
                         {
                             lockedStreak++;
-                            if (lockedStreak >= 12)
+                            if (lockedStreak >= 40)
                             {
                                 byte[] ctrl = Encoding.UTF8.GetBytes("{\"type\":\"parallel_ended\",\"reason\":\"console_locked\"}");
                                 byte[] pkt = new byte[1 + ctrl.Length];

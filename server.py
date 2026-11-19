@@ -4453,7 +4453,7 @@ async def rdp_parallel_ws(ws: WebSocket) -> None:
                     else:
                         if missing_since is None:
                             missing_since = now
-                        elif (now - missing_since) >= 3.5:
+                        elif (now - missing_since) >= 8.0:
                             await ws.send_text('{"type":"parallel_ended"}')
                             break
                         await asyncio.sleep(0.15)
