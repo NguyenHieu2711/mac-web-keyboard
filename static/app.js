@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.0";
+  const BUNDLED_BOOT_VER = "2.3.1";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -3590,27 +3590,51 @@
     return "http://192.168.52.103:5050";
   }
 
-  async function checkMacParallelAvailable() {
-    const macBase = resolveMacHttpBase();
+  function resolvePcHttpBase() {
+    const raw = (rdpHostInput ? rdpHostInput.value : "192.168.52.230")
+      .trim()
+      .replace(/^https?:\/\/|^wss?:\/\//, "")
+      .split(":")[0]
+      .trim();
+    return raw ? `http://${raw}:5051` : "http://192.168.52.230:5051";
+  }
+
+  async function probeParallelEndpoint(baseUrl, timeoutMs = 850) {
     const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-    const t = ctrl ? setTimeout(() => ctrl.abort(), 1200) : null;
+    const t = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
     try {
-      const res = await fetch(`${macBase}/rdp-mode-check`, {
+      const res = await fetch(`${baseUrl}/rdp-mode-check`, {
         cache: "no-store",
         signal: ctrl ? ctrl.signal : undefined,
       });
-      if (!res.ok) return { available: false, macBase };
+      if (!res.ok) return null;
       const j = await res.json();
-      return {
-        available: Boolean(j && j.parallel_available),
-        macBase,
-        window: j ? j.window : null,
-      };
+      if (j && j.parallel_available) {
+        return {
+          available: true,
+          macBase: baseUrl,
+          source: j.source || "mac",
+          window: j.window || null,
+        };
+      }
+      return null;
     } catch {
-      return { available: false, macBase };
+      return null;
     } finally {
       if (t) clearTimeout(t);
     }
+  }
+
+  async function checkMacParallelAvailable() {
+    const pcBase = resolvePcHttpBase();
+    const macBase = resolveMacHttpBase();
+    // 1. Ưu tiên kiểm tra luồng Song song trực tiếp trên PC chính (:5051) -> mở PC chính không bao giờ đá Điện thoại!
+    const pcRes = await probeParallelEndpoint(pcBase, 650);
+    if (pcRes) return pcRes;
+    // 2. Nếu PC chính đang khóa màn hình / MacBook đang remote -> lấy luồng Song song từ MacBook (:5050)
+    const macRes = await probeParallelEndpoint(macBase, 1000);
+    if (macRes) return macRes;
+    return { available: false, macBase };
   }
 
   function closeParallelRdpWs() {
@@ -3739,8 +3763,27 @@
               closeParallelRdpWs();
               rdpActiveEngine = "none";
               syncRdpConnectionUI();
+              if (!rdpManualDisconnect && kbLayout === "remote") {
+                // Tự chuyển mượt giữa PC chính <-> MacBook khi đổi máy mà không làm thoát Remote trên Điện thoại!
+                void (async () => {
+                  for (const waitMs of [180, 520]) {
+                    await new Promise((r) => setTimeout(r, waitMs));
+                    if (rdpManualDisconnect || kbLayout !== "remote" || isRemoteConnected() || rdpConnecting) return;
+                    const chk = await checkMacParallelAvailable();
+                    if (chk.available) {
+                      void connectRdpSession();
+                      return;
+                    }
+                  }
+                  if (kbLayout === "remote" && remoteLoginOverlay && !isRemoteConnected()) {
+                    setRdpStatus("Màn hình nguồn đã đóng — bấm Kết nối khi muốn mở lại trên ĐT.", false);
+                    remoteLoginOverlay.classList.remove("is-hidden");
+                  }
+                })();
+                return;
+              }
               if (kbLayout === "remote" && remoteLoginOverlay) {
-                setRdpStatus("Đã nhường phiên cho PC chính (bấm Kết nối khi muốn mở lại trên ĐT).", false);
+                setRdpStatus("Đã ngắt luồng Song song.", false);
                 remoteLoginOverlay.classList.remove("is-hidden");
               }
             }
@@ -5231,7 +5274,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.0";
+  const BUNDLED_WEB_VERSION = "2.3.1";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();

@@ -1197,6 +1197,120 @@ function getLiveWebBundle() {
   return cachedWebBundle;
 }
 
+const PREVIEW_HELPER_PORT = Number(process.env.PC_PREVIEW_PORT || 5052);
+const CONSOLE_STREAMER_EXE = path.join(__dirname, 'pc_console_streamer.exe');
+const pcParallelClients = new Set();
+
+function tryStartConsoleStreamer() {
+  if (!fs.existsSync(CONSOLE_STREAMER_EXE)) return;
+  try {
+    const p = spawn(CONSOLE_STREAMER_EXE, [], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    p.unref();
+  } catch (_) {}
+}
+
+function probeLocalPreviewHelper(cb) {
+  let done = false;
+  const finish = (val) => {
+    if (done) return;
+    done = true;
+    cb(val);
+  };
+  const sock = net.createConnection({ host: '127.0.0.1', port: PREVIEW_HELPER_PORT });
+  sock.setTimeout(380);
+  let rx = '';
+  sock.on('connect', () => {
+    sock.write('PROBE\n');
+  });
+  sock.on('data', (chunk) => {
+    rx += chunk.toString('utf8');
+    const nl = rx.indexOf('\n');
+    if (nl >= 0) {
+      try {
+        finish(JSON.parse(rx.slice(0, nl).trim()));
+      } catch (_) {
+        finish(null);
+      }
+      sock.destroy();
+    }
+  });
+  sock.on('timeout', () => {
+    finish(null);
+    sock.destroy();
+  });
+  sock.on('error', () => {
+    finish(null);
+  });
+  sock.on('close', () => {
+    finish(null);
+  });
+}
+
+function handlePcParallelWebSocket(wsConn) {
+  const upstream = net.createConnection({ host: '127.0.0.1', port: PREVIEW_HELPER_PORT });
+  upstream.setNoDelay(true);
+  let rxBuf = Buffer.alloc(0);
+  let closed = false;
+
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    if (pcParallelClients.delete(wsConn)) {
+      syncWasapiProcess();
+    }
+    try { upstream.destroy(); } catch (_) {}
+    try { wsConn.close(); } catch (_) {}
+  };
+
+  upstream.on('connect', () => {
+    pcParallelClients.add(wsConn);
+    syncWasapiProcess();
+    try {
+      wsConn.sendText(JSON.stringify({ type: 'spk_format', ...wasapiFormat }));
+    } catch (_) {}
+    upstream.write('STREAM\n');
+  });
+
+  upstream.on('data', (chunk) => {
+    rxBuf = rxBuf.length === 0 ? chunk : Buffer.concat([rxBuf, chunk]);
+    while (rxBuf.length >= 4) {
+      const fLen = rxBuf.readUInt32BE(0);
+      if (fLen === 0 || fLen > 6 * 1024 * 1024) {
+        cleanup();
+        return;
+      }
+      if (rxBuf.length < 4 + fLen) break;
+      const body = rxBuf.subarray(4, 4 + fLen);
+      rxBuf = rxBuf.subarray(4 + fLen);
+      if (body[0] === 0x20) {
+        try {
+          wsConn.sendText(body.subarray(1).toString('utf8'));
+        } catch (_) {}
+      } else {
+        try {
+          wsConn.sendBinary(body);
+        } catch (_) {}
+      }
+    }
+  });
+
+  upstream.on('error', cleanup);
+  upstream.on('close', cleanup);
+
+  wsConn.on('message', ({ opcode, payload }) => {
+    if (opcode === 0x1 && !closed && upstream.writable) {
+      const txt = payload.toString('utf8').replace(/[\r\n]+/g, ' ').trim();
+      if (txt) {
+        try { upstream.write(txt + '\n'); } catch (_) {}
+      }
+    }
+  });
+  wsConn.on('close', cleanup);
+}
+
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -1228,8 +1342,23 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ ok: true, vn: wantVn }));
     return;
   }
+  if (cleanPath === '/rdp-mode-check') {
+    probeLocalPreviewHelper((info) => {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          source: 'pc',
+          parallel_available: Boolean(info && info.active),
+          streamer_ready: Boolean(info && info.ok),
+          window: info && info.active ? { width: info.width || 1920, height: info.height || 1080 } : null,
+        })
+      );
+    });
+    return;
+  }
   if (cleanPath === '/health') {
-    let webVer = '2.3.0';
+    let webVer = '2.3.1';
     let etag = '';
     try {
       const b = getLiveWebBundle();
@@ -1239,7 +1368,7 @@ const server = http.createServer((req, res) => {
     const payload = JSON.stringify({
       ok: true,
       service: 'pc-rdp-gateway',
-      version: '2.3.0',
+      version: '2.3.1',
       web_version: webVer,
       unikey_vn: lastUnikeyVnState,
       etag,
@@ -1337,6 +1466,10 @@ server.on('upgrade', (req, socket, head) => {
   const wsConn = new SimpleWebSocketConnection(socket, head);
   const parsedUrl = new URL(req.url || '/', 'http://localhost');
   const sid = parsedUrl.searchParams.get('sid') || '';
+  if (parsedUrl.pathname.startsWith('/rdp-parallel-ws')) {
+    handlePcParallelWebSocket(wsConn);
+    return;
+  }
   if (parsedUrl.pathname.startsWith('/rdp-audio-ws')) {
     const sess = getOrCreateAudioSession(sid);
     if (sess) {
@@ -1416,6 +1549,7 @@ function updateLearnedMacBridgeIp(ip) {
 }
 
 function hasLocalFallbackAudioListeners() {
+  if (pcParallelClients.size > 0) return true;
   for (const sess of audioSessions.values()) {
     if (sess.audioWs && !sess.gotRdpsndWave) return true;
   }
@@ -1426,6 +1560,9 @@ function broadcastWasapiFormat() {
   const fmtStr = JSON.stringify({ type: 'spk_format', ...wasapiFormat });
   if (macWantsAudio && macBridgeWs && macBridgeWs.readyState === 1) {
     try { macBridgeWs.send(fmtStr); } catch (_) {}
+  }
+  for (const ws of pcParallelClients) {
+    try { ws.sendText(fmtStr); } catch (_) {}
   }
   for (const sess of audioSessions.values()) {
     if (sess.audioWs && !sess.gotRdpsndWave) {
@@ -1443,6 +1580,9 @@ function broadcastWasapiPcm(pcmChunk) {
   pcmChunk.copy(out, 1);
   if (needMac) {
     try { macBridgeWs.send(out); } catch (_) {}
+  }
+  for (const ws of pcParallelClients) {
+    try { ws.sendBinary(out); } catch (_) {}
   }
   if (needLocal) {
     for (const sess of audioSessions.values()) {
@@ -1553,5 +1693,6 @@ function connectOutboundMacBridge() {
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   const ips = getLanIps().map((x) => `${x.ip}:${LISTEN_PORT}`).join(', ');
   console.log(`[PC-RDP-Gateway] Listening on ${LISTEN_HOST}:${LISTEN_PORT} (${ips})`);
+  tryStartConsoleStreamer();
   connectOutboundMacBridge();
 });
