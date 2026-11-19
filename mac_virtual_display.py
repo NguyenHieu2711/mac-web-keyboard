@@ -842,15 +842,46 @@ class MacVirtualDisplayManager:
         s_size = _cfstr("AXSize")
         s_min = _cfstr("AXMinimized")
         s_fs = _cfstr("AXFullScreen")
+        s_main = _cfstr("AXMain")
+        s_focused = _cfstr("AXFocused")
+        s_frontmost = _cfstr("AXFrontmost")
         s_raise = _cfstr("AXRaise")
         try:
+            kTrue = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
+            kFalse = ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value
+
+            rapp = None
+            try:
+                import AppKit  # type: ignore
+
+                rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
+            except Exception:
+                rapp = None
+
+            # Nếu kích hoạt app đang bị ẩn (rapp.hide()), phải unhide + đẩy AXFrontmost TRƯỚC khi đọc AXWindows!
+            if action == "activate":
+                self._min_vdisp_pids.discard(pid)
+                was_hidden = False
+                if rapp is not None:
+                    try:
+                        was_hidden = bool(rapp.isHidden())
+                        rapp.unhide()
+                    except Exception:
+                        pass
+                ax.AXUIElementSetAttributeValue(app_ax, s_frontmost, kTrue)
+                if rapp is not None:
+                    try:
+                        rapp.activateWithOptions_(2)
+                    except Exception:
+                        pass
+                if was_hidden:
+                    time.sleep(0.035)
+
             wins_ref = ctypes.c_void_p()
             if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wins_ref)) != 0 or not wins_ref.value:
                 return
             try:
                 cnt = cf.CFArrayGetCount(wins_ref.value)
-                kTrue = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
-                kFalse = ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value
                 vdisp_matches = []
                 min_fallback = []
                 for i in range(cnt):
@@ -900,43 +931,34 @@ class MacVirtualDisplayManager:
                         min_fallback.append((w_ax, is_min, is_fs))
 
                 if action == "activate":
-                    self._min_vdisp_pids.discard(pid)
                     targets = vdisp_matches if vdisp_matches else min_fallback
-                    for w_ax, is_min, _ in targets:
-                        if is_min:
-                            ax.AXUIElementSetAttributeValue(w_ax, s_min, kFalse)
-                        ax.AXUIElementPerformAction(w_ax, s_raise)
-                    try:
-                        import AppKit  # type: ignore
-
-                        rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
+                    for _pass in range(2):
+                        ax.AXUIElementSetAttributeValue(app_ax, s_frontmost, kTrue)
+                        for w_ax, is_min, _ in targets:
+                            if is_min:
+                                ax.AXUIElementSetAttributeValue(w_ax, s_min, kFalse)
+                            ax.AXUIElementSetAttributeValue(w_ax, s_main, kTrue)
+                            ax.AXUIElementSetAttributeValue(w_ax, s_focused, kTrue)
+                            ax.AXUIElementPerformAction(w_ax, s_raise)
                         if rapp is not None:
-                            rapp.unhide()
-                            rapp.activateWithOptions_(2)
-                    except Exception:
-                        pass
+                            try:
+                                rapp.activateWithOptions_(2)
+                            except Exception:
+                                pass
+                        if _pass == 0 and targets:
+                            time.sleep(0.04)
                 elif action == "minimize":
                     self._min_vdisp_pids.add(pid)
                     for w_ax, is_min, is_fs in vdisp_matches:
-                        if not is_min:
-                            if is_fs:
-                                try:
-                                    import AppKit  # type: ignore
-
-                                    rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
-                                    if rapp is not None:
-                                        rapp.hide()
-                                except Exception:
-                                    pass
-                            else:
-                                ax.AXUIElementSetAttributeValue(w_ax, s_min, kTrue)
+                        if not is_min and not is_fs:
+                            ax.AXUIElementSetAttributeValue(w_ax, s_min, kTrue)
             finally:
                 cf.CFRelease(wins_ref.value)
         except Exception:
             pass
         finally:
             cf.CFRelease(app_ax)
-            for s_ref in (s_wins, s_pos, s_size, s_min, s_fs, s_raise):
+            for s_ref in (s_wins, s_pos, s_size, s_min, s_fs, s_main, s_focused, s_frontmost, s_raise):
                 if s_ref:
                     cf.CFRelease(s_ref)
 
