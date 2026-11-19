@@ -6100,7 +6100,7 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
             finally:
                 cf.CFRelease(w_cc.value)
         if exited_cc_fs:
-            time.sleep(0.70)
+            time.sleep(1.05)
             try:
                 with objc.autorelease_pool():
                     rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
@@ -6108,7 +6108,7 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                         rapp.activateWithOptions_(3)
             except Exception:
                 pass
-            time.sleep(0.18)
+            time.sleep(0.20)
 
         # 2) Đóng cửa sổ phiên 1 màn cũ (nếu có)
         if close_existing_session:
@@ -6396,9 +6396,12 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
     else:
         _LAST_DOWNGRADED_1MON_PID = 0
 
-    for _ in range(5):
-        time.sleep(0.32)
-        if _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False):
+    for _ in range(4):
+        time.sleep(0.35)
+        _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
+        time.sleep(0.65)
+        _, sess_now, _ = _rdp_probe_vdisp_state()
+        if sess_now:
             break
 
     # Khi về 1 màn cửa sổ thường: bung khít 1512x944 ngay khi cửa sổ mở và lặp lại sau khi kênh Dynamic Display bắt tay xong!
