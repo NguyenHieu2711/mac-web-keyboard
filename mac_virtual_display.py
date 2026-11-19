@@ -161,6 +161,7 @@ static BOOL dock_is_dark_mode(void) {
 @property (nonatomic, strong) NSVisualEffectView *bgView;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *knownWins;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *minGraceUntil;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *hiddenPids;
 @property (nonatomic, strong) NSMutableArray<NSNumber *> *appOrder;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSDictionary *> *appState;
 @property (nonatomic, copy) NSString *lastSig;
@@ -178,6 +179,7 @@ static BOOL dock_is_dark_mode(void) {
     _selfPid = getpid();
     _knownWins = [NSMutableDictionary dictionary];
     _minGraceUntil = [NSMutableDictionary dictionary];
+    _hiddenPids = [NSMutableDictionary dictionary];
     _appOrder = [NSMutableArray array];
     _appState = [NSMutableDictionary dictionary];
     _lastSig = @"";
@@ -232,11 +234,13 @@ static BOOL dock_is_dark_mode(void) {
     NSDictionary *info = self.appState[@(pid)];
     BOOL isVis = info ? [info[@"visible"] boolValue] : YES;
     BOOL isTop = info ? [info[@"top"] boolValue] : NO;
+    BOOL hasMain = info ? [info[@"hasMain"] boolValue] : NO;
     unsigned int winId = info ? [info[@"winId"] unsignedIntValue] : 0;
     NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
 
     if (!isVis || !isTop) {
         [self.minGraceUntil removeObjectForKey:@(pid)];
+        [self.hiddenPids removeObjectForKey:@(pid)];
         if (winId > 0) self.knownWins[@(winId)] = @(pid);
         if (rapp) {
             [rapp unhide];
@@ -246,11 +250,18 @@ static BOOL dock_is_dark_mode(void) {
         fflush(stdout);
     } else {
         if (winId > 0) self.knownWins[@(winId)] = @(pid);
-        self.minGraceUntil[@(pid)] = @(CFAbsoluteTimeGetCurrent() + 0.85);
-        fprintf(stdout, "DOCK_MINIMIZE %d %u\n", (int)pid, winId);
-        fflush(stdout);
+        self.minGraceUntil[@(pid)] = @(CFAbsoluteTimeGetCurrent() + 0.65);
+        if (!hasMain && rapp) {
+            // Ẩn tức thì ngay trên Màn phụ (KHÔNG hiệu ứng uốn vải lụa Genie, KHÔNG bay về Dock MacBook!)
+            self.hiddenPids[@(pid)] = @(winId);
+            [rapp hide];
+        } else {
+            // App có mở thêm cửa sổ khác trên MacBook -> chỉ thu nhỏ riêng cửa sổ ở Màn phụ
+            fprintf(stdout, "DOCK_MINIMIZE %d %u\n", (int)pid, winId);
+            fflush(stdout);
+        }
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self refresh];
     });
 }
@@ -273,6 +284,7 @@ static BOOL dock_is_dark_mode(void) {
     NSArray *wins = (__bridge_transfer NSArray *)allList;
     BOOL hasFullscreen = NO;
     NSMutableSet<NSNumber *> *aliveWinIds = [NSMutableSet set];
+    NSMutableSet<NSNumber *> *mainScreenPids = [NSMutableSet set];
     NSMutableDictionary<NSNumber *, NSMutableDictionary *> *appsByPid = [NSMutableDictionary dictionary];
     NSRunningApplication *frontApp = [[NSWorkspace sharedWorkspace] frontmostApplication];
     pid_t frontPid = frontApp ? frontApp.processIdentifier : 0;
@@ -305,8 +317,9 @@ static BOOL dock_is_dark_mode(void) {
         BOOL trackedVisible = (inVdisp && isBigWindow && isOnscreen && alpha > 0.05);
         BOOL movedAwayVisibly = (!inVdisp && isBigWindow && isOnscreen && alpha > 0.05);
 
-        // Nếu người dùng kéo cửa sổ trở lại màn chính MacBook -> gỡ khỏi Dock phụ
+        // Nếu người dùng kéo cửa sổ trở lại màn chính MacBook -> gỡ khỏi Dock phụ và đánh dấu app có cửa sổ trên MacBook
         if (movedAwayVisibly) {
+            [mainScreenPids addObject:@(pid)];
             if (isTrackedKnown) [self.knownWins removeObjectForKey:winIdNum];
             continue;
         }
@@ -318,18 +331,19 @@ static BOOL dock_is_dark_mode(void) {
             continue;
         }
 
-        // Trong 0.85s ngay sau khi bấm thu nhỏ: không ghi đè thành visible trong lúc macOS đang chạy hiệu ứng thu nhỏ
+        // Trong 0.65s ngay sau khi bấm ẩn: giữ trạng thái ẩn ổn định
         NSNumber *graceObj = self.minGraceUntil[@(pid)];
         BOOL inMinGrace = (graceObj != nil && now < [graceObj doubleValue]);
         if (!trackedVisible && graceObj != nil) {
             [self.minGraceUntil removeObjectForKey:@(pid)];
         }
 
-        BOOL effectiveVisible = (trackedVisible && !inMinGrace);
+        BOOL effectiveVisible = (trackedVisible && !inMinGrace && !rapp.isHidden);
         if (trackedVisible) {
-            // Ghi nhớ lâu dài winId đã từng mở trên Màn phụ #2 để khi thu nhỏ (từ Dock phụ, SmartRightDock hay nút vàng) icon LUÔN giữ nguyên trên Dock phụ!
+            // Ghi nhớ lâu dài winId đã từng mở trên Màn phụ #2 để khi ẩn/thu nhỏ icon LUÔN giữ nguyên trên Dock phụ!
             self.knownWins[winIdNum] = @(pid);
             if (effectiveVisible) {
+                [self.hiddenPids removeObjectForKey:@(pid)];
                 if (topVdispPid == 0) topVdispPid = pid;
                 if (wb.size.width >= vb.size.width - 4.0 && wb.size.height >= vb.size.height - 4.0) {
                     hasFullscreen = YES;
@@ -347,6 +361,7 @@ static BOOL dock_is_dark_mode(void) {
                 @"visible": @(effectiveVisible),
                 @"top": @(isTop),
                 @"active": @(isAct),
+                @"hasMain": @NO,
             }];
             appsByPid[pidNum] = entry;
         } else if (effectiveVisible && ![entry[@"visible"] boolValue]) {
@@ -357,10 +372,55 @@ static BOOL dock_is_dark_mode(void) {
         }
     }
 
-    // Dọn các cửa sổ đã đóng hẳn khỏi bộ nhớ theo dõi (cửa sổ đang thu nhỏ vẫn còn trong aliveWinIds -> giữ nguyên icon!)
+    // Giữ nguyên icon cho các app đang ẩn bằng [rapp hide] trên Màn phụ (kể cả khi Chromium tạm ẩn winId)
+    NSArray<NSNumber *> *hiddenKeys = [self.hiddenPids allKeys];
+    for (NSNumber *pidNum in hiddenKeys) {
+        pid_t hpid = (pid_t)[pidNum intValue];
+        NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:hpid];
+        if (!rapp || rapp.isTerminated || [mainScreenPids containsObject:pidNum]) {
+            [self.hiddenPids removeObjectForKey:pidNum];
+            continue;
+        }
+        if (rapp.isHidden) {
+            if (!appsByPid[pidNum]) {
+                appsByPid[pidNum] = [NSMutableDictionary dictionaryWithDictionary:@{
+                    @"winId": self.hiddenPids[pidNum] ?: @(0),
+                    @"visible": @NO,
+                    @"top": @NO,
+                    @"active": @NO,
+                    @"hasMain": @NO,
+                }];
+            }
+        } else {
+            [self.hiddenPids removeObjectForKey:pidNum];
+        }
+    }
+
+    // Cập nhật cờ hasMain cho mọi app trên Dock phụ
+    for (NSNumber *pidNum in appsByPid) {
+        appsByPid[pidNum][@"hasMain"] = @([mainScreenPids containsObject:pidNum]);
+    }
+
+    // Dọn các cửa sổ đã đóng hẳn khỏi bộ nhớ theo dõi (nếu app đang bị ẩn bởi SmartRightDock/Cmd+H -> giữ qua hiddenPids!)
     NSArray<NSNumber *> *knownKeys = [self.knownWins allKeys];
     for (NSNumber *wid in knownKeys) {
         if (![aliveWinIds containsObject:wid]) {
+            NSNumber *kpid = self.knownWins[wid];
+            NSRunningApplication *krapp = kpid
+                ? [NSRunningApplication runningApplicationWithProcessIdentifier:(pid_t)[kpid intValue]]
+                : nil;
+            if (krapp && !krapp.isTerminated && krapp.isHidden && ![mainScreenPids containsObject:kpid]) {
+                self.hiddenPids[kpid] = wid;
+                if (!appsByPid[kpid]) {
+                    appsByPid[kpid] = [NSMutableDictionary dictionaryWithDictionary:@{
+                        @"winId": wid,
+                        @"visible": @NO,
+                        @"top": @NO,
+                        @"active": @NO,
+                        @"hasMain": @NO,
+                    }];
+                }
+            }
             [self.knownWins removeObjectForKey:wid];
         }
     }
@@ -473,16 +533,20 @@ static BOOL dock_is_dark_mode(void) {
 
 - (void)markPidMinimized:(pid_t)pid {
     if (pid <= 0) return;
-    self.minGraceUntil[@(pid)] = @(CFAbsoluteTimeGetCurrent() + 0.85);
+    self.minGraceUntil[@(pid)] = @(CFAbsoluteTimeGetCurrent() + 0.65);
     NSDictionary *st = self.appState[@(pid)];
     if (st && st[@"winId"]) {
         self.knownWins[st[@"winId"]] = @(pid);
+        self.hiddenPids[@(pid)] = st[@"winId"];
+    } else {
+        self.hiddenPids[@(pid)] = @(0);
     }
 }
 
 - (void)unmarkPidMinimized:(pid_t)pid {
     if (pid <= 0) return;
     [self.minGraceUntil removeObjectForKey:@(pid)];
+    [self.hiddenPids removeObjectForKey:@(pid)];
 }
 
 - (void)shutdown {
@@ -1174,20 +1238,20 @@ class MacVirtualDisplayManager:
                         vdisp_wins.append((w_ax, is_min, is_fs))
 
                     if not vdisp_wins:
+                        if bool(rapp.isHidden()):
+                            self._min_vdisp_pids.discard(pid)
+                            self._send_helper_cmd(f"u {pid}")
+                            rapp.unhide()
+                            rapp.activateWithOptions_(2)
                         return
-                    any_visible = any(not m for _, m, _ in vdisp_wins)
+                    any_visible = (not bool(rapp.isHidden())) and any(not m for _, m, _ in vdisp_wins)
                     if any_visible and front_pid == pid:
-                        # Đang mở nổi trên màn phụ -> thu nhỏ ngay trên màn phụ!
+                        # Ẩn tức thì ngay trên Màn phụ bằng rapp.hide() (KHÔNG hiệu ứng uốn vải lụa Genie, KHÔNG bay về Dock MacBook!)
                         self._min_vdisp_pids.add(pid)
                         self._send_helper_cmd(f"m {pid}")
-                        for w_ax, is_min, is_fs in vdisp_wins:
-                            if not is_min:
-                                if is_fs:
-                                    rapp.hide()
-                                else:
-                                    ax.AXUIElementSetAttributeValue(w_ax, s_min, kTrue)
+                        rapp.hide()
                     else:
-                        # Đang thu nhỏ hoặc bị che -> mở phóng lên ngay trên màn phụ!
+                        # Đang ẩn/thu nhỏ hoặc bị che -> mở tức thì ngay trên Màn phụ!
                         self._min_vdisp_pids.discard(pid)
                         self._send_helper_cmd(f"u {pid}")
                         rapp.unhide()
