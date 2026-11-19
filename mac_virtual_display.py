@@ -342,24 +342,24 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
         NSArray<NSView *> *oldSubs = [self.bgView.subviews copy];
         for (NSView *sv in oldSubs) [sv removeFromSuperview];
 
-        CGFloat dockW = 120.0;
-        CGFloat dockH = 34.0;
+        CGFloat dockW = 96.0;
+        CGFloat dockH = 26.0;
         if (self.appOrder.count == 0) {
-            self.bgView.layer.cornerRadius = 14.0;
-            NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect((dockW - 38.0) * 0.5, (dockH - 3.0) * 0.5, 38.0, 3.0)];
+            self.bgView.layer.cornerRadius = 11.0;
+            NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect((dockW - 32.0) * 0.5, (dockH - 2.5) * 0.5, 32.0, 2.5)];
             bar.wantsLayer = YES;
-            bar.layer.cornerRadius = 1.5;
+            bar.layer.cornerRadius = 1.25;
             bar.layer.backgroundColor = [[NSColor colorWithWhite:1.0 alpha:0.28] CGColor];
             [self.bgView addSubview:bar];
         } else {
-            self.bgView.layer.cornerRadius = 16.0;
+            self.bgView.layer.cornerRadius = 13.0;
             NSUInteger count = self.appOrder.count;
-            CGFloat itemStep = 48.0;
-            CGFloat maxW = MAX(140.0, scr.frame.size.width - 48.0);
-            NSUInteger maxItems = (NSUInteger)MAX(1, floor((maxW - 20.0) / itemStep));
+            CGFloat itemStep = 38.0;
+            CGFloat maxW = MAX(120.0, scr.frame.size.width - 48.0);
+            NSUInteger maxItems = (NSUInteger)MAX(1, floor((maxW - 16.0) / itemStep));
             if (count > maxItems) count = maxItems;
-            dockW = 20.0 + count * itemStep;
-            dockH = 54.0;
+            dockW = 16.0 + count * itemStep;
+            dockH = 44.0;
 
             for (NSUInteger i = 0; i < count; i++) {
                 NSNumber *pidNum = self.appOrder[i];
@@ -368,8 +368,8 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
                 BOOL isVis = [st[@"visible"] boolValue];
                 BOOL isAct = [st[@"active"] boolValue];
 
-                CGFloat bx = 10.0 + i * itemStep + 3.0;
-                NSButton *btn = [[NSButton alloc] initWithFrame:NSMakeRect(bx, 9.0, 42.0, 40.0)];
+                CGFloat bx = 8.0 + i * itemStep + 2.0;
+                NSButton *btn = [[NSButton alloc] initWithFrame:NSMakeRect(bx, 8.0, 34.0, 31.0)];
                 btn.bordered = NO;
                 btn.title = @"";
                 btn.bezelStyle = NSBezelStyleRegularSquare;
@@ -383,15 +383,15 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
                 NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
                 if (rapp && rapp.icon) {
                     NSImage *ico = [rapp.icon copy];
-                    ico.size = NSMakeSize(36.0, 36.0);
+                    ico.size = NSMakeSize(28.0, 28.0);
                     btn.image = ico;
                 }
                 [self.bgView addSubview:btn];
 
                 if (isVis) {
-                    NSView *dot = [[NSView alloc] initWithFrame:NSMakeRect(bx + 19.0, 3.0, 4.0, 4.0)];
+                    NSView *dot = [[NSView alloc] initWithFrame:NSMakeRect(bx + 15.25, 2.5, 3.5, 3.5)];
                     dot.wantsLayer = YES;
-                    dot.layer.cornerRadius = 2.0;
+                    dot.layer.cornerRadius = 1.75;
                     dot.layer.backgroundColor = [[NSColor colorWithWhite:1.0 alpha:(isAct ? 0.92 : 0.38)] CGColor];
                     [self.bgView addSubview:dot];
                 }
@@ -399,7 +399,7 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
         }
 
         CGFloat dockX = scr.frame.origin.x + (scr.frame.size.width - dockW) * 0.5;
-        CGFloat dockY = scr.frame.origin.y + 8.0;
+        CGFloat dockY = scr.frame.origin.y + 6.0;
         [self.panel setFrame:NSMakeRect(dockX, dockY, dockW, dockH) display:YES];
     }
     [self.panel orderFrontRegardless];
