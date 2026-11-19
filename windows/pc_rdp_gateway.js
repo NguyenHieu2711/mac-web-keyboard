@@ -1198,18 +1198,10 @@ function getLiveWebBundle() {
 }
 
 const PREVIEW_HELPER_PORT = Number(process.env.PC_PREVIEW_PORT || 5052);
-const CHILD_PREVIEW_PORT = Number(process.env.PC_CHILD_PREVIEW_PORT || 5053);
 const CONSOLE_STREAMER_EXE = path.join(__dirname, 'pc_console_streamer.exe');
-const CHILD_HOST_EXE = path.join(__dirname, 'pc_child_host.exe');
 const pcParallelClients = new Set();
 
 function tryStartConsoleStreamer() {
-  if (fs.existsSync(CHILD_HOST_EXE)) {
-    try {
-      const ch = spawn(CHILD_HOST_EXE, [], { detached: true, stdio: 'ignore' });
-      ch.unref();
-    } catch (_) {}
-  }
   if (!fs.existsSync(CONSOLE_STREAMER_EXE)) return;
   try {
     const p = spawn(CONSOLE_STREAMER_EXE, [], {
@@ -1220,18 +1212,18 @@ function tryStartConsoleStreamer() {
   } catch (_) {}
 }
 
-function probeSinglePreviewPort(port, cb) {
+function queryPreviewHelperCommand(cmd, cb, timeoutMs = 450) {
   let done = false;
   const finish = (val) => {
     if (done) return;
     done = true;
     cb(val);
   };
-  const sock = net.createConnection({ host: '127.0.0.1', port });
-  sock.setTimeout(360);
+  const sock = net.createConnection({ host: '127.0.0.1', port: PREVIEW_HELPER_PORT });
+  sock.setTimeout(timeoutMs);
   let rx = '';
   sock.on('connect', () => {
-    sock.write('PROBE\n');
+    sock.write(cmd + '\n');
   });
   sock.on('data', (chunk) => {
     rx += chunk.toString('utf8');
@@ -1239,7 +1231,7 @@ function probeSinglePreviewPort(port, cb) {
     if (nl >= 0) {
       try {
         const parsed = JSON.parse(rx.slice(0, nl).trim());
-        parsed.port = port;
+        parsed.port = PREVIEW_HELPER_PORT;
         finish(parsed);
       } catch (_) {
         finish(null);
@@ -1260,46 +1252,67 @@ function probeSinglePreviewPort(port, cb) {
 }
 
 function probeLocalPreviewHelper(cb) {
-  // Ưu tiên cổng 5053 (Child Session độc lập 2248x1080 @ 125% tách biệt 100% khỏi Mac/PC chính!)
-  probeSinglePreviewPort(CHILD_PREVIEW_PORT, (childInfo) => {
-    if (childInfo && childInfo.active) {
-      cb(childInfo);
-      return;
-    }
-    probeSinglePreviewPort(PREVIEW_HELPER_PORT, (mainInfo) => {
-      cb(mainInfo || childInfo);
-    });
-  });
+  queryPreviewHelperCommand('PROBE', cb, 400);
 }
 
 function handlePcParallelWebSocket(wsConn) {
-  probeLocalPreviewHelper((info) => {
-    const targetPort = info && info.port ? info.port : PREVIEW_HELPER_PORT;
-    const upstream = net.createConnection({ host: '127.0.0.1', port: targetPort });
-    upstream.setNoDelay(true);
-    let rxBuf = Buffer.alloc(0);
-    let closed = false;
+  let upstream = null;
+  let rxBuf = Buffer.alloc(0);
+  let closed = false;
+  const pendingMsgs = [];
 
-    const cleanup = () => {
-      if (closed) return;
-      closed = true;
-      if (pcParallelClients.delete(wsConn)) {
-        syncWasapiProcess();
-      }
-      try { upstream.destroy(); } catch (_) {}
-      try { wsConn.close(); } catch (_) {}
-    };
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    pendingMsgs.length = 0;
+    if (pcParallelClients.delete(wsConn)) {
+      syncWasapiProcess();
+    }
+    try { if (upstream) upstream.destroy(); } catch (_) {}
+    upstream = null;
+    try { wsConn.close(); } catch (_) {}
+  };
+
+  wsConn.onClose = cleanup;
+  wsConn.onBinaryMessage = (payload) => {
+    if (closed || !payload || payload.length === 0) return;
+    const txt = payload.toString('utf8').replace(/[\r\n]+/g, ' ').trim();
+    if (!txt || txt[0] !== '{') return;
+    if (upstream && upstream.writable) {
+      try { upstream.write(txt + '\n'); } catch (_) {}
+    } else if (pendingMsgs.length < 32) {
+      pendingMsgs.push(txt);
+    }
+  };
+
+  probeLocalPreviewHelper((info) => {
+    if (closed || !wsConn.open) return;
+    const targetPort = info && info.port ? info.port : PREVIEW_HELPER_PORT;
+    upstream = net.createConnection({ host: '127.0.0.1', port: targetPort });
+    upstream.setNoDelay(true);
 
     upstream.on('connect', () => {
+      if (closed || !wsConn.open) {
+        cleanup();
+        return;
+      }
       pcParallelClients.add(wsConn);
       syncWasapiProcess();
       try {
         wsConn.sendText(JSON.stringify({ type: 'spk_format', ...wasapiFormat }));
       } catch (_) {}
-      upstream.write('STREAM\n');
+      try {
+        upstream.write('STREAM\n');
+        while (pendingMsgs.length > 0) {
+          upstream.write(pendingMsgs.shift() + '\n');
+        }
+      } catch (_) {
+        cleanup();
+      }
     });
 
     upstream.on('data', (chunk) => {
+      if (closed || !wsConn.open) return;
       rxBuf = rxBuf.length === 0 ? chunk : Buffer.concat([rxBuf, chunk]);
       while (rxBuf.length >= 4) {
         const fLen = rxBuf.readUInt32BE(0);
@@ -1315,6 +1328,10 @@ function handlePcParallelWebSocket(wsConn) {
             wsConn.sendText(body.subarray(1).toString('utf8'));
           } catch (_) {}
         } else {
+          // Chống nghẽn Wi-Fi: nếu buffer gửi đang dồn > 384KB thì bỏ khung hình cũ tránh đơ Điện thoại
+          if (body[0] === 0x10 && wsConn.socket && wsConn.socket.writableLength > 384 * 1024) {
+            continue;
+          }
           try {
             wsConn.sendBinary(body);
           } catch (_) {}
@@ -1324,16 +1341,6 @@ function handlePcParallelWebSocket(wsConn) {
 
     upstream.on('error', cleanup);
     upstream.on('close', cleanup);
-
-    wsConn.on('message', ({ opcode, payload }) => {
-      if (opcode === 0x1 && !closed && upstream.writable) {
-        const txt = payload.toString('utf8').replace(/[\r\n]+/g, ' ').trim();
-        if (txt) {
-          try { upstream.write(txt + '\n'); } catch (_) {}
-        }
-      }
-    });
-    wsConn.on('close', cleanup);
   });
 }
 
@@ -1368,25 +1375,38 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ ok: true, vn: wantVn }));
     return;
   }
+  if (cleanPath === '/pc-windows') {
+    queryPreviewHelperCommand('WINDOWS', (info) => {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(
+        JSON.stringify(
+          info && info.ok
+            ? info
+            : { ok: false, pinned: 0, pinned_title: '', pinned_proc: '', windows: [] }
+        )
+      );
+    }, 900);
+    return;
+  }
   if (cleanPath === '/rdp-mode-check') {
     probeLocalPreviewHelper((info) => {
-      const isChild = Boolean(info && info.child);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(
         JSON.stringify({
           ok: true,
-          source: isChild ? 'pc_child' : 'pc',
-          independent: isChild,
+          source: 'pc',
+          window_pin_supported: true,
+          pinned: info && info.pinned ? info.pinned : 0,
           parallel_available: Boolean(info && info.active),
           streamer_ready: Boolean(info && info.ok),
-          window: info && info.active ? { width: info.width || 2248, height: info.height || 1080 } : null,
+          window: info && info.active ? { width: info.width || 1920, height: info.height || 1080 } : null,
         })
       );
     });
     return;
   }
   if (cleanPath === '/health') {
-    let webVer = '2.3.3';
+    let webVer = '2.3.4';
     let etag = '';
     try {
       const b = getLiveWebBundle();
@@ -1396,7 +1416,7 @@ const server = http.createServer((req, res) => {
     const payload = JSON.stringify({
       ok: true,
       service: 'pc-rdp-gateway',
-      version: '2.3.3',
+      version: '2.3.4',
       web_version: webVer,
       unikey_vn: lastUnikeyVnState,
       etag,
@@ -1717,6 +1737,14 @@ function connectOutboundMacBridge() {
     setTimeout(connectOutboundMacBridge, 4000);
   }
 }
+
+server.on('error', (err) => {
+  if (err && err.code === 'EADDRINUSE') {
+    process.exit(0);
+  }
+  console.error('[PC-RDP-Gateway] Server error:', err && err.message ? err.message : err);
+  process.exit(1);
+});
 
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   const ips = getLanIps().map((x) => `${x.ip}:${LISTEN_PORT}`).join(', ');

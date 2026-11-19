@@ -5277,7 +5277,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.3";
+  const BUNDLED_WEB_VERSION = "2.3.4";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
