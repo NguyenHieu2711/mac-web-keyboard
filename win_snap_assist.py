@@ -1241,29 +1241,39 @@ class WinSnapAssistController(Foundation.NSObject):
                 self.show_snap_assist_picker("left", (sx, sy, rx - sx, sh), rem)
 
 
-class DesktopSlotPreviewView(AppKit.NSView):
-    def drawRect_(self, rect):
-        b = self.bounds()
-        p = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            Foundation.NSInsetRect(b, 1.5, 1.5), 10.0, 10.0
+class WallpaperPatchView(AppKit.NSView):
+    def initWithFrame_cgImage_(self, frame, cg_img):
+        self = objc.super(WallpaperPatchView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self.ns_img = AppKit.NSImage.alloc().initWithCGImage_size_(
+            cg_img, frame.size
         )
-        AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
-            0.35, 0.68, 1.0, 0.22
-        ).setFill()
-        AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
-            0.55, 0.82, 1.0, 0.78
-        ).setStroke()
-        p.setLineWidth_(1.8)
-        p.fill()
-        p.stroke()
+        return self
+
+    def setCgImage_(self, cg_img):
+        self.ns_img = AppKit.NSImage.alloc().initWithCGImage_size_(
+            cg_img, self.bounds().size
+        )
+        self.setNeedsDisplay_(True)
+
+    def drawRect_(self, rect):
+        if self.ns_img is not None:
+            self.ns_img.drawInRect_fromRect_operation_fraction_(
+                self.bounds(),
+                Foundation.NSZeroRect,
+                AppKit.NSCompositingOperationCopy,
+                1.0,
+            )
 
 
 class DesktopGridController(Foundation.NSObject):
     """
     Quản lý lưới icon Desktop kiểu Windows chạy trực tiếp trên Main RunLoop:
-    - Hiển thị khung mờ dự đoán ô lưới (Ghost Preview Box) ngay khi đang kéo icon trên Desktop.
-    - Ngay khoảnh khắc nhả chuột (LeftMouseUp), hút icon vào đúng tâm ô lưới (51 + c*68, 71 + r*84)
-      và tự động hoán đổi nếu thả đè lên icon khác.
+    - Ẩn bản thể cũ tại vị trí gốc bằng đúng mảnh hình nền (Wallpaper Patch) khi đang kéo
+      để chỉ có đúng 1 icon di chuyển mượt mà 120Hz theo chuột.
+    - Không vẽ ô gạch nền; ngay khoảnh khắc nhả chuột (LeftMouseUp), lượng tử hóa tọa độ thả
+      về đúng tâm ô lưới (51 + c*68, 71 + r*84) mà không gọi lại AppleScript gây giật 2 nhịp.
     """
 
     ORIGIN_X = 51
@@ -1279,13 +1289,12 @@ class DesktopGridController(Foundation.NSObject):
             return None
         self.last_cells: Dict[str, Tuple[int, int]] = {}
         self.last_px: Dict[str, Tuple[int, int]] = {}
-        self.preview_panel: Optional[AppKit.NSPanel] = None
+        self.mask_panel: Optional[AppKit.NSPanel] = None
         self.dragging_desktop = False
         self.drag_icon: Optional[str] = None
         self.drag_start_pt: Optional[Tuple[float, float]] = None
         self.grab_offset: Tuple[float, float] = (0.0, 0.0)
         self.drag_moved = False
-        self.last_tap_pt: Optional[Tuple[float, float]] = None
 
         self.read_script = Foundation.NSAppleScript.alloc().initWithSource_(
             'tell application "Finder"\n'
@@ -1306,7 +1315,6 @@ class DesktopGridController(Foundation.NSObject):
         # Khởi tạo vị trí ban đầu
         self.snap_desktop_now()
 
-        # Cài đặt Quartz CGEventTap để lượng tử hóa tọa độ thả chuột (0.000ms trước khi Finder nhận MouseUp)
         mask = (
             Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDown)
             | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDragged)
@@ -1344,7 +1352,6 @@ class DesktopGridController(Foundation.NSObject):
             if etype == Quartz.kCGEventLeftMouseDown:
                 if self._is_clicking_desktop(qx, qy):
                     self.drag_start_pt = (qx, qy)
-                    self.last_tap_pt = (qx, qy)
                     self.dragging_desktop = True
                     self.drag_moved = False
                     best_nm = None
@@ -1366,40 +1373,20 @@ class DesktopGridController(Foundation.NSObject):
                     self.dragging_desktop = False
                     self.drag_icon = None
                     self.drag_start_pt = None
-                    self.last_tap_pt = None
                     self.drag_moved = False
 
             elif etype == Quartz.kCGEventLeftMouseDragged:
+                # Để chuột và icon đi theo tay mượt 100% ở 120Hz (không can thiệp tọa độ khi đang kéo)
                 if self.dragging_desktop and self.drag_start_pt is not None:
                     if not self.drag_moved:
                         if (
-                            abs(qx - self.drag_start_pt[0]) > 7.0
-                            or abs(qy - self.drag_start_pt[1]) > 7.0
+                            abs(qx - self.drag_start_pt[0]) > 4.0
+                            or abs(qy - self.drag_start_pt[1]) > 4.0
                         ):
                             self.drag_moved = True
-                        else:
-                            self.last_tap_pt = (qx, qy)
-                    if self.drag_moved and self.drag_icon is not None:
-                        dx, dy = self.grab_offset
-                        c, r = self.to_cell(qx - dx, qy - dy)
-                        gx, gy = self.to_px(c, r)
-                        self._show_preview_at(gx, gy)
-                        sx = float(gx) + dx
-                        sy = float(gy) + dy
-                        snap_pt = Quartz.CGPointMake(sx, sy)
-                        Quartz.CGEventSetLocation(event, snap_pt)
-                        if self.last_tap_pt is not None:
-                            Quartz.CGEventSetIntegerValueField(
-                                event,
-                                Quartz.kCGMouseEventDeltaX,
-                                int(round(sx - self.last_tap_pt[0])),
-                            )
-                            Quartz.CGEventSetIntegerValueField(
-                                event,
-                                Quartz.kCGMouseEventDeltaY,
-                                int(round(sy - self.last_tap_pt[1])),
-                            )
-                        self.last_tap_pt = (sx, sy)
+                            if self.drag_icon is not None and self.drag_icon in self.last_px:
+                                ix0, iy0 = self.last_px[self.drag_icon]
+                                self._cover_original_icon_at(ix0, iy0)
 
             elif etype == Quartz.kCGEventLeftMouseUp:
                 was_drag = self.dragging_desktop and self.drag_moved
@@ -1409,34 +1396,73 @@ class DesktopGridController(Foundation.NSObject):
                 self.drag_icon = None
                 self.drag_start_pt = None
                 self.drag_moved = False
-                self._hide_preview()
 
-                if was_drag:
-                    if icon_nm is not None:
-                        tc, tr = self.to_cell(qx - dx, qy - dy)
-                        gx, gy = self.to_px(tc, tr)
-                        sx = float(gx) + dx
-                        sy = float(gy) + dy
-                        snap_pt = Quartz.CGPointMake(sx, sy)
-                        Quartz.CGEventSetLocation(event, snap_pt)
-                        if self.last_tap_pt is not None:
-                            Quartz.CGEventSetIntegerValueField(
-                                event,
-                                Quartz.kCGMouseEventDeltaX,
-                                int(round(sx - self.last_tap_pt[0])),
-                            )
-                            Quartz.CGEventSetIntegerValueField(
-                                event,
-                                Quartz.kCGMouseEventDeltaY,
-                                int(round(sy - self.last_tap_pt[1])),
-                            )
-                    self.last_tap_pt = None
-                    Foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                        0.01, self, "snapTimer:", None, False
+                if was_drag and icon_nm is not None:
+                    tc, tr = self.to_cell(qx - dx, qy - dy)
+                    gx, gy = self.to_px(tc, tr)
+                    sx = float(gx) + dx
+                    sy = float(gy) + dy
+                    snap_pt = Quartz.CGPointMake(sx, sy)
+                    drag_ev = Quartz.CGEventCreateMouseEvent(
+                        None,
+                        Quartz.kCGEventLeftMouseDragged,
+                        snap_pt,
+                        Quartz.kCGMouseButtonLeft,
                     )
+                    if drag_ev is not None:
+                        Quartz.CGEventTapPostEvent(proxy, drag_ev)
+                    Quartz.CGEventSetLocation(event, snap_pt)
+
+                    # Kiểm tra xem ô đích (tc, tr) đã có icon nào khác chiếm chưa
+                    prev_cell = self.last_cells.get(icon_nm)
+                    occupant = None
+                    for onm, ocell in self.last_cells.items():
+                        if onm != icon_nm and ocell == (tc, tr):
+                            occupant = onm
+                            break
+
+                    if occupant is None:
+                        # Ô trống: Finder đã thả trực tiếp vào đúng (gx, gy), chỉ cập nhật bộ nhớ, KHÔNG gọi AppleScript để tránh giật 2 nhịp!
+                        self.last_cells[icon_nm] = (tc, tr)
+                        self.last_px[icon_nm] = (gx, gy)
+                        Foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                            0.05, self, "hideMaskTimer:", None, False
+                        )
+                    else:
+                        # Ô đã có icon khác: hoán đổi icon kia sang ô cũ
+                        if prev_cell is not None:
+                            ogx, ogy = self.to_px(prev_cell[0], prev_cell[1])
+                            self.last_cells[icon_nm] = (tc, tr)
+                            self.last_px[icon_nm] = (gx, gy)
+                            self.last_cells[occupant] = prev_cell
+                            self.last_px[occupant] = (ogx, ogy)
+                            self._pending_swap = (occupant, ogx, ogy)
+                            Foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                                0.02, self, "swapTimer:", None, False
+                            )
+                        else:
+                            Foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                                0.05, self, "snapTimer:", None, False
+                            )
+                else:
+                    self._hide_mask()
         except Exception:
             pass
         return event
+
+    def hideMaskTimer_(self, timer) -> None:
+        self._hide_mask()
+
+    def swapTimer_(self, timer) -> None:
+        self._hide_mask()
+        sw = getattr(self, "_pending_swap", None)
+        if sw:
+            self._pending_swap = None
+            occ, ogx, ogy = sw
+            safe_nm = occ.replace("\\", "\\\\").replace('"', '\\"')
+            src = f'tell application "Finder" to set desktop position of item "{safe_nm}" of desktop to {{{ogx}, {ogy}}}'
+            ws = Foundation.NSAppleScript.alloc().initWithSource_(src)
+            ws.executeAndReturnError_(None)
 
     def to_cell(self, x: float, y: float) -> Tuple[int, int]:
         c = max(
@@ -1526,12 +1552,39 @@ class DesktopGridController(Foundation.NSObject):
             )
 
     def snapTimer_(self, timer) -> None:
+        self._hide_mask()
         self.snap_desktop_now()
 
-    def _show_preview_at(self, gx: int, gy: int) -> None:
-        w, h = 62.0, 74.0
-        cocoa_r = quartz_to_cocoa_rect(gx - w / 2.0, gy - h / 2.0 + 6.0, w, h)
-        if self.preview_panel is None:
+    def _cover_original_icon_at(self, ix0: int, iy0: int) -> None:
+        w, h = 66.0, 84.0
+        rx = max(0.0, float(ix0) - w / 2.0)
+        ry = max(0.0, float(iy0) - 34.0)
+        wins = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID
+        )
+        finder_wid = 0
+        desktop_layer = -2147483603
+        if wins:
+            for info in wins:
+                if (
+                    info.get("kCGWindowOwnerName") == "Finder"
+                    and int(info.get("kCGWindowLayer", 0)) < 0
+                ):
+                    finder_wid = int(info.get("kCGWindowNumber", 0))
+                    desktop_layer = int(info.get("kCGWindowLayer", -2147483603))
+                    break
+        if not finder_wid:
+            return
+        cg_img = Quartz.CGWindowListCreateImage(
+            Quartz.CGRectMake(rx, ry, w, h),
+            Quartz.kCGWindowListOptionOnScreenBelowWindow,
+            finder_wid,
+            Quartz.kCGWindowImageDefault,
+        )
+        if cg_img is None:
+            return
+        cocoa_r = quartz_to_cocoa_rect(rx, ry, w, h)
+        if self.mask_panel is None:
             panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
                 cocoa_r,
                 AppKit.NSWindowStyleMaskBorderless
@@ -1539,24 +1592,25 @@ class DesktopGridController(Foundation.NSObject):
                 AppKit.NSBackingStoreBuffered,
                 False,
             )
-            panel.setLevel_(AppKit.NSFloatingWindowLevel)
-            panel.setOpaque_(False)
-            panel.setBackgroundColor_(AppKit.NSColor.clearColor())
+            panel.setLevel_(desktop_layer + 1)
+            panel.setOpaque_(True)
             panel.setHasShadow_(False)
             panel.setIgnoresMouseEvents_(True)
-            v = DesktopSlotPreviewView.alloc().initWithFrame_(
-                Foundation.NSMakeRect(0, 0, w, h)
+            v = WallpaperPatchView.alloc().initWithFrame_cgImage_(
+                Foundation.NSMakeRect(0, 0, w, h), cg_img
             )
             panel.setContentView_(v)
             panel.orderFrontRegardless()
-            self.preview_panel = panel
+            self.mask_panel = panel
         else:
-            self.preview_panel.setFrame_display_(cocoa_r, True)
-            self.preview_panel.orderFrontRegardless()
+            self.mask_panel.setLevel_(desktop_layer + 1)
+            self.mask_panel.setFrame_display_(cocoa_r, False)
+            self.mask_panel.contentView().setCgImage_(cg_img)
+            self.mask_panel.orderFrontRegardless()
 
-    def _hide_preview(self) -> None:
-        if self.preview_panel is not None:
-            self.preview_panel.orderOut_(None)
+    def _hide_mask(self) -> None:
+        if self.mask_panel is not None:
+            self.mask_panel.orderOut_(None)
 
     def snap_desktop_now(self) -> None:
         res, err = self.read_script.executeAndReturnError_(None)
