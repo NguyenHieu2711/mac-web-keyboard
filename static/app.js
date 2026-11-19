@@ -2554,10 +2554,14 @@
     const sh = remoteStage.offsetHeight * rdpZoom;
     const baseLeft = (vw - remoteStage.offsetWidth) / 2;
     const baseTop = (vh - remoteStage.offsetHeight) / 2;
-    const minX = Math.min(0, vw - sw - baseLeft);
-    const maxX = Math.max(0, -baseLeft);
-    const minY = Math.min(0, vh - sh - baseTop);
-    const maxY = Math.max(0, -baseTop);
+    const boundX1 = -baseLeft;
+    const boundX2 = vw - sw - baseLeft;
+    const boundY1 = -baseTop;
+    const boundY2 = vh - sh - baseTop;
+    const minX = Math.min(boundX1, boundX2);
+    const maxX = Math.max(boundX1, boundX2);
+    const minY = Math.min(boundY1, boundY2);
+    const maxY = Math.max(boundY1, boundY2);
     rdpPanX = Math.max(minX, Math.min(maxX, rdpPanX));
     rdpPanY = Math.max(minY, Math.min(maxY, rdpPanY));
   }
@@ -2575,6 +2579,27 @@
         btnRemoteZoomReset.classList.remove("is-hidden");
       }
     }
+  }
+
+  function zoomRdpAtClientPoint(targetZoom, focalClientX, focalClientY, panDx = 0, panDy = 0) {
+    if (!remoteViewport || !remoteStage) return;
+    const clampedZoom = Math.max(1.0, Math.min(4.0, targetZoom));
+    const vpRect = remoteViewport.getBoundingClientRect();
+    const vw = remoteViewport.clientWidth || 1;
+    const vh = remoteViewport.clientHeight || 1;
+    const baseLeft = (vw - remoteStage.offsetWidth) / 2;
+    const baseTop = (vh - remoteStage.offsetHeight) / 2;
+    const prevFx = focalClientX - vpRect.left - panDx;
+    const prevFy = focalClientY - vpRect.top - panDy;
+    const stageX = (prevFx - baseLeft - rdpPanX) / (rdpZoom || 1.0);
+    const stageY = (prevFy - baseTop - rdpPanY) / (rdpZoom || 1.0);
+    const curFx = focalClientX - vpRect.left;
+    const curFy = focalClientY - vpRect.top;
+    rdpZoom = clampedZoom;
+    rdpPanX = curFx - baseLeft - stageX * rdpZoom;
+    rdpPanY = curFy - baseTop - stageY * rdpZoom;
+    applyRdpStageTransform();
+    updateOverlayCursorVisual();
   }
 
   function showLocalRemoteCursor(rx, ry, autoHideMs = 1500) {
@@ -2892,11 +2917,21 @@
     applyRdpDeviceEvents(evs);
   }
 
-  function rdpSendWheel(dxPx, dyPx, unit = 0) {
+  function rdpSendWheel(dxPx, dyPx, unit = 0, targetX = null, targetY = null) {
     if (!isRemoteConnected()) return;
+    let movedTarget = false;
+    if (targetX !== null && targetY !== null) {
+      const nx = Math.max(0, Math.min((remoteCanvas.width || RDP_TARGET_W) - 1, Math.round(targetX)));
+      const ny = Math.max(0, Math.min((remoteCanvas.height || RDP_TARGET_H) - 1, Math.round(targetY)));
+      if (Math.abs(nx - kvmX) > 2 || Math.abs(ny - kvmY) > 2) {
+        movedTarget = true;
+      }
+      kvmX = nx;
+      kvmY = ny;
+    }
     if (rdpActiveEngine === "parallel") {
       const norm = coordsToNormalizedRatio(kvmX, kvmY);
-      const mul = unit === 1 ? 32 : 1;
+      const mul = unit === 1 ? 36 : 1;
       sendParallelJson({
         type: "ptr_wheel",
         rx: norm.rx,
@@ -2908,8 +2943,13 @@
     }
     if (!rdpSession || !rdpMod) return;
     const evs = [];
-    if (dyPx !== 0) evs.push(rdpMod.DeviceEvent.wheelRotations(true, dyPx, unit));
-    if (dxPx !== 0) evs.push(rdpMod.DeviceEvent.wheelRotations(false, -dxPx, unit));
+    if (movedTarget) {
+      evs.push(rdpMod.DeviceEvent.mouseMove(kvmX, kvmY));
+    }
+    const iy = Math.round(dyPx);
+    const ix = Math.round(dxPx);
+    if (iy !== 0) evs.push(rdpMod.DeviceEvent.wheelRotations(true, iy, unit));
+    if (ix !== 0) evs.push(rdpMod.DeviceEvent.wheelRotations(false, ix, unit));
     if (evs.length > 0) applyRdpDeviceEvents(evs);
   }
 
@@ -4038,7 +4078,7 @@
   }
 
   if (remoteViewport && remoteCanvas) {
-    let rTouchMode = "none"; // "single" | "drag" | "two"
+    let rTouchMode = "none"; // "single" | "scroll" | "drag" | "two"
     let rStartAt = 0;
     let rPrevAt = 0;
     let rStartX = 0;
@@ -4054,6 +4094,8 @@
     let rLastTapAt = 0;
     let rLastTapRx = 0;
     let rLastTapRy = 0;
+    let rLastTapClientX = 0;
+    let rLastTapClientY = 0;
     let rPendingDoubleTapDrag = false;
     let rPinchStartDist = 0;
     let rPinchStartZoom = 1.0;
@@ -4062,6 +4104,11 @@
     let rTwoLastMidY = 0;
     let rScrollAccY = 0;
     let rScrollAccX = 0;
+    let rScrollAnchorX = 0;
+    let rScrollAnchorY = 0;
+    let rScrollVelX = 0;
+    let rScrollVelY = 0;
+    let rScrollInertiaRaf = null;
 
     const clearRdpLongTimer = () => {
       if (rLongTimer !== null) {
@@ -4070,10 +4117,66 @@
       }
     };
 
+    const stopRdpScrollInertia = () => {
+      if (rScrollInertiaRaf !== null) {
+        cancelAnimationFrame(rScrollInertiaRaf);
+        rScrollInertiaRaf = null;
+      }
+      rScrollVelX = 0;
+      rScrollVelY = 0;
+    };
+
+    const flushAccumulatedScroll = (anchorX = null, anchorY = null) => {
+      const minStep = rdpActiveEngine === "parallel" ? 6 : 3;
+      const py = Math.trunc(rScrollAccY);
+      const px = Math.trunc(rScrollAccX);
+      let sdx = 0;
+      let sdy = 0;
+      if (Math.abs(py) >= minStep) {
+        rScrollAccY -= py;
+        sdy = py;
+      }
+      if (Math.abs(px) >= minStep + 1) {
+        rScrollAccX -= px;
+        sdx = px;
+      }
+      if (sdx !== 0 || sdy !== 0) {
+        rdpSendWheel(sdx, sdy, 0, anchorX, anchorY);
+      }
+    };
+
+    const startRdpScrollInertia = (vx, vy, anchorX = null, anchorY = null) => {
+      stopRdpScrollInertia();
+      let curVx = Math.max(-68, Math.min(68, vx));
+      let curVy = Math.max(-68, Math.min(68, vy));
+      let lastTs = performance.now();
+      const step = (ts) => {
+        if (!isRemoteConnected()) {
+          rScrollInertiaRaf = null;
+          return;
+        }
+        const dt = Math.max(8, Math.min(34, ts - lastTs));
+        lastTs = ts;
+        const decay = Math.pow(0.92, dt / 16.67);
+        curVx *= decay;
+        curVy *= decay;
+        if (Math.hypot(curVx, curVy) < 0.75) {
+          rScrollInertiaRaf = null;
+          return;
+        }
+        rScrollAccX += curVx * (dt / 16.67);
+        rScrollAccY += curVy * (dt / 16.67);
+        flushAccumulatedScroll(anchorX, anchorY);
+        rScrollInertiaRaf = requestAnimationFrame(step);
+      };
+      rScrollInertiaRaf = requestAnimationFrame(step);
+    };
+
     remoteViewport.addEventListener(
       "touchstart",
       (e) => {
         ensureRdpAudioContext();
+        stopRdpScrollInertia();
         if (rdpHudExpanded) {
           setRemoteHudExpanded(false);
         }
@@ -4085,6 +4188,12 @@
 
         if (e.touches.length >= 2) {
           clearRdpLongTimer();
+          if (rTouchMode === "none") {
+            rStartAt = now;
+            rTotalMoved = 0;
+            rMaxFingers = e.touches.length;
+          }
+          rPrevAt = now;
           if (rTouchMode === "drag") {
             if (rdpInputMode === "pointer") {
               rdpSendMouseUp(kvmX, kvmY, 0, 1);
@@ -4097,12 +4206,18 @@
           rPinching = false;
           const t0 = e.touches[0];
           const t1 = e.touches[1];
-          rPinchStartDist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+          rPinchStartDist = Math.max(
+            20,
+            Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY)
+          );
           rPinchStartZoom = rdpZoom;
           rTwoLastMidX = (t0.clientX + t1.clientX) / 2;
           rTwoLastMidY = (t0.clientY + t1.clientY) / 2;
           rScrollAccY = 0;
           rScrollAccX = 0;
+          const midPt = clientToRemoteCoords(rTwoLastMidX, rTwoLastMidY);
+          rScrollAnchorX = midPt.x;
+          rScrollAnchorY = midPt.y;
           return;
         }
 
@@ -4120,13 +4235,18 @@
           rSmoothedVel = 0;
           rMoved = false;
           rLongFired = false;
-          rPendingDoubleTapDrag = rdpInputMode === "pointer" && now - rLastTapAt < 280;
+          rScrollAccX = 0;
+          rScrollAccY = 0;
+          const nearPrevTap =
+            Math.hypot(t.clientX - rLastTapClientX, t.clientY - rLastTapClientY) < 34;
+          rPendingDoubleTapDrag =
+            now - rLastTapAt < 290 && (rdpInputMode === "pointer" || nearPrevTap);
           clearRdpLongTimer();
 
-          const holdDelay = rdpInputMode === "pointer" ? 235 : 270;
+          const holdDelay = rdpInputMode === "pointer" ? 235 : 265;
           rLongTimer = setTimeout(() => {
             rLongTimer = null;
-            if (rTouchMode === "single" && !rMoved && rTotalMoved < 6) {
+            if (rTouchMode === "single" && !rMoved && rTotalMoved < 7) {
               rLongFired = true;
               triggerHaptic(15);
               if (rdpInputMode === "pointer") {
@@ -4150,57 +4270,56 @@
         if (rTouchMode === "two" && e.touches.length >= 2) {
           const t0 = e.touches[0];
           const t1 = e.touches[1];
-          const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+          const dist = Math.max(
+            20,
+            Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY)
+          );
           const midX = (t0.clientX + t1.clientX) / 2;
           const midY = (t0.clientY + t1.clientY) / 2;
+          const now = performance.now();
+          const dt = Math.max(4, Math.min(50, now - rPrevAt || 16));
+          rPrevAt = now;
           const dMidX = midX - rTwoLastMidX;
           const dMidY = midY - rTwoLastMidY;
           rTwoLastMidX = midX;
           rTwoLastMidY = midY;
           rTotalMoved += Math.hypot(dMidX, dMidY);
 
-          if (rPinching || Math.abs(dist - rPinchStartDist) > 24) {
+          // Ở chế độ Cảm ứng (`touch`): 1 ngón đã đảm nhiệm cuộn nội dung nên 2 ngón chuyên trách Pinch-Zoom đúng tâm + Pan tự do không độ trễ!
+          if (rdpInputMode === "touch") {
             rPinching = true;
-            const nextZoom = Math.max(
-              1.0,
-              Math.min(3.5, rPinchStartZoom * (dist / Math.max(20, rPinchStartDist)))
-            );
-            rdpZoom = nextZoom;
-            rdpPanX += dMidX;
-            rdpPanY += dMidY;
-            applyRdpStageTransform();
-          } else if (rdpInputMode === "touch" && rdpZoom > 1.03) {
-            rdpPanX += dMidX;
-            rdpPanY += dMidY;
-            applyRdpStageTransform();
+            const targetZoom = rPinchStartZoom * (dist / rPinchStartDist);
+            zoomRdpAtClientPoint(targetZoom, midX, midY, dMidX, dMidY);
+            return;
+          }
+
+          // Ở chế độ Dùng chuột (`pointer`): 2 ngón chụm/xòe -> Pinch-Zoom đúng tâm; 2 ngón song song -> Cuộn Trackpad
+          if (!rPinching && Math.abs(dist - rPinchStartDist) >= 18) {
+            rPinching = true;
+            rPinchStartDist = dist;
+            rPinchStartZoom = rdpZoom;
+          }
+          if (rPinching) {
+            const targetZoom = rPinchStartZoom * (dist / rPinchStartDist);
+            zoomRdpAtClientPoint(targetZoom, midX, midY, dMidX, dMidY);
           } else {
-            if (rdpInputMode === "touch") {
-              const midPt = clientToRemoteCoords(midX, midY);
-              kvmX = midPt.x;
-              kvmY = midPt.y;
-            }
-            rScrollAccY += dMidY * 1.65;
-            rScrollAccX += dMidX * 1.35;
-            const py = Math.trunc(rScrollAccY);
-            const px = Math.trunc(rScrollAccX);
-            let sdx = 0;
-            let sdy = 0;
-            if (Math.abs(py) >= 2) {
-              rScrollAccY -= py;
-              sdy = py;
-            }
-            if (Math.abs(px) >= 4) {
-              rScrollAccX -= px;
-              sdx = px;
-            }
-            if (sdx !== 0 || sdy !== 0) {
-              rdpSendWheel(sdx, sdy, 0);
-            }
+            const gain = rdpActiveEngine === "parallel" ? 2.0 : 2.5;
+            const stepX = dMidX * gain * 0.85;
+            const stepY = dMidY * gain;
+            rScrollAccY += stepY;
+            rScrollAccX += stepX;
+            const normDt = 16.67 / dt;
+            rScrollVelY = rScrollVelY * 0.45 + stepY * normDt * 0.55;
+            rScrollVelX = rScrollVelX * 0.45 + stepX * normDt * 0.55;
+            flushAccumulatedScroll(null, null);
           }
           return;
         }
 
-        if (e.touches.length === 1 && (rTouchMode === "single" || rTouchMode === "drag")) {
+        if (
+          e.touches.length === 1 &&
+          (rTouchMode === "single" || rTouchMode === "scroll" || rTouchMode === "drag")
+        ) {
           const t = e.touches[0];
           const now = performance.now();
           const dt = Math.max(4, Math.min(60, now - rPrevAt));
@@ -4246,24 +4365,39 @@
             return;
           }
 
-          // ── NHÁNH B: CHẾ ĐỘ CHẠM CẢM ỨNG (`touch` — Chạm trực tiếp chuẩn Microsoft Remote) ──
-          if (!rMoved && distFromStart > 8) {
+          // ── NHÁNH B: CHẾ ĐỘ CHẠM CẢM ỨNG (`touch` — Vuốt 1 ngón = Cuộn mượt tự nhiên; Ấn giữ + kéo = Bôi đen / Kéo thả) ──
+          if (!rMoved && distFromStart > 6.5) {
             rMoved = true;
             clearRdpLongTimer();
-            if (rLongFired || rdpZoom <= 1.03) {
+            const startPt = clientToRemoteCoords(rStartX, rStartY);
+            if (rLongFired || rPendingDoubleTapDrag) {
+              rPendingDoubleTapDrag = false;
               rTouchMode = "drag";
-              const startPt = clientToRemoteCoords(rStartX, rStartY);
+              if (!rLongFired) triggerHaptic(12);
               rdpSendMouseDown(startPt.x, startPt.y, 0, 1);
+            } else {
+              // Vuốt 1 ngón trực tiếp -> Cuộn nội dung ngay tại vùng dưới ngón tay (KHÔNG giữ chuột trái gây bôi đen!)
+              rTouchMode = "scroll";
+              rScrollAnchorX = startPt.x;
+              rScrollAnchorY = startPt.y;
+              localPointerVisible = false;
+              rdpSendMouseMove(rScrollAnchorX, rScrollAnchorY);
             }
           }
 
           if (rTouchMode === "drag") {
             const pt = clientToRemoteCoords(t.clientX, t.clientY);
             rdpSendMouseMove(pt.x, pt.y);
-          } else if (rMoved && rdpZoom > 1.03) {
-            rdpPanX += dx;
-            rdpPanY += dy;
-            applyRdpStageTransform();
+          } else if (rTouchMode === "scroll") {
+            const gain = rdpActiveEngine === "parallel" ? 2.15 : 2.75;
+            const stepX = dx * gain * 0.85;
+            const stepY = dy * gain;
+            rScrollAccY += stepY;
+            rScrollAccX += stepX;
+            const normDt = 16.67 / dt;
+            rScrollVelY = rScrollVelY * 0.42 + stepY * normDt * 0.58;
+            rScrollVelX = rScrollVelX * 0.42 + stepX * normDt * 0.58;
+            flushAccumulatedScroll(rScrollAnchorX, rScrollAnchorY);
           }
         }
       },
@@ -4271,14 +4405,28 @@
     );
 
     const handleRdpTouchEnd = (e) => {
-      if (e.touches.length > 0) return;
+      if (e.touches.length > 0) {
+        // Nếu người dùng vừa nhấc 1 trong 2 ngón khi đang zoom -> cập nhật điểm mốc tránh nhảy khi đặt lại ngón thứ 2
+        if (rTouchMode === "two" && e.touches.length === 1) {
+          rLastX = e.touches[0].clientX;
+          rLastY = e.touches[0].clientY;
+        }
+        return;
+      }
       clearRdpLongTimer();
       if (!isRemoteConnected()) {
         rTouchMode = "none";
         return;
       }
 
-      const duration = performance.now() - rStartAt;
+      const now = performance.now();
+      const duration = now - rStartAt;
+      if (rdpZoom > 1.0 && rdpZoom < 1.02) {
+        rdpZoom = 1.0;
+        rdpPanX = 0;
+        rdpPanY = 0;
+        applyRdpStageTransform();
+      }
 
       // ── KẾT THÚC CHẠM Ở CHẾ ĐỘ DÙNG CHUỘT (`pointer`) ──
       if (rdpInputMode === "pointer") {
@@ -4288,8 +4436,12 @@
           rTouchMode = "none";
           return;
         }
+        if (rTouchMode === "two" && !rPinching && now - rPrevAt < 75 && Math.hypot(rScrollVelX, rScrollVelY) > 2.2) {
+          startRdpScrollInertia(rScrollVelX, rScrollVelY, null, null);
+          rTouchMode = "none";
+          return;
+        }
         if (rTotalMoved < 8.5 && duration < 280) {
-          const now = performance.now();
           if (rMaxFingers >= 3) {
             triggerHaptic(10);
             rdpSendMouseClick(kvmX, kvmY, 1, 1);
@@ -4304,6 +4456,8 @@
             triggerHaptic(7);
             rdpSendMouseClick(kvmX, kvmY, 0, 1);
             rLastTapAt = now;
+            rLastTapClientX = rLastX;
+            rLastTapClientY = rLastY;
           }
         }
         rTouchMode = "none";
@@ -4311,9 +4465,26 @@
       }
 
       // ── KẾT THÚC CHẠM Ở CHẾ ĐỘ CẢM ỨNG TRỰC TIẾP (`touch`) ──
+      rPendingDoubleTapDrag = false;
       if (rTouchMode === "drag") {
         const pt = clientToRemoteCoords(rLastX, rLastY);
         rdpSendMouseUp(pt.x, pt.y, 0, 1);
+        rTouchMode = "none";
+        return;
+      }
+
+      if (rTouchMode === "scroll") {
+        if (now - rPrevAt < 75 && Math.hypot(rScrollVelX, rScrollVelY) > 2.2) {
+          startRdpScrollInertia(rScrollVelX, rScrollVelY, rScrollAnchorX, rScrollAnchorY);
+        }
+        rTouchMode = "none";
+        return;
+      }
+
+      if (rTouchMode === "two" && rMaxFingers === 2 && rTotalMoved < 10 && duration < 280) {
+        triggerHaptic(10);
+        const midPt = clientToRemoteCoords(rTwoLastMidX, rTwoLastMidY);
+        rdpSendMouseClick(midPt.x, midPt.y, 2, 1);
         rTouchMode = "none";
         return;
       }
@@ -4323,18 +4494,21 @@
         if (rLongFired && !rMoved) {
           rdpSendMouseClick(pt.x, pt.y, 2, 1);
         } else if (!rMoved) {
-          const now = performance.now();
           if (
             now - rLastTapAt < 320 &&
-            Math.hypot(pt.x - rLastTapRx, pt.y - rLastTapRy) < 28
+            Math.hypot(rLastX - rLastTapClientX, rLastY - rLastTapClientY) < 30
           ) {
+            triggerHaptic(9);
             rdpSendMouseClick(rLastTapRx, rLastTapRy, 0, 2);
             rLastTapAt = 0;
           } else {
+            triggerHaptic(6);
             rdpSendMouseClick(pt.x, pt.y, 0, 1);
             rLastTapAt = now;
             rLastTapRx = pt.x;
             rLastTapRy = pt.y;
+            rLastTapClientX = rLastX;
+            rLastTapClientY = rLastY;
           }
         }
       }
@@ -4825,7 +4999,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.1.9";
+  const BUNDLED_WEB_VERSION = "2.2.0";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();

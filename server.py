@@ -3522,11 +3522,33 @@ def _dispatch_parallel_rdp_input(
             _activate_mac_pid_if_needed(pid)
             if not kvm_bridge.captured:
                 q.CGWarpMouseCursorPosition((sx, sy))
-            wx_d = int(round(float(data.get("dx", 0.0))))
-            wy_d = int(round(float(data.get("dy", 0.0))))
+            last_wx = float(state.get("last_wheel_sx", -9999.0))
+            last_wy = float(state.get("last_wheel_sy", -9999.0))
+            if abs(sx - last_wx) > 2.0 or abs(sy - last_wy) > 2.0:
+                state["last_wheel_sx"] = sx
+                state["last_wheel_sy"] = sy
+                mv = q.CGEventCreateMouseEvent(
+                    injector._event_source, q.kCGEventMouseMoved, (sx, sy), q.kCGMouseButtonLeft
+                )
+                q.CGEventSetIntegerValueField(mv, q.kCGEventSourceUserData, 0x4D4B4231)
+                q.CGEventPost(q.kCGHIDEventTap, mv)
+
+            acc_x = float(state.get("wheel_rem_x", 0.0)) + float(data.get("dx", 0.0))
+            acc_y = float(state.get("wheel_rem_y", 0.0)) + float(data.get("dy", 0.0))
+            wx_d = int(acc_x) if abs(acc_x) >= 6.0 else 0
+            wy_d = int(acc_y) if abs(acc_y) >= 6.0 else 0
+            state["wheel_rem_x"] = acc_x - wx_d
+            state["wheel_rem_y"] = acc_y - wy_d
+            if wx_d == 0 and wy_d == 0:
+                return
+
             ev = q.CGEventCreateScrollWheelEvent(
                 injector._event_source, q.kCGScrollEventUnitPixel, 2, wy_d, wx_d
             )
+            try:
+                q.CGEventSetLocation(ev, (sx, sy))
+            except Exception:
+                pass
             q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
             q.CGEventPost(q.kCGHIDEventTap, ev)
         return
@@ -3716,7 +3738,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.1.9",
+        "version": "2.2.0",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
