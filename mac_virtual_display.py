@@ -160,6 +160,7 @@ static BOOL dock_is_dark_mode(void) {
 @property (nonatomic, strong) NSPanel *panel;
 @property (nonatomic, strong) NSVisualEffectView *bgView;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *knownWins;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *minGraceUntil;
 @property (nonatomic, strong) NSMutableArray<NSNumber *> *appOrder;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSDictionary *> *appState;
 @property (nonatomic, copy) NSString *lastSig;
@@ -176,6 +177,7 @@ static BOOL dock_is_dark_mode(void) {
     _vdispId = did;
     _selfPid = getpid();
     _knownWins = [NSMutableDictionary dictionary];
+    _minGraceUntil = [NSMutableDictionary dictionary];
     _appOrder = [NSMutableArray array];
     _appState = [NSMutableDictionary dictionary];
     _lastSig = @"";
@@ -229,12 +231,13 @@ static BOOL dock_is_dark_mode(void) {
     if (pid <= 0) return;
     NSDictionary *info = self.appState[@(pid)];
     BOOL isVis = info ? [info[@"visible"] boolValue] : YES;
-    BOOL isAct = info ? [info[@"active"] boolValue] : NO;
+    BOOL isTop = info ? [info[@"top"] boolValue] : NO;
     unsigned int winId = info ? [info[@"winId"] unsignedIntValue] : 0;
     NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
 
-    if (!isVis || !isAct) {
-        if (winId > 0) [self.knownWins removeObjectForKey:@(winId)];
+    if (!isVis || !isTop) {
+        [self.minGraceUntil removeObjectForKey:@(pid)];
+        if (winId > 0) self.knownWins[@(winId)] = @(pid);
         if (rapp) {
             [rapp unhide];
             [rapp activateWithOptions:NSApplicationActivateIgnoringOtherApps];
@@ -243,9 +246,13 @@ static BOOL dock_is_dark_mode(void) {
         fflush(stdout);
     } else {
         if (winId > 0) self.knownWins[@(winId)] = @(pid);
+        self.minGraceUntil[@(pid)] = @(CFAbsoluteTimeGetCurrent() + 0.85);
         fprintf(stdout, "DOCK_MINIMIZE %d %u\n", (int)pid, winId);
         fflush(stdout);
     }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self refresh];
+    });
 }
 
 - (void)refresh {
@@ -270,6 +277,7 @@ static BOOL dock_is_dark_mode(void) {
     NSRunningApplication *frontApp = [[NSWorkspace sharedWorkspace] frontmostApplication];
     pid_t frontPid = frontApp ? frontApp.processIdentifier : 0;
     pid_t topVdispPid = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
 
     for (NSDictionary *w in wins) {
         NSInteger layer = [w[(id)kCGWindowLayer] integerValue];
@@ -284,55 +292,72 @@ static BOOL dock_is_dark_mode(void) {
         if (!bDict) continue;
         CGRect wb = CGRectZero;
         if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)bDict, &wb)) continue;
-        if (wb.size.width < 140.0 || wb.size.height < 90.0) continue;
 
         CGFloat cx = wb.origin.x + wb.size.width * 0.5;
         CGFloat cy = wb.origin.y + wb.size.height * 0.5;
         BOOL inVdisp = (cx >= vb.origin.x && cx < (vb.origin.x + vb.size.width) &&
                         cy >= vb.origin.y && cy < (vb.origin.y + vb.size.height));
+        BOOL isBigWindow = (wb.size.width >= 140.0 && wb.size.height >= 90.0);
         BOOL isOnscreen = [w[(id)kCGWindowIsOnscreen] boolValue];
         double alpha = [w[(id)kCGWindowAlpha] doubleValue];
 
-        if (!inVdisp) {
-            if (self.knownWins[winIdNum]) {
-                [self.knownWins removeObjectForKey:winIdNum];
-            }
+        BOOL isTrackedKnown = (self.knownWins[winIdNum] != nil);
+        BOOL trackedVisible = (inVdisp && isBigWindow && isOnscreen && alpha > 0.05);
+        BOOL movedAwayVisibly = (!inVdisp && isBigWindow && isOnscreen && alpha > 0.05);
+
+        // Nếu người dùng kéo cửa sổ trở lại màn chính MacBook -> gỡ khỏi Dock phụ
+        if (movedAwayVisibly) {
+            if (isTrackedKnown) [self.knownWins removeObjectForKey:winIdNum];
+            continue;
+        }
+        if (!trackedVisible && !isTrackedKnown) continue;
+
+        NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+        if (!rapp || rapp.isTerminated || rapp.activationPolicy != NSApplicationActivationPolicyRegular) {
+            if (isTrackedKnown) [self.knownWins removeObjectForKey:winIdNum];
             continue;
         }
 
-        NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
-        if (!rapp || rapp.activationPolicy != NSApplicationActivationPolicyRegular) continue;
+        // Trong 0.85s ngay sau khi bấm thu nhỏ: không ghi đè thành visible trong lúc macOS đang chạy hiệu ứng thu nhỏ
+        NSNumber *graceObj = self.minGraceUntil[@(pid)];
+        BOOL inMinGrace = (graceObj != nil && now < [graceObj doubleValue]);
+        if (!trackedVisible && graceObj != nil) {
+            [self.minGraceUntil removeObjectForKey:@(pid)];
+        }
 
-        BOOL trackedVisible = (isOnscreen && alpha > 0.05);
-        // CHỈ giữ icon mờ khi chính người dùng bấm thu nhỏ từ Dock phụ (tránh giữ icon ma khi app đã đóng/đổi Space!)
-        BOOL trackedMinimized = (!isOnscreen && self.knownWins[winIdNum] != nil);
-        if (!trackedVisible && !trackedMinimized) continue;
-
+        BOOL effectiveVisible = (trackedVisible && !inMinGrace);
         if (trackedVisible) {
-            [self.knownWins removeObjectForKey:winIdNum];
-            if (topVdispPid == 0) topVdispPid = pid;
-            if (wb.size.width >= vb.size.width - 4.0 && wb.size.height >= vb.size.height - 4.0) {
-                hasFullscreen = YES;
+            // Ghi nhớ lâu dài winId đã từng mở trên Màn phụ #2 để khi thu nhỏ (từ Dock phụ, SmartRightDock hay nút vàng) icon LUÔN giữ nguyên trên Dock phụ!
+            self.knownWins[winIdNum] = @(pid);
+            if (effectiveVisible) {
+                if (topVdispPid == 0) topVdispPid = pid;
+                if (wb.size.width >= vb.size.width - 4.0 && wb.size.height >= vb.size.height - 4.0) {
+                    hasFullscreen = YES;
+                }
             }
         }
 
         NSNumber *pidNum = @(pid);
         NSMutableDictionary *entry = appsByPid[pidNum];
+        BOOL isTop = (effectiveVisible && pid == topVdispPid);
+        BOOL isAct = (isTop && pid == frontPid);
         if (!entry) {
             entry = [NSMutableDictionary dictionaryWithDictionary:@{
                 @"winId": winIdNum,
-                @"visible": @(trackedVisible),
-                @"active": @(trackedVisible && pid == frontPid && pid == topVdispPid),
+                @"visible": @(effectiveVisible),
+                @"top": @(isTop),
+                @"active": @(isAct),
             }];
             appsByPid[pidNum] = entry;
-        } else if (trackedVisible && ![entry[@"visible"] boolValue]) {
+        } else if (effectiveVisible && ![entry[@"visible"] boolValue]) {
             entry[@"winId"] = winIdNum;
             entry[@"visible"] = @YES;
-            entry[@"active"] = @(pid == frontPid && pid == topVdispPid);
+            entry[@"top"] = @(isTop);
+            entry[@"active"] = @(isAct);
         }
     }
 
-    // Dọn các cửa sổ đã đóng khỏi bộ nhớ theo dõi
+    // Dọn các cửa sổ đã đóng hẳn khỏi bộ nhớ theo dõi (cửa sổ đang thu nhỏ vẫn còn trong aliveWinIds -> giữ nguyên icon!)
     NSArray<NSNumber *> *knownKeys = [self.knownWins allKeys];
     for (NSNumber *wid in knownKeys) {
         if (![aliveWinIds containsObject:wid]) {
@@ -411,7 +436,8 @@ static BOOL dock_is_dark_mode(void) {
                 btn.tag = (NSInteger)pid;
                 btn.target = self;
                 btn.action = @selector(onIconClick:);
-                btn.alphaValue = isVis ? 1.0 : 0.45;
+                // Giữ nguyên icon rõ ràng kể cả khi đang thu nhỏ để dễ bấm phóng lại trực tiếp trên Màn phụ
+                btn.alphaValue = isVis ? 1.0 : 0.82;
                 NSRunningApplication *rapp = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
                 if (rapp && rapp.icon) {
                     NSImage *ico = [rapp.icon copy];
@@ -420,15 +446,14 @@ static BOOL dock_is_dark_mode(void) {
                 }
                 [self.bgView addSubview:btn];
 
-                if (isVis) {
-                    NSView *dot = [[NSView alloc] initWithFrame:NSMakeRect(bx + 14.25, 2.25, 3.5, 3.5)];
-                    dot.wantsLayer = YES;
-                    dot.layer.cornerRadius = 1.75;
-                    dot.layer.backgroundColor = isDark
-                        ? [[NSColor colorWithWhite:1.0 alpha:(isAct ? 0.90 : 0.36)] CGColor]
-                        : [[NSColor colorWithWhite:0.12 alpha:(isAct ? 0.72 : 0.28)] CGColor];
-                    [self.bgView addSubview:dot];
-                }
+                NSView *dot = [[NSView alloc] initWithFrame:NSMakeRect(bx + 14.25, 2.25, 3.5, 3.5)];
+                dot.wantsLayer = YES;
+                dot.layer.cornerRadius = 1.75;
+                CGFloat dotAlpha = isVis ? (isAct ? 0.90 : 0.50) : 0.22;
+                dot.layer.backgroundColor = isDark
+                    ? [[NSColor colorWithWhite:1.0 alpha:dotAlpha] CGColor]
+                    : [[NSColor colorWithWhite:0.12 alpha:(isVis ? (isAct ? 0.72 : 0.42) : 0.18)] CGColor];
+                [self.bgView addSubview:dot];
             }
         }
 
@@ -448,6 +473,7 @@ static BOOL dock_is_dark_mode(void) {
 
 - (void)markPidMinimized:(pid_t)pid {
     if (pid <= 0) return;
+    self.minGraceUntil[@(pid)] = @(CFAbsoluteTimeGetCurrent() + 0.85);
     NSDictionary *st = self.appState[@(pid)];
     if (st && st[@"winId"]) {
         self.knownWins[st[@"winId"]] = @(pid);
@@ -456,12 +482,7 @@ static BOOL dock_is_dark_mode(void) {
 
 - (void)unmarkPidMinimized:(pid_t)pid {
     if (pid <= 0) return;
-    NSArray<NSNumber *> *keys = [self.knownWins allKeys];
-    for (NSNumber *wid in keys) {
-        if ([self.knownWins[wid] intValue] == (int)pid) {
-            [self.knownWins removeObjectForKey:wid];
-        }
-    }
+    [self.minGraceUntil removeObjectForKey:@(pid)];
 }
 
 - (void)shutdown {
@@ -747,6 +768,7 @@ class MacVirtualDisplayManager:
         s_pos = _cfstr("AXPosition")
         s_size = _cfstr("AXSize")
         s_min = _cfstr("AXMinimized")
+        s_fs = _cfstr("AXFullScreen")
         s_raise = _cfstr("AXRaise")
         try:
             wins_ref = ctypes.c_void_p()
@@ -756,6 +778,8 @@ class MacVirtualDisplayManager:
                 cnt = cf.CFArrayGetCount(wins_ref.value)
                 kTrue = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
                 kFalse = ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value
+                vdisp_matches = []
+                min_fallback = []
                 for i in range(cnt):
                     w_ax = cf.CFArrayGetValueAtIndex(wins_ref.value, i)
                     if not w_ax:
@@ -785,32 +809,61 @@ class MacVirtualDisplayManager:
                         if size_ref.value:
                             cf.CFRelease(size_ref.value)
 
-                    if not in_vdisp:
-                        continue
-
                     min_ref = ctypes.c_void_p()
                     is_min = False
                     if ax.AXUIElementCopyAttributeValue(w_ax, s_min, ctypes.byref(min_ref)) == 0 and min_ref.value:
                         is_min = bool(cf.CFBooleanGetValue(min_ref.value))
                         cf.CFRelease(min_ref.value)
 
-                    if action == "activate":
-                        self._min_vdisp_pids.discard(pid)
+                    fs_ref = ctypes.c_void_p()
+                    is_fs = False
+                    if ax.AXUIElementCopyAttributeValue(w_ax, s_fs, ctypes.byref(fs_ref)) == 0 and fs_ref.value:
+                        is_fs = bool(cf.CFBooleanGetValue(fs_ref.value))
+                        cf.CFRelease(fs_ref.value)
+
+                    if in_vdisp:
+                        vdisp_matches.append((w_ax, is_min, is_fs))
+                    elif is_min:
+                        min_fallback.append((w_ax, is_min, is_fs))
+
+                if action == "activate":
+                    self._min_vdisp_pids.discard(pid)
+                    targets = vdisp_matches if vdisp_matches else min_fallback
+                    for w_ax, is_min, _ in targets:
                         if is_min:
                             ax.AXUIElementSetAttributeValue(w_ax, s_min, kFalse)
                         ax.AXUIElementPerformAction(w_ax, s_raise)
-                        break
-                    elif action == "minimize" and not is_min:
-                        self._min_vdisp_pids.add(pid)
-                        ax.AXUIElementSetAttributeValue(w_ax, s_min, kTrue)
-                        break
+                    try:
+                        import AppKit  # type: ignore
+
+                        rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
+                        if rapp is not None:
+                            rapp.unhide()
+                            rapp.activateWithOptions_(2)
+                    except Exception:
+                        pass
+                elif action == "minimize":
+                    self._min_vdisp_pids.add(pid)
+                    for w_ax, is_min, is_fs in vdisp_matches:
+                        if not is_min:
+                            if is_fs:
+                                try:
+                                    import AppKit  # type: ignore
+
+                                    rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
+                                    if rapp is not None:
+                                        rapp.hide()
+                                except Exception:
+                                    pass
+                            else:
+                                ax.AXUIElementSetAttributeValue(w_ax, s_min, kTrue)
             finally:
                 cf.CFRelease(wins_ref.value)
         except Exception:
             pass
         finally:
             cf.CFRelease(app_ax)
-            for s_ref in (s_wins, s_pos, s_size, s_min, s_raise):
+            for s_ref in (s_wins, s_pos, s_size, s_min, s_fs, s_raise):
                 if s_ref:
                     cf.CFRelease(s_ref)
 
