@@ -5768,6 +5768,29 @@ def _find_live_mrd_pids() -> List[int]:
     return sorted(pids)
 
 
+def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bool:
+    """Kiểm tra trực tiếp qua bookmark export xem --retina (forcehidpioptimizations) hoặc --dynamicdisplay (dynamic resolution) có đang bị tắt (=0) không."""
+    if not IS_MACOS or not bookmarks:
+        return False
+    mrd_bin, _ = _get_mrd_cli_info()
+    if not mrd_bin:
+        return False
+    try:
+        _, buuid = bookmarks[0]
+        rc_ex = subprocess.run(
+            [mrd_bin, "--script", "bookmark", "export", buuid],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5,
+        )
+        ex_txt = (rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")
+        if "full address:s:" not in ex_txt.lower():
+            return False
+        has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
+        has_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
+        return (not has_retina) or (not has_dyn)
+    except Exception:
+        return False
+
+
 def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
     """Dùng CLI chính chủ --script bookmark write của Microsoft Remote Desktop (chỉ gọi khi MRD đã đóng sạch):
     - Luôn giữ BẬT --retina true (Optimize for Retina displays) + --dynamicdisplay true (Update session resolution on resize, xóa sạch lề phải 45px 1467x944) + --scaling true + --colordepth 32.
@@ -5790,6 +5813,8 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
             ex_txt = (rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")
             m_host = re.search(r"full address:s:([^\r\n]+)", ex_txt, re.IGNORECASE)
             host_val = m_host.group(1).strip() if m_host else "192.168.52.230"
+            m_user = re.search(r"username:s:([^\r\n]+)", ex_txt, re.IGNORECASE)
+            user_val = m_user.group(1).strip() if m_user else ""
 
             preserve_flags: List[str] = [
                 "--useallmonitors", flag,
@@ -5799,6 +5824,8 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
                 "--scaling", "true",
                 "--colordepth", "32",
             ]
+            if user_val:
+                preserve_flags += ["--username", user_val]
             if re.search(r"audiocapturemode:i:1", ex_txt, re.IGNORECASE):
                 preserve_flags += ["--redirectmicrophones", "true"]
             if re.search(r"camerastoredirect:s:[^\r\n]+", ex_txt, re.IGNORECASE):
@@ -5807,6 +5834,8 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
                 preserve_flags += ["--redirectfolders", "true"]
             if re.search(r"redirectprinters:i:1", ex_txt, re.IGNORECASE):
                 preserve_flags += ["--redirectprinters", "true"]
+            if re.search(r"redirectsmartcards:i:1", ex_txt, re.IGNORECASE):
+                preserve_flags += ["--redirectsmartcards", "true"]
 
             w_args = [mrd_bin, "--script", "bookmark", "write", buuid] + preserve_flags
             rc_w = subprocess.run(w_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3.0)
@@ -5829,9 +5858,14 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
 
 def _rdp_probe_vdisp_state() -> Tuple[int, List[str], bool]:
     """Trả về (rdp_pid, session_titles, has_session_on_vdisp)."""
-    q = injector._quartz
-    if not IS_MACOS or q is None:
+    if not IS_MACOS:
         return 0, [], False
+    q = injector._quartz
+    if q is None:
+        try:
+            import Quartz as q  # type: ignore
+        except Exception:
+            return 0, [], False
     import objc  # type: ignore
 
     vb = mac_vdisp.get_bounds(q) if (mac_vdisp is not None and mac_vdisp.is_active()) else None
@@ -5893,6 +5927,11 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
     from mac_virtual_display import _CGPoint, _CGSize
 
     q = injector._quartz
+    if q is None:
+        try:
+            import Quartz as q  # type: ignore
+        except Exception:
+            q = None
     ax = mac_vdisp._ax_lib
     cf = mac_vdisp._cf_lib
     kCFStringEncodingUTF8 = 0x08000100
@@ -6194,9 +6233,14 @@ def _apply_full_mac_window_bounds(target_pid: int, target_sess: str) -> Tuple[bo
     import objc  # type: ignore
     from mac_virtual_display import _CGPoint, _CGSize
 
-    q = injector._quartz
-    if not IS_MACOS or target_pid <= 0 or q is None or mac_vdisp is None or not mac_vdisp._init_ax_libs():
+    if not IS_MACOS or target_pid <= 0 or mac_vdisp is None or not mac_vdisp._init_ax_libs():
         return False, 0.0, 0.0
+    q = injector._quartz
+    if q is None:
+        try:
+            import Quartz as q  # type: ignore
+        except Exception:
+            return False, 0.0, 0.0
     mb = q.CGDisplayBounds(q.CGMainDisplayID())
     mx, my, mw, mh = float(mb.origin.x), float(mb.origin.y), float(mb.size.width), float(mb.size.height)
     ax = mac_vdisp._ax_lib
@@ -6328,13 +6372,13 @@ def trigger_smart_rdp_multimon_sync(
             if not enable_multimon:
                 rpid, sess, _ = _rdp_probe_vdisp_state()
                 need_downgrade = bool(downgrade_running and sess)
-                if not need_downgrade and repair_clamped and sess and injector._quartz is not None:
-                    mb = injector._quartz.CGDisplayBounds(injector._quartz.CGMainDisplayID())
-                    mw, mh = float(mb.size.width), float(mb.size.height)
-                    ok_m, cw, ch = _apply_full_mac_window_bounds(rpid, sess[0])
-                    # Nếu cửa sổ đang cao sát trần (ch >= mh - 65) nhưng bị kẹp ngang không kéo ra được (VD: 1467x944 do mất dynamicdisplay) -> tự sửa ngay!
-                    if ok_m and ch >= (mh - 65.0) and cw > 400.0 and cw <= (mw - 20.0):
+                if not need_downgrade and repair_clamped and sess:
+                    if _bookmark_needs_retina_or_dyn_repair(bookmarks):
                         need_downgrade = True
+                    else:
+                        ok_m, cw, ch = _apply_full_mac_window_bounds(rpid, sess[0])
+                        if ok_m and ch >= 880.0 and 400.0 < cw <= 1492.0:
+                            need_downgrade = True
 
                 if need_downgrade and sess:
                     now_d = time.monotonic()
