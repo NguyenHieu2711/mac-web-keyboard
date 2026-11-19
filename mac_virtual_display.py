@@ -779,7 +779,7 @@ static BOOL ax_minimize_app_on_vdisp(pid_t pid, CGRect vb) {
         BOOL inVdisp = (cx >= vb.origin.x && cx < (vb.origin.x + vb.size.width) &&
                         cy >= vb.origin.y && cy < (vb.origin.y + vb.size.height));
         if (!inVdisp) continue;
-        if (wb.size.width >= vb.size.width - 8.0 && wb.size.height >= vb.size.height - 8.0) {
+        if (wb.size.width >= vb.size.width - 24.0 && wb.size.height >= vb.size.height - 80.0) {
             BOOL isOnscr = [w[(id)kCGWindowIsOnscreen] boolValue];
             if (!isOnscr) {
                 hasHiddenVdispFs = YES;
