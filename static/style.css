@@ -1502,6 +1502,29 @@ body.is-lowercase .key-alpha .key-main {
   color: #94a3b8;
 }
 
+.hud-ico {
+  width: 13.5px;
+  height: 13.5px;
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.hud-caret-ico {
+  width: 11px;
+  height: 11px;
+  color: #64748b;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.remote-btn-content,
+.remote-item-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .remote-hud-bar {
   display: flex;
   align-items: center;
@@ -1522,11 +1545,29 @@ body.is-lowercase .key-alpha .key-main {
   top: calc(100% + 6px);
   left: 0;
   right: auto;
-  min-width: 162px;
+  min-width: 168px;
 }
 
-.remote-mouse-dropdown {
-  min-width: 178px;
+.remote-mouse-dropdown,
+.remote-control-dropdown {
+  min-width: 190px;
+  padding: 4px;
+}
+
+.remote-menu-group-label {
+  padding: 5px 8px 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  user-select: none;
+}
+
+.remote-menu-sep {
+  height: 1px;
+  background: #1e293b;
+  margin: 4px 6px;
 }
 
 .remote-pill-btn {

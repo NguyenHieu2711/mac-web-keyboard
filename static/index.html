@@ -637,61 +637,68 @@
       <div id="remote-hud-pills" class="remote-hud-pills">
         <button type="button" id="remote-hud-pill" class="remote-hud-pill">
           <span id="remote-status-dot" class="remote-dot"></span>
-          <span id="remote-pill-mode-ico">🖥</span>
-          <span class="remote-caret">▾</span>
+          <span id="remote-pill-mode-ico"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span>
+          <svg class="hud-caret-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
         </button>
       </div>
 
       <div id="remote-hud-bar" class="remote-hud-bar is-hidden">
         <div class="remote-mode-wrap">
           <button type="button" class="remote-pill-btn remote-mode-btn" data-action="toggle-remote-menu">
-            <span>🖥 Remote ▾</span>
+            <span class="remote-btn-content"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span>Remote</span></span>
+            <svg class="hud-caret-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
           </button>
           <div id="remote-mode-menu" class="mode-dropdown-menu remote-dropdown-menu is-hidden">
             <div class="mode-dropdown-item" data-select-layout="pad">
-              <span>📱 Windows dọc</span><span class="mode-check" data-check="pad">✓</span>
+              <span class="remote-item-label"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg><span>Windows dọc</span></span><span class="mode-check" data-check="pad">✓</span>
             </div>
             <div class="mode-dropdown-item" data-select-layout="win">
-              <span>🖥 Win ngang</span><span class="mode-check" data-check="win">✓</span>
+              <span class="remote-item-label"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span>Win ngang</span></span><span class="mode-check" data-check="win">✓</span>
             </div>
             <div class="mode-dropdown-item" data-select-layout="mac">
-              <span><svg class="apple-ico" viewBox="0 0 384 512"><path fill="currentColor" d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg> Mac ngang</span><span class="mode-check" data-check="mac">✓</span>
+              <span class="remote-item-label"><svg class="apple-ico" viewBox="0 0 384 512"><path fill="currentColor" d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg><span>Mac ngang</span></span><span class="mode-check" data-check="mac">✓</span>
             </div>
             <div class="mode-dropdown-item is-selected" data-select-layout="remote">
-              <span>🖥 Remote PC</span><span class="mode-check" data-check="remote">✓</span>
+              <span class="remote-item-label"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span>Remote PC</span></span><span class="mode-check" data-check="remote">✓</span>
             </div>
           </div>
         </div>
 
-        <!-- Nút điều khiển hợp nhất duy nhất: đồng bộ Cảm ứng, Bàn rê ảo và Chuột vật lý không xung đột -->
+        <!-- Menu điều khiển hợp nhất chia 2 phần rõ ràng: Cảm ứng | Chuột (MacBook / Điện thoại / Cả 2 màn hình) -->
         <div class="remote-mode-wrap">
           <button type="button" id="btn-remote-control" class="remote-pill-btn">
-            <span id="lbl-remote-control">👆 Cảm ứng</span>
-            <span class="remote-caret">▾</span>
+            <span id="lbl-remote-control" class="remote-btn-content"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg><span>Cảm ứng</span></span>
+            <svg class="hud-caret-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
           </button>
-          <div id="remote-control-menu" class="mode-dropdown-menu remote-dropdown-menu remote-mouse-dropdown is-hidden">
+          <div id="remote-control-menu" class="mode-dropdown-menu remote-dropdown-menu remote-control-dropdown is-hidden">
+            <div class="remote-menu-group-label">Cảm ứng</div>
             <div class="mode-dropdown-item is-selected" data-rdp-ctrl="touch_mac">
-              <span>👆 Cảm ứng (Chuột: Mac)</span><span class="mode-check">✓</span>
+              <span class="remote-item-label"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg><span>Chạm cảm ứng</span></span><span class="mode-check">✓</span>
             </div>
             <div class="mode-dropdown-item" data-rdp-ctrl="pointer_mac">
-              <span>🖐 Bàn rê ảo (Chuột: Mac)</span><span class="mode-check">✓</span>
+              <span class="remote-item-label"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 15h18M12 15v5"/></svg><span>Bàn rê ảo</span></span><span class="mode-check">✓</span>
+            </div>
+            <div class="remote-menu-sep"></div>
+            <div class="remote-menu-group-label">Chuột</div>
+            <div class="mode-dropdown-item is-selected" data-rdp-ctrl="mouse_mac">
+              <span class="remote-item-label"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9m16 0H4m16 0 1.28 2.55a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45L4 16"/></svg><span>Chuột MacBook</span></span><span class="mode-check">✓</span>
             </div>
             <div class="mode-dropdown-item" data-rdp-ctrl="mouse_phone">
-              <span>📱 Chuột: Chỉ Điện thoại</span><span class="mode-check">✓</span>
+              <span class="remote-item-label"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 7v4"/></svg><span>Chuột Điện thoại</span></span><span class="mode-check">✓</span>
             </div>
             <div class="mode-dropdown-item" data-rdp-ctrl="mouse_bridge">
-              <span>⇔ Chuột: Nối 2 màn</span><span class="mode-check">✓</span>
+              <span class="remote-item-label"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m7 16-4-4 4-4"/><path d="m17 8 4 4-4 4"/><path d="M3 12h18"/></svg><span>Cả 2 màn hình</span></span><span class="mode-check">✓</span>
             </div>
           </div>
         </div>
 
-        <button type="button" id="btn-remote-coexist" class="remote-pill-btn is-active">⚡ Song song</button>
+        <button type="button" id="btn-remote-coexist" class="remote-pill-btn is-active"><span class="remote-btn-content"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="8" height="16" rx="1.5"/><rect x="13" y="4" width="8" height="16" rx="1.5"/></svg><span>Song song</span></span></button>
 
         <!-- Tỉ lệ hiển thị sắc nét (HiDPI Scale cho màn điện thoại) -->
         <div id="remote-scale-wrap" class="remote-mode-wrap">
           <button type="button" id="btn-remote-scale" class="remote-pill-btn">
             <span id="lbl-remote-scale">125%</span>
-            <span class="remote-caret">▾</span>
+            <svg class="hud-caret-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
           </button>
           <div id="remote-scale-menu" class="mode-dropdown-menu remote-dropdown-menu is-hidden">
             <div class="mode-dropdown-item" data-rdp-scale="100">
@@ -709,10 +716,10 @@
           </div>
         </div>
 
-        <button type="button" id="btn-remote-kb" class="remote-pill-btn">⌨ Phím</button>
+        <button type="button" id="btn-remote-kb" class="remote-pill-btn"><span class="remote-btn-content"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M7 16h10"/></svg><span>Phím</span></span></button>
         <button type="button" id="btn-remote-zoom-reset" class="remote-pill-btn is-hidden">100%</button>
-        <button type="button" id="btn-remote-cfg" class="remote-pill-btn">⚙</button>
-        <button type="button" id="btn-remote-collapse" class="remote-pill-btn">▴</button>
+        <button type="button" id="btn-remote-cfg" class="remote-pill-btn"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></button>
+        <button type="button" id="btn-remote-collapse" class="remote-pill-btn"><svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg></button>
       </div>
     </div>
 

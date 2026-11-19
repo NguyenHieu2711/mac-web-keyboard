@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.2.9";
+  const BUNDLED_BOOT_VER = "2.3.0";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -2524,15 +2524,30 @@
     }
   }
 
+  const HUD_SVG = {
+    touch:
+      '<svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>',
+    trackpad:
+      '<svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 15h18M12 15v5"/></svg>',
+    mouse:
+      '<svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 7v4"/></svg>',
+    bridge:
+      '<svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m7 16-4-4 4-4"/><path d="m17 8 4 4-4 4"/><path d="M3 12h18"/></svg>',
+    parallel:
+      '<svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="8" height="16" rx="1.5"/><rect x="13" y="4" width="8" height="16" rx="1.5"/></svg>',
+    phoneOnly:
+      '<svg class="hud-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M12 18h.01"/></svg>',
+  };
+
   function syncRemoteControlModeUI() {
-    const pillLabels = {
-      touch_mac: "👆 Cảm ứng",
-      pointer_mac: "🖐 Bàn rê ảo",
-      mouse_phone: "📱 Chuột: ĐT",
-      mouse_bridge: kvmActive ? "⇔ Đang ở ĐT" : "⇔ Nối 2 màn",
+    const pillMarkup = {
+      touch_mac: `${HUD_SVG.touch}<span>Cảm ứng</span>`,
+      pointer_mac: `${HUD_SVG.trackpad}<span>Bàn rê ảo</span>`,
+      mouse_phone: `${HUD_SVG.mouse}<span>Chuột ĐT</span>`,
+      mouse_bridge: `${HUD_SVG.bridge}<span>${kvmActive ? "Đang ở ĐT" : "2 màn hình"}</span>`,
     };
     if (lblRemoteControl) {
-      lblRemoteControl.textContent = pillLabels[rdpControlMode] || pillLabels.touch_mac;
+      lblRemoteControl.innerHTML = pillMarkup[rdpControlMode] || pillMarkup.touch_mac;
     }
     if (btnRemoteControl) {
       btnRemoteControl.classList.toggle(
@@ -2544,7 +2559,20 @@
     }
     if (remoteControlMenu) {
       remoteControlMenu.querySelectorAll("[data-rdp-ctrl]").forEach((el) => {
-        el.classList.toggle("is-selected", el.dataset.rdpCtrl === rdpControlMode);
+        const key = el.dataset.rdpCtrl;
+        let isSelected = false;
+        if (key === "touch_mac") {
+          isSelected = rdpControlMode === "touch_mac" || rdpControlMode === "mouse_bridge";
+        } else if (key === "pointer_mac") {
+          isSelected = rdpControlMode === "pointer_mac";
+        } else if (key === "mouse_mac") {
+          isSelected = rdpMouseMode === "mac";
+        } else if (key === "mouse_phone") {
+          isSelected = rdpMouseMode === "phone";
+        } else if (key === "mouse_bridge") {
+          isSelected = rdpMouseMode === "bridge";
+        }
+        el.classList.toggle("is-selected", isSelected);
       });
     }
     updateOverlayCursorVisual();
@@ -2560,22 +2588,22 @@
 
   function syncCoexistButtonUI() {
     const isPar = rdpActiveEngine === "parallel";
+    const parHtml = `<span class="remote-btn-content">${HUD_SVG.parallel}<span>Song song</span></span>`;
+    const mobileHtml = `<span class="remote-btn-content">${HUD_SVG.phoneOnly}<span>Chỉ điện thoại</span></span>`;
     if (btnRemoteCoexist) {
       if (isPar) {
-        btnRemoteCoexist.textContent = "⚡ Song song";
+        btnRemoteCoexist.innerHTML = parHtml;
         btnRemoteCoexist.classList.add("is-active");
       } else if (rdpActiveEngine === "native") {
-        btnRemoteCoexist.textContent = "🎧 Độc quyền";
+        btnRemoteCoexist.innerHTML = mobileHtml;
         btnRemoteCoexist.classList.add("is-active");
       } else {
-        btnRemoteCoexist.textContent = rdpPreferExclusive
-          ? "🎧 Độc quyền"
-          : "⚡ Song song";
+        btnRemoteCoexist.innerHTML = rdpPreferExclusive ? mobileHtml : parHtml;
         btnRemoteCoexist.classList.toggle("is-active", rdpPreferExclusive);
       }
     }
     if (remotePillModeIco) {
-      remotePillModeIco.textContent = isPar ? "⚡" : "🖥";
+      remotePillModeIco.innerHTML = isPar ? HUD_SVG.parallel : HUD_SVG.phoneOnly;
     }
     if (remoteScaleWrap) {
       remoteScaleWrap.classList.toggle("is-hidden", isPar);
@@ -3708,7 +3736,6 @@
               rdpSpkChannels = Number(msg.channels) || 2;
               rdpNextPlayTime = 0;
             } else if (msg.type === "parallel_ended") {
-              // MacBook vừa đóng cửa sổ Remote Desktop -> tự chuyển mượt sang Native RDP 2248x1080 trên điện thoại!
               closeParallelRdpWs();
               rdpActiveEngine = "none";
               syncRdpConnectionUI();
@@ -4079,17 +4106,22 @@
     if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
   }
 
-  // ── Nút điều khiển hợp nhất: Cảm ứng | Bàn rê ảo | Chuột: Chỉ Điện thoại | Chuột: Nối 2 màn ──
+  // ── Nút điều khiển hợp nhất chia 2 phần: Cảm ứng (Chạm / Bàn rê ảo) | Chuột (MacBook / Điện thoại / Cả 2 màn hình) ──
   function setRemoteControlMode(ctrlMode) {
+    let resolved = ctrlMode;
+    if (ctrlMode === "mouse_mac") {
+      // Chọn "Chuột MacBook" -> khóa chuột về MacBook; giữ Bàn rê ảo nếu đang dùng, ngược lại về Chạm cảm ứng
+      resolved = rdpControlMode === "pointer_mac" ? "pointer_mac" : "touch_mac";
+    }
     if (
-      ctrlMode !== "touch_mac" &&
-      ctrlMode !== "pointer_mac" &&
-      ctrlMode !== "mouse_phone" &&
-      ctrlMode !== "mouse_bridge"
+      resolved !== "touch_mac" &&
+      resolved !== "pointer_mac" &&
+      resolved !== "mouse_phone" &&
+      resolved !== "mouse_bridge"
     ) {
       return;
     }
-    applyDerivedControlModes(ctrlMode);
+    applyDerivedControlModes(resolved);
     kvmButtonsMask = 0;
     kvmBridgeReturnPush = 0;
     try {
@@ -5199,7 +5231,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.2.9";
+  const BUNDLED_WEB_VERSION = "2.3.0";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
