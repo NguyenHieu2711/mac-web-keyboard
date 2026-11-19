@@ -3027,9 +3027,20 @@
     }
   };
 
+  let rdpMicRetryTimer = null;
+  let rdpAudioReconnectTimer = null;
+  let activeAudioProxyUrl = "";
+  let activeAudioSid = "";
+
   window.__onRemoteMicCaptureState = (running) => {
-    if (!running && rdpServerMicOpen) {
-      syncRdpAudioButtonsUI();
+    if (!running && rdpServerMicOpen && rdpSession) {
+      if (rdpMicRetryTimer !== null) clearTimeout(rdpMicRetryTimer);
+      rdpMicRetryTimer = setTimeout(() => {
+        rdpMicRetryTimer = null;
+        if (rdpServerMicOpen && rdpSession && document.visibilityState === "visible") {
+          void startRdpMicCapture(rdpServerMicSpec);
+        }
+      }, 850);
     }
   };
 
@@ -3143,10 +3154,21 @@
     }
   }
 
-  function closeRdpAudioWs() {
+  function closeRdpAudioWs(clearReconnect = true) {
+    if (clearReconnect) {
+      activeAudioProxyUrl = "";
+      activeAudioSid = "";
+      if (rdpAudioReconnectTimer !== null) {
+        clearTimeout(rdpAudioReconnectTimer);
+        rdpAudioReconnectTimer = null;
+      }
+      if (rdpMicRetryTimer !== null) {
+        clearTimeout(rdpMicRetryTimer);
+        rdpMicRetryTimer = null;
+      }
+    }
     rdpServerMicOpen = false;
     stopRdpMicCapture();
-    syncRdpAudioButtonsUI();
     if (rdpAudioWs) {
       try {
         rdpAudioWs.onclose = null;
@@ -3161,7 +3183,9 @@
   }
 
   function openRdpAudioWs(baseProxyWsUrl, sid) {
-    closeRdpAudioWs();
+    closeRdpAudioWs(false);
+    activeAudioProxyUrl = baseProxyWsUrl;
+    activeAudioSid = sid;
     try {
       const au = new URL(baseProxyWsUrl);
       au.pathname = "/rdp-audio-ws";
@@ -3185,12 +3209,10 @@
               rdpNextPlayTime = 0;
             } else if (msg.type === "mic_start") {
               rdpServerMicOpen = true;
-              syncRdpAudioButtonsUI();
               void startRdpMicCapture(msg);
             } else if (msg.type === "mic_stop") {
               rdpServerMicOpen = false;
               stopRdpMicCapture();
-              syncRdpAudioButtonsUI();
             }
           } catch {
             // ignore
@@ -3202,7 +3224,16 @@
           rdpAudioWs = null;
           rdpServerMicOpen = false;
           stopRdpMicCapture();
-          syncRdpAudioButtonsUI();
+          // Tự động nối lại luồng Loa + Mic liên tục nếu phiên RDP vẫn đang mở
+          if (activeAudioSid === sid && activeAudioProxyUrl === baseProxyWsUrl) {
+            if (rdpAudioReconnectTimer !== null) clearTimeout(rdpAudioReconnectTimer);
+            rdpAudioReconnectTimer = setTimeout(() => {
+              rdpAudioReconnectTimer = null;
+              if (activeAudioSid === sid && rdpSession) {
+                openRdpAudioWs(baseProxyWsUrl, sid);
+              }
+            }, 550);
+          }
         }
       };
       rdpAudioWs = sock;
@@ -4601,6 +4632,17 @@
 
   onEnterRemoteLayout = () => {
     setRemoteHudExpanded(false);
+    ensureRdpAudioContext();
+    if (
+      hasAndroidBridge &&
+      typeof window.AndroidBridge.ensureMicPermission === "function"
+    ) {
+      try {
+        window.AndroidBridge.ensureMicPermission();
+      } catch {
+        // ignore
+      }
+    }
     pushKvmConfigToServer();
     syncRdpConnectionUI();
     if (!isRemoteConnected() && !rdpConnecting) {
@@ -4658,7 +4700,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.1.7";
+  const BUNDLED_WEB_VERSION = "2.1.8";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();
@@ -4667,7 +4709,18 @@
 
   const markUserActive = () => {
     lastUserTouchAt = performance.now();
+    if (kbLayout === "remote") {
+      ensureRdpAudioContext();
+    }
   };
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && kbLayout === "remote") {
+      ensureRdpAudioContext();
+      if (rdpServerMicOpen && rdpSession) {
+        void startRdpMicCapture(rdpServerMicSpec);
+      }
+    }
+  });
   window.addEventListener("touchstart", markUserActive, { passive: true, capture: true });
   window.addEventListener("touchmove", markUserActive, { passive: true, capture: true });
   window.addEventListener("touchend", markUserActive, { passive: true, capture: true });
