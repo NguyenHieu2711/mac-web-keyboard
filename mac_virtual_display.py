@@ -2212,11 +2212,149 @@ class MacVirtualDisplayManager:
         except Exception:
             return 0
 
+    def _exit_rdp_fullscreen_before_stop(self) -> bool:
+        """Nếu Microsoft Remote Desktop / Windows App đang ở Full-Screen khi người dùng tắt Màn phụ Mac,
+        tự động thoát Full-Screen (AXFullScreen=False) để thu về cửa sổ thường trước khi hủy màn ảo."""
+        if not IS_MACOS or not self._init_ax_libs():
+            return False
+        try:
+            import AppKit  # type: ignore
+            import objc  # type: ignore
+
+            rdp_pid = 0
+            with objc.autorelease_pool():
+                apps = AppKit.NSWorkspace.sharedWorkspace().runningApplications() or []
+                for rapp in apps:
+                    try:
+                        bid = str(rapp.bundleIdentifier() or "").strip().lower()
+                        lname = str(rapp.localizedName() or "").strip().lower()
+                        if bid in ("com.microsoft.rdc.macos", "com.microsoft.rdc.osx.beta") or lname in (
+                            "microsoft remote desktop",
+                            "windows app",
+                        ):
+                            rdp_pid = int(rapp.processIdentifier())
+                            break
+                    except Exception:
+                        continue
+            if rdp_pid <= 0:
+                return False
+
+            ax = self._ax_lib
+            cf = self._cf_lib
+            kCFStringEncodingUTF8 = 0x08000100
+
+            def _cfstr(s: str) -> ctypes.c_void_p:
+                return cf.CFStringCreateWithCString(None, s.encode("utf-8"), kCFStringEncodingUTF8)
+
+            def _get_str(el_ref: Any, attr_ref: Any) -> str:
+                r = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(el_ref, attr_ref, ctypes.byref(r)) == 0 and r.value:
+                    try:
+                        with objc.autorelease_pool():
+                            return str(objc.objc_object(c_void_p=r.value) or "")
+                    finally:
+                        cf.CFRelease(r.value)
+                return ""
+
+            app_ax = ax.AXUIElementCreateApplication(rdp_pid)
+            if not app_ax:
+                return False
+
+            s_wins = _cfstr("AXWindows")
+            s_fs = _cfstr("AXFullScreen")
+            s_menubar = _cfstr("AXMenuBar")
+            s_children = _cfstr("AXChildren")
+            s_title = _cfstr("AXTitle")
+            s_press = _cfstr("AXPress")
+            kFalse = ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value
+            exited_any = False
+            try:
+                wins_ref = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wins_ref)) == 0 and wins_ref.value:
+                    try:
+                        cnt = cf.CFArrayGetCount(wins_ref.value)
+                        for i in range(cnt):
+                            w_ax = cf.CFArrayGetValueAtIndex(wins_ref.value, i)
+                            if not w_ax:
+                                continue
+                            fs_ref = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(w_ax, s_fs, ctypes.byref(fs_ref)) == 0 and fs_ref.value:
+                                is_fs = bool(cf.CFBooleanGetValue(fs_ref.value))
+                                cf.CFRelease(fs_ref.value)
+                                if is_fs:
+                                    if ax.AXUIElementSetAttributeValue(w_ax, s_fs, kFalse) == 0:
+                                        exited_any = True
+                    finally:
+                        cf.CFRelease(wins_ref.value)
+
+                # Fallback qua Menu Bar -> View/Window -> Exit Full Screen nếu phiên đang nằm ở Space nền
+                if not exited_any:
+                    mb_ref = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(app_ax, s_menubar, ctypes.byref(mb_ref)) == 0 and mb_ref.value:
+                        try:
+                            bars_ref = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(mb_ref.value, s_children, ctypes.byref(bars_ref)) == 0 and bars_ref.value:
+                                try:
+                                    n_bar = cf.CFArrayGetCount(bars_ref.value)
+                                    for bi in range(n_bar):
+                                        b_el = cf.CFArrayGetValueAtIndex(bars_ref.value, bi)
+                                        if not b_el:
+                                            continue
+                                        bt = _get_str(b_el, s_title).strip().lower()
+                                        if bt not in ("window", "view", "cửa sổ", "xem"):
+                                            continue
+                                        sub_arr = ctypes.c_void_p()
+                                        if ax.AXUIElementCopyAttributeValue(b_el, s_children, ctypes.byref(sub_arr)) != 0 or not sub_arr.value:
+                                            continue
+                                        try:
+                                            if cf.CFArrayGetCount(sub_arr.value) <= 0:
+                                                continue
+                                            m_el = cf.CFArrayGetValueAtIndex(sub_arr.value, 0)
+                                            items_arr = ctypes.c_void_p()
+                                            if m_el and ax.AXUIElementCopyAttributeValue(m_el, s_children, ctypes.byref(items_arr)) == 0 and items_arr.value:
+                                                try:
+                                                    n_it = cf.CFArrayGetCount(items_arr.value)
+                                                    for mi in range(n_it):
+                                                        it_el = cf.CFArrayGetValueAtIndex(items_arr.value, mi)
+                                                        if not it_el:
+                                                            continue
+                                                        mt = _get_str(it_el, s_title).strip().lower()
+                                                        if "exit full screen" in mt or "thoát khỏi toàn màn hình" in mt:
+                                                            if ax.AXUIElementPerformAction(it_el, s_press) == 0:
+                                                                exited_any = True
+                                                                break
+                                                finally:
+                                                    cf.CFRelease(items_arr.value)
+                                        finally:
+                                            cf.CFRelease(sub_arr.value)
+                                        if exited_any:
+                                            break
+                                finally:
+                                    cf.CFRelease(bars_ref.value)
+                        finally:
+                            cf.CFRelease(mb_ref.value)
+            finally:
+                cf.CFRelease(app_ax)
+                for s_ref in (s_wins, s_fs, s_menubar, s_children, s_title, s_press):
+                    if s_ref:
+                        cf.CFRelease(s_ref)
+
+            if exited_any:
+                time.sleep(0.55)
+            return exited_any
+        except Exception:
+            return False
+
     def stop(self) -> Dict[str, Any]:
         with self._lock:
             self._stop_dock_interceptor()
-            # Trước khi hủy màn ảo, kéo toàn bộ cửa sổ đang ở màn phụ về màn chính MacBook để không bao giờ bị mất tích!
+            # Nếu Microsoft Remote Desktop đang Full-Screen 2 màn -> tự thoát Full-Screen về cửa sổ thường trước khi hủy màn phụ!
             if self._display_id > 0:
+                try:
+                    self._exit_rdp_fullscreen_before_stop()
+                except Exception:
+                    pass
+                # Trước khi hủy màn ảo, kéo toàn bộ cửa sổ đang ở màn phụ về màn chính MacBook để không bao giờ bị mất tích!
                 try:
                     self.rescue_windows_to_main_display()
                 except Exception:
