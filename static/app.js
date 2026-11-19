@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.5";
+  const BUNDLED_BOOT_VER = "2.3.6";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -463,7 +463,25 @@
     syncModeUI();
   }
 
+  let macExtPendingEnter = false;
+
   function selectKeyboardLayout(newLayout) {
+    if (newLayout === "mac_ext") {
+      releaseAllActiveTouches();
+      const prevLayout = kbLayout;
+      if (prevLayout !== "remote") {
+        lastNonRemoteLayout = prevLayout;
+      }
+      kbLayout = "remote";
+      modeMenuOpen = false;
+      symLayer = false;
+      symShifted = false;
+      macExtPendingEnter = true;
+      syncModeUI();
+      pushConfigToServer();
+      if (typeof onEnterRemoteLayout === "function") onEnterRemoteLayout(true);
+      return;
+    }
     if (!LAYOUT_LABELS[newLayout]) return;
     releaseAllActiveTouches();
     const prevLayout = kbLayout;
@@ -5369,6 +5387,14 @@
     }
     pushKvmConfigToServer();
     syncRdpConnectionUI();
+    if (macExtPendingEnter) {
+      macExtPendingEnter = false;
+      void toggleMacExtDisplay(true);
+      return;
+    }
+    if (macExtDisplayActive) {
+      void toggleMacExtDisplay(false);
+    }
     let resumeAfterHotUpdate = false;
     try {
       resumeAfterHotUpdate = sessionStorage.getItem("mac_kb_hot_reload_active_rdp") === "1";
@@ -5405,6 +5431,9 @@
   onLeaveRemoteLayout = () => {
     closeRemoteSoftKeyboard();
     setRemoteHudExpanded(false);
+    if (macExtDisplayActive) {
+      void toggleMacExtDisplay(false);
+    }
     if (kvmActive) {
       sendPayload({ type: "kvm_set", captured: false });
     }
@@ -5435,7 +5464,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.5";
+  const BUNDLED_WEB_VERSION = "2.3.6";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
