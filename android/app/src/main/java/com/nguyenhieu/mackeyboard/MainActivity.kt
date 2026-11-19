@@ -83,6 +83,7 @@ class MainActivity : AppCompatActivity() {
     private var activeUpdateApkFile: File? = null
     private var pendingInstallApkFile: File? = null
     private var mandatoryUpdateDialog: AlertDialog? = null
+    private var updatePromptDismissedThisSession: Boolean = false
     private var downloadPollJob: Job? = null
     private var installTriggeredForId: Long = -1L
     private var lastBackPressedAt: Long = 0L
@@ -401,9 +402,13 @@ class MainActivity : AppCompatActivity() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    val savedRaw = prefs.getString(KEY_SERVER_HOST, "")?.trim().orEmpty()
                     val setupDone = prefs.getBoolean(KEY_INITIAL_SETUP_DONE, false)
-                    if (!setupDone && getSavedServerHost().isBlank()) {
-                        saveServerHost(DEFAULT_SERVER_HOST)
+                    if (!setupDone || savedRaw.isBlank()) {
+                        prefs.edit()
+                            .putString(KEY_SERVER_HOST, savedRaw.ifBlank { DEFAULT_SERVER_HOST })
+                            .putBoolean(KEY_INITIAL_SETUP_DONE, true)
+                            .apply()
                     }
                 }
             }
@@ -697,15 +702,13 @@ class MainActivity : AppCompatActivity() {
                     checkForUpdatesFromGitHub(manualCheck = true)
                 }
             }
-
-        if (!isFirstLaunch) {
-            builder.setNegativeButton("Đóng") { dialog, _ ->
+            .setNegativeButton("Đóng") { dialog, _ ->
                 dialog.dismiss()
                 applyImmersiveStickyFullscreen()
             }
-        }
 
         val dialog = builder.create()
+        dialog.setCanceledOnTouchOutside(true)
         dialog.setOnDismissListener {
             applyImmersiveStickyFullscreen()
         }
@@ -751,7 +754,9 @@ class MainActivity : AppCompatActivity() {
         if (releaseInfo != null) {
             val (tagName, apkDownloadUrl) = releaseInfo
             if (isRemoteVersionNewer(tagName, BuildConfig.VERSION_NAME)) {
-                showMandatoryUpdateDialog(tagName, apkDownloadUrl)
+                if (manualCheck || !updatePromptDismissedThisSession) {
+                    showMandatoryUpdateDialog(tagName, apkDownloadUrl)
+                }
                 return
             }
         }
@@ -957,12 +962,18 @@ class MainActivity : AppCompatActivity() {
         val existingApk = activeUpdateApkFile
         if (existingApk != null && existingApk.exists()) {
             val readyDialog = AlertDialog.Builder(this)
-                .setTitle("Cập nhật bắt buộc ($tagName)")
-                .setMessage("Bản cập nhật $tagName đã tải xong. Bạn bắt buộc phải cài đặt bản mới để tiếp tục sử dụng ứng dụng.")
-                .setCancelable(false)
+                .setTitle("Cập nhật mới ($tagName)")
+                .setMessage("Bản cập nhật $tagName đã tải xong. Bấm Cài đặt ngay để áp dụng.")
+                .setCancelable(true)
                 .setPositiveButton("Cài đặt ngay") { _, _ ->
                     mandatoryUpdateDialog = null
                     promptInstallApk(existingApk)
+                }
+                .setNegativeButton("Để sau") { d, _ ->
+                    updatePromptDismissedThisSession = true
+                    mandatoryUpdateDialog = null
+                    d.dismiss()
+                    applyImmersiveStickyFullscreen()
                 }
                 .create()
             mandatoryUpdateDialog = readyDialog
@@ -972,11 +983,17 @@ class MainActivity : AppCompatActivity() {
 
         val dialog = AlertDialog.Builder(this)
             .setTitle("Có bản cập nhật mới ($tagName)")
-            .setMessage("Phiên bản mới $tagName đã sẵn sàng (bản hiện tại: v${BuildConfig.VERSION_NAME}).\n\nBạn cần cập nhật ngay để tiếp tục vào ứng dụng.")
-            .setCancelable(false)
+            .setMessage("Phiên bản mới $tagName đã sẵn sàng (bản hiện tại: v${BuildConfig.VERSION_NAME}).")
+            .setCancelable(true)
             .setPositiveButton("Cập nhật ngay") { _, _ ->
                 showDownloadingLockDialog(tagName)
                 startApkDownload(tagName, apkDownloadUrl)
+            }
+            .setNegativeButton("Để sau") { d, _ ->
+                updatePromptDismissedThisSession = true
+                mandatoryUpdateDialog = null
+                d.dismiss()
+                applyImmersiveStickyFullscreen()
             }
             .create()
 

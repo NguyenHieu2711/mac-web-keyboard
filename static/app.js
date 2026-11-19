@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.28";
+  const BUNDLED_BOOT_VER = "2.3.35";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
