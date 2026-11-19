@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.35";
+  const BUNDLED_BOOT_VER = "2.3.36";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -5705,7 +5705,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.28";
+  const BUNDLED_WEB_VERSION = "2.3.36";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
@@ -5922,15 +5922,20 @@
         hasAndroidBridge &&
         typeof window.AndroidBridge.getAppVersion === "function" &&
         typeof window.AndroidBridge.startNativeUpdate === "function" &&
-        remoteTag &&
-        compareVer(remoteTag, BUNDLED_WEB_VERSION) > 0
+        remoteTag
       ) {
-        // Chỉ gọi bộ cài APK gốc khi thực sự có bản APK mới (tag_name tăng)
-        try {
-          window.AndroidBridge.startNativeUpdate();
-          return true;
-        } catch {
-          // ignore
+        const installedApkVer = String(window.AndroidBridge.getAppVersion() || "").trim() || BUNDLED_WEB_VERSION;
+        const promptedTag = localStorage.getItem("mac_kb_prompted_apk_tag") || "";
+        if (compareVer(remoteTag, installedApkVer) > 0 && promptedTag !== remoteTag) {
+          // Chỉ gọi bộ cài APK gốc 1 lần duy nhất khi thực sự có bản APK mới hơn bản đang cài (tránh spam Toast)
+          try {
+            localStorage.setItem("mac_kb_prompted_apk_tag", remoteTag);
+            localStorage.setItem("mac_kb_last_gh_sha", shortSha);
+            window.AndroidBridge.startNativeUpdate();
+            return true;
+          } catch {
+            // ignore
+          }
         }
       }
 
