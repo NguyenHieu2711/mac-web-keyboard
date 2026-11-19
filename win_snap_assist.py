@@ -1389,6 +1389,15 @@ class DesktopGridController(Foundation.NSObject):
                                 self._cover_original_icon_at(ix0, iy0)
 
             elif etype == Quartz.kCGEventLeftMouseUp:
+                # Nếu là sự kiện MouseUp tổng hợp từ chính bộ snap của chúng ta thì cho đi thẳng
+                if (
+                    Quartz.CGEventGetIntegerValueField(
+                        event, Quartz.kCGEventSourceUserData
+                    )
+                    == 0x534E4150
+                ):
+                    return event
+
                 was_drag = self.dragging_desktop and self.drag_moved
                 icon_nm = self.drag_icon
                 dx, dy = self.grab_offset
@@ -1403,66 +1412,39 @@ class DesktopGridController(Foundation.NSObject):
                     sx = float(gx) + dx
                     sy = float(gy) + dy
                     snap_pt = Quartz.CGPointMake(sx, sy)
-                    drag_ev = Quartz.CGEventCreateMouseEvent(
-                        None,
-                        Quartz.kCGEventLeftMouseDragged,
-                        snap_pt,
-                        Quartz.kCGMouseButtonLeft,
-                    )
-                    if drag_ev is not None:
-                        Quartz.CGEventTapPostEvent(proxy, drag_ev)
+
+                    # Biến sự kiện MouseUp hiện tại thành sự kiện Dragged cuối cùng tới đúng tâm ô lưới (snap_pt)
+                    # để CoreDrag của Finder di chuyển icon tới đúng tâm ô TRƯỚC khi kết thúc phiên kéo!
+                    Quartz.CGEventSetType(event, Quartz.kCGEventLeftMouseDragged)
                     Quartz.CGEventSetLocation(event, snap_pt)
-
-                    # Kiểm tra xem ô đích (tc, tr) đã có icon nào khác chiếm chưa
-                    prev_cell = self.last_cells.get(icon_nm)
-                    occupant = None
-                    for onm, ocell in self.last_cells.items():
-                        if onm != icon_nm and ocell == (tc, tr):
-                            occupant = onm
-                            break
-
-                    if occupant is None:
-                        # Ô trống: Finder đã thả trực tiếp vào đúng (gx, gy), chỉ cập nhật bộ nhớ, KHÔNG gọi AppleScript để tránh giật 2 nhịp!
-                        self.last_cells[icon_nm] = (tc, tr)
-                        self.last_px[icon_nm] = (gx, gy)
-                        Foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                            0.05, self, "hideMaskTimer:", None, False
-                        )
-                    else:
-                        # Ô đã có icon khác: hoán đổi icon kia sang ô cũ
-                        if prev_cell is not None:
-                            ogx, ogy = self.to_px(prev_cell[0], prev_cell[1])
-                            self.last_cells[icon_nm] = (tc, tr)
-                            self.last_px[icon_nm] = (gx, gy)
-                            self.last_cells[occupant] = prev_cell
-                            self.last_px[occupant] = (ogx, ogy)
-                            self._pending_swap = (occupant, ogx, ogy)
-                            Foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                                0.02, self, "swapTimer:", None, False
-                            )
-                        else:
-                            Foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                                0.05, self, "snapTimer:", None, False
-                            )
+                    self._pending_mouseup_pt = snap_pt
+                    Foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                        0.016, self, "finishMouseUpTimer:", None, False
+                    )
                 else:
                     self._hide_mask()
         except Exception:
             pass
         return event
 
-    def hideMaskTimer_(self, timer) -> None:
-        self._hide_mask()
-
-    def swapTimer_(self, timer) -> None:
-        self._hide_mask()
-        sw = getattr(self, "_pending_swap", None)
-        if sw:
-            self._pending_swap = None
-            occ, ogx, ogy = sw
-            safe_nm = occ.replace("\\", "\\\\").replace('"', '\\"')
-            src = f'tell application "Finder" to set desktop position of item "{safe_nm}" of desktop to {{{ogx}, {ogy}}}'
-            ws = Foundation.NSAppleScript.alloc().initWithSource_(src)
-            ws.executeAndReturnError_(None)
+    def finishMouseUpTimer_(self, timer) -> None:
+        pt = getattr(self, "_pending_mouseup_pt", None)
+        if pt is not None:
+            self._pending_mouseup_pt = None
+            up_ev = Quartz.CGEventCreateMouseEvent(
+                None,
+                Quartz.kCGEventLeftMouseUp,
+                pt,
+                Quartz.kCGMouseButtonLeft,
+            )
+            if up_ev is not None:
+                Quartz.CGEventSetIntegerValueField(
+                    up_ev, Quartz.kCGEventSourceUserData, 0x534E4150
+                )
+                Quartz.CGEventPost(Quartz.kCGSessionEventTap, up_ev)
+        Foundation.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            0.035, self, "snapTimer:", None, False
+        )
 
     def to_cell(self, x: float, y: float) -> Tuple[int, int]:
         c = max(
@@ -1641,8 +1623,7 @@ class DesktopGridController(Foundation.NSObject):
             if (
                 nm in self.last_px
                 and self.last_px[nm] == (x, y)
-                and abs(x - gx) <= 2
-                and abs(y - gy) <= 2
+                and (x, y) == (gx, gy)
                 and (c, r) not in occupied
             ):
                 stationary.append((nm, x, y, (c, r)))
@@ -1688,12 +1669,9 @@ class DesktopGridController(Foundation.NSObject):
         cur_map = {nm: (x, y) for nm, x, y in current_items}
         for nm, cell in new_cells.items():
             gx, gy = self.to_px(cell[0], cell[1])
-            cx, cy = cur_map.get(nm, (0, 0))
             self.last_cells[nm] = cell
-            if abs(cx - gx) <= 2 and abs(cy - gy) <= 2:
-                self.last_px[nm] = (cx, cy)
-            else:
-                self.last_px[nm] = (gx, gy)
+            self.last_px[nm] = (gx, gy)
+            if cur_map.get(nm) != (gx, gy):
                 safe_nm = nm.replace("\\", "\\\\").replace('"', '\\"')
                 cmds.append(
                     f'set desktop position of item "{safe_nm}" of desktop to {{{gx}, {gy}}}'
