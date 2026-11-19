@@ -4571,14 +4571,14 @@ async def mac_virtual_display_diag() -> dict:
                     if Path(mrd_bin).exists():
                         rc_cli = subprocess.run(
                             [mrd_bin, "--script", "bookmark", "list"],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=1.2,
                         )
                         list_txt = ((rc_cli.stdout or "") + "\n" + (rc_cli.stderr or "")).strip()
                         m_u = re.search(r'"[^"]+",\s*([0-9A-Fa-f-]{36})', list_txt)
                         if m_u:
                             rc_ex = subprocess.run(
                                 [mrd_bin, "--script", "bookmark", "export", m_u.group(1).strip()],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=1.2,
                             )
                             ex_s = ((rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")).strip()
                             out["mrd_cli_list"] = (list_txt + "\n---\n" + ex_s)[:1800]
@@ -5808,7 +5808,8 @@ def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bo
             return False
         has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
         has_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
-        return (not has_retina) or (not has_dyn)
+        zero_w_in_1mon = (mac_vdisp is None or not mac_vdisp.is_active()) and bool(re.search(r"desktopwidth:i:0\b", ex_txt, re.IGNORECASE))
+        return (not has_retina) or (not has_dyn) or zero_w_in_1mon
     except Exception:
         return False
 
@@ -5845,6 +5846,20 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
                 "--scaling", "false",
                 "--colordepth", "32",
             ]
+            if not enable_multimon:
+                win_ret_w, win_ret_h = 3024, 1832
+                try:
+                    q_loc = injector._quartz
+                    if q_loc is None:
+                        import Quartz as q_loc  # type: ignore
+                    mb_loc = q_loc.CGDisplayBounds(q_loc.CGMainDisplayID())
+                    mw_l, mh_l = float(mb_loc.size.width), float(mb_loc.size.height)
+                    if mw_l >= 800.0 and mh_l >= 600.0:
+                        win_ret_w = int(round(mw_l * 2.0))
+                        win_ret_h = int(round(max(500.0, mh_l - 66.0) * 2.0))
+                except Exception:
+                    pass
+                preserve_flags += ["--resolution", f"{win_ret_w} {win_ret_h}"]
             if re.search(r"audiocapturemode:i:1", ex_txt, re.IGNORECASE):
                 preserve_flags += ["--redirectmicrophones", "true"]
             if re.search(r"camerastoredirect:s:[^\r\n]+", ex_txt, re.IGNORECASE):
@@ -5868,33 +5883,6 @@ def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
                 rc_w = subprocess.run(w_args2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3.0)
                 w_msg = ((rc_w.stdout or "") + " " + (rc_w.stderr or "")).strip()
             last_status = f"rc={rc_w.returncode}:retina=1,dyn=1,mm={flag}:{w_msg[:40]}"
-
-        # Khôi phục liên kết ZCREDENTIAL gốc có lưu mật khẩu Keychain nếu từng bị sinh bản ghi phụ
-        try:
-            import sqlite3
-            db_p = Path.home() / "Library/Containers/com.microsoft.rdc.macos/Data/Library/Application Support/com.microsoft.rdc.macos/com.microsoft.rdc.application-data.sqlite"
-            if db_p.exists() and not _find_live_mrd_pids():
-                conn = sqlite3.connect(str(db_p), timeout=2.0)
-                try:
-                    cur = conn.cursor()
-                    b_cols = [r[1] for r in cur.execute("PRAGMA table_info(ZBOOKMARKENTITY)").fetchall()]
-                    cred_col = next((c for c in b_cols if "CREDENTIAL" in c.upper() and not c.upper().startswith("Z_")), "")
-                    c_tbls = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%CREDENTIAL%'").fetchall()]
-                    if cred_col and c_tbls:
-                        ct = c_tbls[0]
-                        c_rows = cur.execute(f"SELECT Z_PK FROM {ct} ORDER BY Z_PK ASC").fetchall()
-                        if len(c_rows) >= 2:
-                            orig_pk = int(c_rows[0][0])
-                            cur.execute(f"UPDATE ZBOOKMARKENTITY SET {cred_col} = ? WHERE {cred_col} != ?", (orig_pk, orig_pk))
-                            conn.commit()
-                            _RDP_CLOSER_DIAG["cred_repair"] = f"relinked->{orig_pk}(total={len(c_rows)})"
-                        else:
-                            _RDP_CLOSER_DIAG["cred_repair"] = f"ok(total={len(c_rows)},col={cred_col})"
-                finally:
-                    conn.close()
-        except Exception as ce:
-            _RDP_CLOSER_DIAG["cred_repair"] = f"err:{str(ce)[:60]}"
-
         _RDP_CLOSER_DIAG["multimon_bookmark"] = bool(enable_multimon)
         _RDP_CLOSER_DIAG["bmk_write_status"] = last_status
     except Exception as exc:
