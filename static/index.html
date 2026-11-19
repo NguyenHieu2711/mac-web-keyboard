@@ -663,37 +663,24 @@
           </div>
         </div>
 
-        <!-- Chức năng 1: 2 chế độ thao tác màn hình (Chạm cảm ứng / Dùng trỏ chuột) -->
+        <!-- Nút điều khiển hợp nhất duy nhất: đồng bộ Cảm ứng, Bàn rê ảo và Chuột vật lý không xung đột -->
         <div class="remote-mode-wrap">
-          <button type="button" id="btn-remote-input-mode" class="remote-pill-btn is-active">
-            <span id="lbl-remote-input-mode">👆 Cảm ứng</span>
+          <button type="button" id="btn-remote-control" class="remote-pill-btn">
+            <span id="lbl-remote-control">👆 Cảm ứng</span>
             <span class="remote-caret">▾</span>
           </button>
-          <div id="remote-input-menu" class="mode-dropdown-menu remote-dropdown-menu is-hidden">
-            <div class="mode-dropdown-item is-selected" data-rdp-input="touch">
-              <span>👆 Chạm cảm ứng</span><span class="mode-check">✓</span>
+          <div id="remote-control-menu" class="mode-dropdown-menu remote-dropdown-menu remote-mouse-dropdown is-hidden">
+            <div class="mode-dropdown-item is-selected" data-rdp-ctrl="touch_mac">
+              <span>👆 Cảm ứng (Chuột: Mac)</span><span class="mode-check">✓</span>
             </div>
-            <div class="mode-dropdown-item" data-rdp-input="pointer">
-              <span>🖱 Dùng chuột</span><span class="mode-check">✓</span>
+            <div class="mode-dropdown-item" data-rdp-ctrl="pointer_mac">
+              <span>🖐 Bàn rê ảo (Chuột: Mac)</span><span class="mode-check">✓</span>
             </div>
-          </div>
-        </div>
-
-        <!-- Chức năng 2: 3 chế độ Con chuột vật lý (Ở Mac / Ở Điện thoại / Nối 2 cửa sổ) -->
-        <div class="remote-mode-wrap">
-          <button type="button" id="btn-remote-mouse-mode" class="remote-pill-btn">
-            <span id="lbl-remote-mouse-mode">💻 Chuột: Mac</span>
-            <span class="remote-caret">▾</span>
-          </button>
-          <div id="remote-mouse-menu" class="mode-dropdown-menu remote-dropdown-menu remote-mouse-dropdown is-hidden">
-            <div class="mode-dropdown-item is-selected" data-rdp-mouse="mac">
-              <span>💻 Dùng ở Mac</span><span class="mode-check">✓</span>
+            <div class="mode-dropdown-item" data-rdp-ctrl="mouse_phone">
+              <span>📱 Chuột: Chỉ Điện thoại</span><span class="mode-check">✓</span>
             </div>
-            <div class="mode-dropdown-item" data-rdp-mouse="phone">
-              <span>📱 Dùng ở Điện thoại</span><span class="mode-check">✓</span>
-            </div>
-            <div class="mode-dropdown-item" data-rdp-mouse="bridge">
-              <span>⇔ Nối 2 cửa sổ</span><span class="mode-check">✓</span>
+            <div class="mode-dropdown-item" data-rdp-ctrl="mouse_bridge">
+              <span>⇔ Chuột: Nối 2 màn</span><span class="mode-check">✓</span>
             </div>
           </div>
         </div>

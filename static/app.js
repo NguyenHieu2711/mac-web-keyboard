@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.2.6";
+  const BUNDLED_BOOT_VER = "2.2.7";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -235,11 +235,38 @@
   let symLayer = false;
   let symShifted = false;
   let modeMenuOpen = false;
+  let rdpControlMode = "touch_mac"; // "touch_mac" | "pointer_mac" | "mouse_phone" | "mouse_bridge"
   let rdpInputMode = "touch"; // "touch" | "pointer"
   let rdpMouseMode = "mac"; // "mac" | "phone" | "bridge"
   let onEnterRemoteLayout = null;
   let onLeaveRemoteLayout = null;
   let handleKvmServerMessage = null;
+
+  function applyDerivedControlModes(ctrlMode) {
+    const valid =
+      ctrlMode === "touch_mac" ||
+      ctrlMode === "pointer_mac" ||
+      ctrlMode === "mouse_phone" ||
+      ctrlMode === "mouse_bridge"
+        ? ctrlMode
+        : "touch_mac";
+    rdpControlMode = valid;
+    if (valid === "mouse_phone") {
+      // Chuột khóa riêng ở Điện thoại: đồng nhất dùng trỏ chuột (tuyệt đối không lệch sang Cảm ứng)
+      rdpInputMode = "pointer";
+      rdpMouseMode = "phone";
+    } else if (valid === "mouse_bridge") {
+      // Chuột nối 2 màn Mac ⇄ Điện thoại: di chuột xuyên 2 màn + ngón tay vẫn chạm cuộn tự nhiên
+      rdpInputMode = "touch";
+      rdpMouseMode = "bridge";
+    } else if (valid === "pointer_mac") {
+      rdpInputMode = "pointer";
+      rdpMouseMode = "mac";
+    } else {
+      rdpInputMode = "touch";
+      rdpMouseMode = "mac";
+    }
+  }
 
   try {
     const savedLayout = localStorage.getItem(STORAGE_LAYOUT_KEY);
@@ -262,17 +289,26 @@
     if (savedVn === "0" || savedVn === "false") {
       vnEnabled = false;
     }
-    const savedInputMode = localStorage.getItem("mac_kb_rdp_input_mode");
-    if (savedInputMode === "touch" || savedInputMode === "pointer") {
-      rdpInputMode = savedInputMode;
-    }
-    const savedMouseMode = localStorage.getItem("mac_kb_rdp_mouse_mode");
+    const savedCtrlMode = localStorage.getItem("mac_kb_rdp_ctrl_mode");
     if (
-      savedMouseMode === "mac" ||
-      savedMouseMode === "phone" ||
-      savedMouseMode === "bridge"
+      savedCtrlMode === "touch_mac" ||
+      savedCtrlMode === "pointer_mac" ||
+      savedCtrlMode === "mouse_phone" ||
+      savedCtrlMode === "mouse_bridge"
     ) {
-      rdpMouseMode = savedMouseMode;
+      applyDerivedControlModes(savedCtrlMode);
+    } else {
+      const legacyMouse = localStorage.getItem("mac_kb_rdp_mouse_mode");
+      const legacyInput = localStorage.getItem("mac_kb_rdp_input_mode");
+      if (legacyMouse === "phone") {
+        applyDerivedControlModes("mouse_phone");
+      } else if (legacyMouse === "bridge") {
+        applyDerivedControlModes("mouse_bridge");
+      } else if (legacyInput === "pointer") {
+        applyDerivedControlModes("pointer_mac");
+      } else {
+        applyDerivedControlModes("touch_mac");
+      }
     }
   } catch {
     // ignore
@@ -2320,12 +2356,9 @@
   const remoteHudBar = document.getElementById("remote-hud-bar");
   const remoteStatusDot = document.getElementById("remote-status-dot");
   const remoteModeMenu = document.getElementById("remote-mode-menu");
-  const btnRemoteInputMode = document.getElementById("btn-remote-input-mode");
-  const lblRemoteInputMode = document.getElementById("lbl-remote-input-mode");
-  const remoteInputMenu = document.getElementById("remote-input-menu");
-  const btnRemoteMouseMode = document.getElementById("btn-remote-mouse-mode");
-  const lblRemoteMouseMode = document.getElementById("lbl-remote-mouse-mode");
-  const remoteMouseMenu = document.getElementById("remote-mouse-menu");
+  const btnRemoteControl = document.getElementById("btn-remote-control");
+  const lblRemoteControl = document.getElementById("lbl-remote-control");
+  const remoteControlMenu = document.getElementById("remote-control-menu");
   const remoteScaleWrap = document.getElementById("remote-scale-wrap");
   const btnRemoteScale = document.getElementById("btn-remote-scale");
   const lblRemoteScale = document.getElementById("lbl-remote-scale");
@@ -2359,8 +2392,7 @@
   let rdpConnecting = false;
   let rdpHudExpanded = false;
   let rdpRemoteMenuOpen = false;
-  let rdpInputMenuOpen = false;
-  let rdpMouseMenuOpen = false;
+  let rdpControlMenuOpen = false;
   let rdpScaleMenuOpen = false;
   let rdpImeOpen = false;
   let rdpComposing = false;
@@ -2418,12 +2450,10 @@
 
   function closeAllRemoteSubMenus() {
     rdpRemoteMenuOpen = false;
-    rdpInputMenuOpen = false;
-    rdpMouseMenuOpen = false;
+    rdpControlMenuOpen = false;
     rdpScaleMenuOpen = false;
     if (remoteModeMenu) remoteModeMenu.classList.add("is-hidden");
-    if (remoteInputMenu) remoteInputMenu.classList.add("is-hidden");
-    if (remoteMouseMenu) remoteMouseMenu.classList.add("is-hidden");
+    if (remoteControlMenu) remoteControlMenu.classList.add("is-hidden");
     if (remoteScaleMenu) remoteScaleMenu.classList.add("is-hidden");
   }
 
@@ -2494,39 +2524,38 @@
     }
   }
 
-  function syncRemoteInputModeUI() {
-    if (lblRemoteInputMode) {
-      lblRemoteInputMode.textContent =
-        rdpInputMode === "pointer" ? "🖱 Dùng chuột" : "👆 Cảm ứng";
+  function syncRemoteControlModeUI() {
+    const pillLabels = {
+      touch_mac: "👆 Cảm ứng",
+      pointer_mac: "🖐 Bàn rê ảo",
+      mouse_phone: "📱 Chuột: ĐT",
+      mouse_bridge: kvmActive ? "⇔ Đang ở ĐT" : "⇔ Nối 2 màn",
+    };
+    if (lblRemoteControl) {
+      lblRemoteControl.textContent = pillLabels[rdpControlMode] || pillLabels.touch_mac;
     }
-    if (remoteInputMenu) {
-      remoteInputMenu.querySelectorAll("[data-rdp-input]").forEach((el) => {
-        el.classList.toggle("is-selected", el.dataset.rdpInput === rdpInputMode);
+    if (btnRemoteControl) {
+      btnRemoteControl.classList.toggle(
+        "is-active",
+        rdpControlMode === "mouse_phone" ||
+          rdpControlMode === "pointer_mac" ||
+          (rdpControlMode === "mouse_bridge" && kvmActive)
+      );
+    }
+    if (remoteControlMenu) {
+      remoteControlMenu.querySelectorAll("[data-rdp-ctrl]").forEach((el) => {
+        el.classList.toggle("is-selected", el.dataset.rdpCtrl === rdpControlMode);
       });
     }
     updateOverlayCursorVisual();
   }
 
+  function syncRemoteInputModeUI() {
+    syncRemoteControlModeUI();
+  }
+
   function syncSmartKvmButtonsUI() {
-    const labels = {
-      mac: "💻 Chuột: Mac",
-      phone: "📱 Chuột: ĐT",
-      bridge: kvmActive ? "⇔ Đang ở ĐT" : "⇔ Nối 2 màn",
-    };
-    if (lblRemoteMouseMode) {
-      lblRemoteMouseMode.textContent = labels[rdpMouseMode] || labels.mac;
-    }
-    if (btnRemoteMouseMode) {
-      btnRemoteMouseMode.classList.toggle(
-        "is-active",
-        rdpMouseMode === "phone" || (rdpMouseMode === "bridge" && kvmActive)
-      );
-    }
-    if (remoteMouseMenu) {
-      remoteMouseMenu.querySelectorAll("[data-rdp-mouse]").forEach((el) => {
-        el.classList.toggle("is-selected", el.dataset.rdpMouse === rdpMouseMode);
-      });
-    }
+    syncRemoteControlModeUI();
   }
 
   function syncCoexistButtonUI() {
@@ -4018,15 +4047,34 @@
     if (remoteLoginOverlay) remoteLoginOverlay.classList.remove("is-hidden");
   }
 
-  // ── Xử lý 3 chế độ Con chuột vật lý (1: Dùng ở Mac | 2: Dùng ở Điện thoại | 3: Nối 2 cửa sổ) ──
-  function setRemoteInputMode(mode) {
-    if (mode !== "touch" && mode !== "pointer") return;
-    rdpInputMode = mode;
+  // ── Nút điều khiển hợp nhất: Cảm ứng | Bàn rê ảo | Chuột: Chỉ Điện thoại | Chuột: Nối 2 màn ──
+  function setRemoteControlMode(ctrlMode) {
+    if (
+      ctrlMode !== "touch_mac" &&
+      ctrlMode !== "pointer_mac" &&
+      ctrlMode !== "mouse_phone" &&
+      ctrlMode !== "mouse_bridge"
+    ) {
+      return;
+    }
+    applyDerivedControlModes(ctrlMode);
+    kvmButtonsMask = 0;
+    kvmBridgeReturnPush = 0;
     try {
+      localStorage.setItem("mac_kb_rdp_ctrl_mode", rdpControlMode);
       localStorage.setItem("mac_kb_rdp_input_mode", rdpInputMode);
+      localStorage.setItem("mac_kb_rdp_mouse_mode", rdpMouseMode);
     } catch {
       // ignore
     }
+
+    if (rdpMouseMode === "mac") {
+      kvmActive = false;
+      if (rdpControlMode !== "pointer_mac") {
+        localPointerVisible = false;
+      }
+    }
+
     if (rdpInputMode === "pointer") {
       const cw = remoteCanvas ? remoteCanvas.width || RDP_TARGET_W : RDP_TARGET_W;
       const ch = remoteCanvas ? remoteCanvas.height || RDP_TARGET_H : RDP_TARGET_H;
@@ -4034,30 +4082,18 @@
         kvmX = Math.round(cw * 0.5);
         kvmY = Math.round(ch * 0.5);
       }
+      if (rdpControlMode === "pointer_mac") {
+        showLocalRemoteCursor(kvmX, kvmY, 2200);
+      }
       if (isRemoteConnected()) {
         rdpSendMouseMove(kvmX, kvmY);
       }
-    }
-    syncRemoteInputModeUI();
-  }
-
-  function setRemoteMouseMode(mode) {
-    if (mode !== "mac" && mode !== "phone" && mode !== "bridge") return;
-    rdpMouseMode = mode;
-    kvmButtonsMask = 0;
-    kvmBridgeReturnPush = 0;
-    try {
-      localStorage.setItem("mac_kb_rdp_mouse_mode", rdpMouseMode);
-    } catch {
-      // ignore
-    }
-    if (rdpMouseMode === "mac") {
-      kvmActive = false;
+    } else {
       localPointerVisible = false;
     }
+
     // Giữ nguyên kết nối hiện tại (Song song hoặc Độc quyền), tuyệt đối KHÔNG đóng hay đá phiên Remote trên Mac!
-    syncSmartKvmButtonsUI();
-    updateOverlayCursorVisual();
+    syncRemoteControlModeUI();
     pushKvmConfigToServer();
   }
 
@@ -4065,8 +4101,18 @@
     if (!msg) return;
     if (msg.mode && (msg.mode === "mac" || msg.mode === "phone" || msg.mode === "bridge")) {
       if (msg.mode !== rdpMouseMode) {
-        rdpMouseMode = msg.mode;
+        if (msg.mode === "phone") {
+          applyDerivedControlModes("mouse_phone");
+        } else if (msg.mode === "bridge") {
+          applyDerivedControlModes("mouse_bridge");
+        } else if (rdpControlMode === "mouse_phone" || rdpControlMode === "mouse_bridge") {
+          applyDerivedControlModes("touch_mac");
+        } else {
+          rdpMouseMode = "mac";
+        }
         try {
+          localStorage.setItem("mac_kb_rdp_ctrl_mode", rdpControlMode);
+          localStorage.setItem("mac_kb_rdp_input_mode", rdpInputMode);
           localStorage.setItem("mac_kb_rdp_mouse_mode", rdpMouseMode);
         } catch {
           // ignore
@@ -4665,6 +4711,8 @@
     remoteViewport.addEventListener("pointermove", (e) => {
       if (e.pointerType !== "mouse" || rdpMouseMode === "mac" || !isRemoteConnected()) return;
       const pt = clientToRemoteCoords(e.clientX, e.clientY);
+      kvmX = pt.x;
+      kvmY = pt.y;
       rdpSendMouseMove(pt.x, pt.y);
     });
 
@@ -4859,48 +4907,25 @@
     });
   }
 
-  // ── Menu chọn 2 chế độ Cảm ứng / Dùng chuột ──
-  if (btnRemoteInputMode) {
-    btnRemoteInputMode.addEventListener("click", (e) => {
+  // ── Menu điều khiển hợp nhất duy nhất (Cảm ứng | Bàn rê ảo | Chuột: ĐT | Chuột: Nối 2 màn) ──
+  if (btnRemoteControl) {
+    btnRemoteControl.addEventListener("click", (e) => {
       e.stopPropagation();
       triggerHaptic(8);
-      const next = !rdpInputMenuOpen;
+      const next = !rdpControlMenuOpen;
       closeAllRemoteSubMenus();
-      rdpInputMenuOpen = next;
-      if (remoteInputMenu) remoteInputMenu.classList.toggle("is-hidden", !rdpInputMenuOpen);
+      rdpControlMenuOpen = next;
+      if (remoteControlMenu) remoteControlMenu.classList.toggle("is-hidden", !rdpControlMenuOpen);
     });
   }
 
-  if (remoteInputMenu) {
-    remoteInputMenu.addEventListener("click", (e) => {
-      const item = e.target.closest("[data-rdp-input]");
+  if (remoteControlMenu) {
+    remoteControlMenu.addEventListener("click", (e) => {
+      const item = e.target.closest("[data-rdp-ctrl]");
       if (!item) return;
       e.stopPropagation();
       triggerHaptic(8);
-      setRemoteInputMode(item.dataset.rdpInput);
-      setRemoteHudExpanded(false);
-    });
-  }
-
-  // ── Menu chọn 3 chế độ Con chuột vật lý (Ở Mac / Ở Điện thoại / Nối 2 cửa sổ) ──
-  if (btnRemoteMouseMode) {
-    btnRemoteMouseMode.addEventListener("click", (e) => {
-      e.stopPropagation();
-      triggerHaptic(8);
-      const next = !rdpMouseMenuOpen;
-      closeAllRemoteSubMenus();
-      rdpMouseMenuOpen = next;
-      if (remoteMouseMenu) remoteMouseMenu.classList.toggle("is-hidden", !rdpMouseMenuOpen);
-    });
-  }
-
-  if (remoteMouseMenu) {
-    remoteMouseMenu.addEventListener("click", (e) => {
-      const item = e.target.closest("[data-rdp-mouse]");
-      if (!item) return;
-      e.stopPropagation();
-      triggerHaptic(8);
-      setRemoteMouseMode(item.dataset.rdpMouse);
+      setRemoteControlMode(item.dataset.rdpCtrl);
       setRemoteHudExpanded(false);
     });
   }
@@ -5131,7 +5156,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.2.6";
+  const BUNDLED_WEB_VERSION = "2.2.7";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
