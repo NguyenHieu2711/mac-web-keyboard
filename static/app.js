@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.1";
+  const BUNDLED_BOOT_VER = "2.3.2";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -2667,13 +2667,12 @@
 
   function clampRdpPan() {
     if (!remoteViewport || !remoteStage) return;
+    // Ở tỉ lệ mặc định 100%: luôn khóa chặt fit 100% màn hình, tuyệt đối không cho tóm 2 ngón kéo trôi khung hình lên xuống
     if (rdpZoom <= 1.005) {
       rdpZoom = 1.0;
-      if (!isRemoteStageOverflowing()) {
-        rdpPanX = 0;
-        rdpPanY = 0;
-        return;
-      }
+      rdpPanX = 0;
+      rdpPanY = 0;
+      return;
     }
     const vw = remoteViewport.clientWidth || 1;
     const vh = remoteViewport.clientHeight || 1;
@@ -2681,16 +2680,20 @@
     const sh = remoteStage.offsetHeight * rdpZoom;
     const baseLeft = (vw - remoteStage.offsetWidth) / 2;
     const baseTop = (vh - remoteStage.offsetHeight) / 2;
-    const boundX1 = -baseLeft;
-    const boundX2 = vw - sw - baseLeft;
-    const boundY1 = -baseTop;
-    const boundY2 = vh - sh - baseTop;
-    const minX = Math.min(boundX1, boundX2);
-    const maxX = Math.max(boundX1, boundX2);
-    const minY = Math.min(boundY1, boundY2);
-    const maxY = Math.max(boundY1, boundY2);
-    rdpPanX = Math.max(minX, Math.min(maxX, rdpPanX));
-    rdpPanY = Math.max(minY, Math.min(maxY, rdpPanY));
+    if (sw <= vw + 1) {
+      rdpPanX = (vw - sw) / 2 - baseLeft;
+    } else {
+      const boundX1 = -baseLeft;
+      const boundX2 = vw - sw - baseLeft;
+      rdpPanX = Math.max(Math.min(boundX1, boundX2), Math.min(Math.max(boundX1, boundX2), rdpPanX));
+    }
+    if (sh <= vh + 1) {
+      rdpPanY = (vh - sh) / 2 - baseTop;
+    } else {
+      const boundY1 = -baseTop;
+      const boundY2 = vh - sh - baseTop;
+      rdpPanY = Math.max(Math.min(boundY1, boundY2), Math.min(Math.max(boundY1, boundY2), rdpPanY));
+    }
   }
 
   function applyRdpStageTransform() {
@@ -5274,7 +5277,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.1";
+  const BUNDLED_WEB_VERSION = "2.3.2";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();

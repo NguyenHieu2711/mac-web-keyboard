@@ -1380,10 +1380,10 @@ body.is-lowercase .key-alpha .key-main {
   --rdp-aspect: 2.08148;
   position: relative;
   flex: 0 0 auto;
-  width: max(100vw, calc(100vh * var(--rdp-aspect)));
-  height: max(100vh, calc(100vw / var(--rdp-aspect)));
-  width: max(100dvw, calc(100dvh * var(--rdp-aspect)));
-  height: max(100dvh, calc(100dvw / var(--rdp-aspect)));
+  width: min(100vw, calc(100vh * var(--rdp-aspect)));
+  height: min(100vh, calc(100vw / var(--rdp-aspect)));
+  width: min(100dvw, calc(100dvh * var(--rdp-aspect)));
+  height: min(100dvh, calc(100dvw / var(--rdp-aspect)));
   transform-origin: 0 0;
   will-change: transform;
 }
