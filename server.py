@@ -3364,8 +3364,8 @@ def _capture_mac_rdp_jpeg_packet(win_info: Dict[str, Any]) -> Optional[bytes]:
 
             incl_win = getattr(q, "kCGWindowListOptionIncludingWindow", 8)
             ignore_framing = getattr(q, "kCGWindowImageBoundsIgnoreFraming", 1)
-            nominal_flag = getattr(q, "kCGWindowImageNominalResolution", 16)
-            img_opts = (nominal_flag | ignore_framing) if cw >= 1350.0 else ignore_framing
+            # Chụp thẳng độ phân giải gốc Retina 2x (BestResolution) để chữ sắc nét căng mịn trên màn OLED điện thoại
+            img_opts = ignore_framing
 
             rect = q.CGRectMake(cx, cy, cw, ch)
             cg_img = q.CGWindowListCreateImage(rect, incl_win, win_id, img_opts)
@@ -3396,7 +3396,18 @@ def _capture_mac_rdp_jpeg_packet(win_info: Dict[str, Any]) -> Optional[bytes]:
                 "kCGImageDestinationLossyCompressionQuality",
                 "kCGImageDestinationLossyCompressionQuality",
             )
-            q.CGImageDestinationAddImage(dest, cg_img, {qual_key: 0.76})
+            max_px_key = getattr(
+                q,
+                "kCGImageDestinationImageMaxPixelSize",
+                "kCGImageDestinationImageMaxPixelSize",
+            )
+            enc_opts = {qual_key: 0.88}
+            out_w, out_h = img_w, img_h
+            if img_w > 2560:
+                enc_opts[max_px_key] = 2400
+                out_w = 2400
+                out_h = max(1, int(round(img_h * 2400.0 / img_w)))
+            q.CGImageDestinationAddImage(dest, cg_img, enc_opts)
             if not q.CGImageDestinationFinalize(dest):
                 return None
             jpeg_bytes = bytes(mutable_data)
@@ -3404,7 +3415,7 @@ def _capture_mac_rdp_jpeg_packet(win_info: Dict[str, Any]) -> Optional[bytes]:
                 return None
             return (
                 b"\x10"
-                + struct.pack(">HH", min(65535, img_w), min(65535, img_h))
+                + struct.pack(">HH", min(65535, out_w), min(65535, out_h))
                 + jpeg_bytes
             )
     except Exception:
@@ -3621,6 +3632,8 @@ async def rdp_parallel_ws(ws: WebSocket) -> None:
         nonlocal cur_win
         missing_since: Optional[float] = None
         last_win_refresh = 0.0
+        prev_pkt: Optional[bytes] = None
+        last_sent_at = 0.0
         try:
             while running:
                 now = time.monotonic()
@@ -3641,7 +3654,10 @@ async def rdp_parallel_ws(ws: WebSocket) -> None:
 
                 pkt = await asyncio.to_thread(_capture_mac_rdp_jpeg_packet, cur_win)
                 if pkt is not None:
-                    await ws.send_bytes(pkt)
+                    if pkt != prev_pkt or (now - last_sent_at) >= 1.5:
+                        prev_pkt = pkt
+                        last_sent_at = now
+                        await ws.send_bytes(pkt)
                     await asyncio.sleep(0.042)
                 else:
                     cur_win = {}
@@ -3700,7 +3716,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.1.7",
+        "version": "2.1.9",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,

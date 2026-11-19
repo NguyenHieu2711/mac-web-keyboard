@@ -2189,15 +2189,28 @@
   connectWebSocket();
 
   // ============================================================================
-  // 8. TAB 4 ĐỘC LẬP: REMOTE PC (2248x1080 @ 100% SCALING • TOUCH + KVM + MIC)
+  // 8. TAB 4 ĐỘC LẬP: REMOTE PC (2248x1080 @ HiDPI SCALING • TOUCH + KVM + MIC)
   // ============================================================================
   const RDP_TARGET_W = 2248;
   const RDP_TARGET_H = 1080;
-  const RDP_SCALE_FACTOR = 100;
+  const RDP_PHYS_W_MM = 155;
+  const RDP_PHYS_H_MM = 74;
+  const VALID_RDP_SCALES = [100, 125, 150, 175];
+  const STORAGE_RDP_SCALE = "mac_kb_rdp_scale";
   const STORAGE_RDP_HOST = "mac_kb_rdp_host";
   const STORAGE_RDP_USER = "mac_kb_rdp_user";
   const STORAGE_RDP_PASS = "mac_kb_rdp_pass";
   const STORAGE_RDP_EDGE = "mac_kb_rdp_edge_mode";
+
+  let rdpDesktopScale = 150;
+  try {
+    const savedRdpScale = parseInt(localStorage.getItem(STORAGE_RDP_SCALE) || "150", 10);
+    if (VALID_RDP_SCALES.includes(savedRdpScale)) {
+      rdpDesktopScale = savedRdpScale;
+    }
+  } catch {
+    // ignore
+  }
 
   const EDGE_CYCLE = ["any", "bottom", "right", "left", "top"];
   const EDGE_LABELS = {
@@ -2257,6 +2270,11 @@
   const btnRemoteMouseMode = document.getElementById("btn-remote-mouse-mode");
   const lblRemoteMouseMode = document.getElementById("lbl-remote-mouse-mode");
   const remoteMouseMenu = document.getElementById("remote-mouse-menu");
+  const remoteScaleWrap = document.getElementById("remote-scale-wrap");
+  const btnRemoteScale = document.getElementById("btn-remote-scale");
+  const lblRemoteScale = document.getElementById("lbl-remote-scale");
+  const remoteScaleMenu = document.getElementById("remote-scale-menu");
+  const rdpResBadge = document.getElementById("rdp-res-badge");
   const btnRemoteCoexist = document.getElementById("btn-remote-coexist");
   const btnRemoteKb = document.getElementById("btn-remote-kb");
   const btnRemoteZoomReset = document.getElementById("btn-remote-zoom-reset");
@@ -2287,6 +2305,7 @@
   let rdpRemoteMenuOpen = false;
   let rdpInputMenuOpen = false;
   let rdpMouseMenuOpen = false;
+  let rdpScaleMenuOpen = false;
   let rdpImeOpen = false;
   let rdpComposing = false;
   let rdpActiveMods = new Set();
@@ -2344,9 +2363,75 @@
     rdpRemoteMenuOpen = false;
     rdpInputMenuOpen = false;
     rdpMouseMenuOpen = false;
+    rdpScaleMenuOpen = false;
     if (remoteModeMenu) remoteModeMenu.classList.add("is-hidden");
     if (remoteInputMenu) remoteInputMenu.classList.add("is-hidden");
     if (remoteMouseMenu) remoteMouseMenu.classList.add("is-hidden");
+    if (remoteScaleMenu) remoteScaleMenu.classList.add("is-hidden");
+  }
+
+  function setRemoteStageAspect(w, h) {
+    if (!remoteStage || !(w > 0) || !(h > 0)) return;
+    const ratio = w / h;
+    remoteStage.style.setProperty("--rdp-aspect", ratio.toFixed(5));
+    remoteStage.style.aspectRatio = `${w} / ${h}`;
+    applyRdpStageTransform();
+    updateOverlayCursorVisual();
+  }
+
+  function syncRemoteScaleUI() {
+    if (lblRemoteScale) {
+      lblRemoteScale.textContent = `${rdpDesktopScale}%`;
+    }
+    if (rdpResBadge) {
+      rdpResBadge.textContent = `2248×1080 • ${rdpDesktopScale}%`;
+    }
+    if (remoteScaleMenu) {
+      remoteScaleMenu.querySelectorAll("[data-rdp-scale]").forEach((el) => {
+        el.classList.toggle(
+          "is-selected",
+          parseInt(el.dataset.rdpScale || "0", 10) === rdpDesktopScale
+        );
+      });
+    }
+  }
+
+  function applyLiveRdpDesktopScale(forceToggleWidth = false) {
+    if (!rdpSession || !remoteCanvas) return;
+    const curW = remoteCanvas.width || RDP_TARGET_W;
+    const targetW = forceToggleWidth
+      ? curW === RDP_TARGET_W
+        ? RDP_TARGET_W - 2
+        : RDP_TARGET_W
+      : RDP_TARGET_W;
+    try {
+      rdpSession.resize(
+        targetW,
+        RDP_TARGET_H,
+        rdpDesktopScale,
+        RDP_PHYS_W_MM,
+        RDP_PHYS_H_MM
+      );
+      setRemoteStageAspect(targetW, RDP_TARGET_H);
+    } catch {
+      // ignore
+    }
+  }
+
+  function setRemoteDesktopScale(rawScale) {
+    const parsed = parseInt(String(rawScale || "150"), 10);
+    if (!VALID_RDP_SCALES.includes(parsed)) return;
+    const changed = parsed !== rdpDesktopScale;
+    rdpDesktopScale = parsed;
+    try {
+      localStorage.setItem(STORAGE_RDP_SCALE, String(rdpDesktopScale));
+    } catch {
+      // ignore
+    }
+    syncRemoteScaleUI();
+    if (changed && rdpSession && rdpActiveEngine === "native") {
+      applyLiveRdpDesktopScale(true);
+    }
   }
 
   function syncRemoteInputModeUI() {
@@ -2403,6 +2488,9 @@
     if (remotePillModeIco) {
       remotePillModeIco.textContent = isPar ? "⚡" : "🖥";
     }
+    if (remoteScaleWrap) {
+      remoteScaleWrap.classList.toggle("is-hidden", isPar);
+    }
   }
 
   function setRemoteHudExpanded(expanded) {
@@ -2450,6 +2538,7 @@
     syncCoexistButtonUI();
     syncRemoteInputModeUI();
     syncSmartKvmButtonsUI();
+    syncRemoteScaleUI();
   }
 
   function clampRdpPan() {
@@ -2549,7 +2638,10 @@
     const cw = remoteCanvas.offsetWidth || RDP_TARGET_W;
     const ch = remoteCanvas.offsetHeight || RDP_TARGET_H;
     const stageScale = cw / (remoteCanvas.width || RDP_TARGET_W);
-    const cursorScale = Math.max(0.36, Math.min(1.0, stageScale * 1.18));
+    const usingFallbackSvg =
+      !remoteCursorImg || remoteCursorImg.classList.contains("is-hidden");
+    const minCursorScale = usingFallbackSvg ? 0.56 : 0.36;
+    const cursorScale = Math.max(minCursorScale, Math.min(1.0, stageScale * 1.18));
     const px =
       (kvmX / (remoteCanvas.width || RDP_TARGET_W)) * cw -
       cursorHotspotX * cursorScale;
@@ -3314,15 +3406,20 @@
         const blob = new Blob([jpegSlice], { type: "image/jpeg" });
         const bmp = await createImageBitmap(blob);
         if (remoteCanvas.width !== bmp.width || remoteCanvas.height !== bmp.height) {
+          const prevW = remoteCanvas.width || RDP_TARGET_W;
+          const prevH = remoteCanvas.height || RDP_TARGET_H;
+          kvmX = Math.round((kvmX / prevW) * bmp.width);
+          kvmY = Math.round((kvmY / prevH) * bmp.height);
           remoteCanvas.width = bmp.width;
           remoteCanvas.height = bmp.height;
-          if (remoteStage) {
-            remoteStage.style.aspectRatio = `${bmp.width} / ${bmp.height}`;
-          }
-          updateOverlayCursorVisual();
+          setRemoteStageAspect(bmp.width, bmp.height);
         }
         const ctx2d = remoteCanvas.getContext("2d", { alpha: false });
         if (ctx2d) {
+          ctx2d.imageSmoothingEnabled = true;
+          if ("imageSmoothingQuality" in ctx2d) {
+            ctx2d.imageSmoothingQuality = "high";
+          }
           ctx2d.drawImage(bmp, 0, 0);
         }
         bmp.close();
@@ -3503,10 +3600,8 @@
       rdpSession = null;
     }
 
-    if (remoteStage) {
-      remoteStage.style.aspectRatio = "2248 / 1080";
-    }
-    setRdpStatus("Đang khởi tạo kết nối 2248×1080 (100%)...", true);
+    setRemoteStageAspect(RDP_TARGET_W, RDP_TARGET_H);
+    setRdpStatus(`Đang khởi tạo kết nối 2248×1080 (${rdpDesktopScale}%)...`, true);
 
     try {
       const mod = await ensureIronRdpLoaded();
@@ -3537,6 +3632,8 @@
           sessionUrlObj.searchParams.set("sid", sid);
           openRdpAudioWs(proxyWsUrl, sid);
 
+          const initW =
+            rdpDesktopScale === 100 ? RDP_TARGET_W : RDP_TARGET_W - 2;
           const builder = new mod.SessionBuilder();
           builder.username(username);
           if (domain) builder.serverDomain(domain);
@@ -3544,7 +3641,7 @@
           builder.destination(dest);
           builder.proxyAddress(sessionUrlObj.toString());
           builder.authToken("local");
-          builder.desktopSize(new mod.DesktopSize(RDP_TARGET_W, RDP_TARGET_H));
+          builder.desktopSize(new mod.DesktopSize(initW, RDP_TARGET_H));
           builder.renderCanvas(remoteCanvas);
           builder.extension(new mod.Extension("enable_credssp", true));
           builder.extension(new mod.Extension("display_control", true));
@@ -3640,9 +3737,7 @@
       const ds = rdpSession.desktopSize();
       remoteCanvas.width = ds.width || RDP_TARGET_W;
       remoteCanvas.height = ds.height || RDP_TARGET_H;
-      if (remoteStage) {
-        remoteStage.style.aspectRatio = `${remoteCanvas.width} / ${remoteCanvas.height}`;
-      }
+      setRemoteStageAspect(remoteCanvas.width, remoteCanvas.height);
 
       rdpConnecting = false;
       setRdpStatus("", true);
@@ -3662,22 +3757,27 @@
         }
       }
 
-      if (ds.width !== RDP_TARGET_W || ds.height !== RDP_TARGET_H) {
-        setTimeout(() => {
-          if (rdpSession) {
-            try {
-              rdpSession.resize(
-                RDP_TARGET_W,
-                RDP_TARGET_H,
-                RDP_SCALE_FACTOR,
-                RDP_TARGET_W,
-                RDP_TARGET_H
-              );
-            } catch {
-              // ignore
+      if (
+        rdpDesktopScale !== 100 ||
+        ds.width !== RDP_TARGET_W ||
+        ds.height !== RDP_TARGET_H
+      ) {
+        const activeRef = connectedSession;
+        const triggerInitialScale = () => {
+          if (rdpSession !== activeRef) return;
+          try {
+            const curDs = rdpSession.desktopSize();
+            if (curDs.width === RDP_TARGET_W && curDs.height === RDP_TARGET_H) {
+              setRemoteStageAspect(RDP_TARGET_W, RDP_TARGET_H);
+              return;
             }
+          } catch {
+            // ignore
           }
-        }, 250);
+          applyLiveRdpDesktopScale(false);
+        };
+        setTimeout(triggerInitialScale, 450);
+        setTimeout(triggerInitialScale, 1350);
       }
 
       const handleNativeEnded = async (errObj) => {
@@ -4499,6 +4599,31 @@
     });
   }
 
+  // ── Menu chọn Tỉ lệ hiển thị HiDPI (100% / 125% / 150% / 175%) cho chế độ Độc quyền ──
+  if (btnRemoteScale) {
+    btnRemoteScale.addEventListener("click", (e) => {
+      e.stopPropagation();
+      triggerHaptic(8);
+      const next = !rdpScaleMenuOpen;
+      closeAllRemoteSubMenus();
+      rdpScaleMenuOpen = next;
+      if (remoteScaleMenu) remoteScaleMenu.classList.toggle("is-hidden", !rdpScaleMenuOpen);
+    });
+  }
+
+  if (remoteScaleMenu) {
+    remoteScaleMenu.addEventListener("click", (e) => {
+      const item = e.target.closest("[data-rdp-scale]");
+      if (!item) return;
+      e.stopPropagation();
+      triggerHaptic(8);
+      setRemoteDesktopScale(item.dataset.rdpScale);
+      setRemoteHudExpanded(false);
+    });
+  }
+
+  syncRemoteScaleUI();
+
   // ── Gắn sự kiện thanh HUD tối giản & Hộp đăng nhập ──
   if (remoteHudPill) {
     remoteHudPill.addEventListener("click", (e) => {
@@ -4700,7 +4825,7 @@
   //    Đang mở app dùng bình thường mà có bản mới trên GitHub -> chờ ngón tay nghỉ 2s
   //    rồi tự kéo & áp dụng luôn tại chỗ, không cần tắt app mở lại!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.1.8";
+  const BUNDLED_WEB_VERSION = "2.1.9";
   const LIVE_MANIFEST_URL =
     "https://raw.githubusercontent.com/NguyenHieu2711/mac-web-keyboard/main/releases/latest.json";
   let lastUserTouchAt = performance.now();

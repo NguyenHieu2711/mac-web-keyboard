@@ -699,6 +699,29 @@
         </div>
 
         <button type="button" id="btn-remote-coexist" class="remote-pill-btn is-active">⚡ Song song</button>
+
+        <!-- Tỉ lệ hiển thị sắc nét (HiDPI Scale cho màn điện thoại) -->
+        <div id="remote-scale-wrap" class="remote-mode-wrap">
+          <button type="button" id="btn-remote-scale" class="remote-pill-btn">
+            <span id="lbl-remote-scale">150%</span>
+            <span class="remote-caret">▾</span>
+          </button>
+          <div id="remote-scale-menu" class="mode-dropdown-menu remote-dropdown-menu is-hidden">
+            <div class="mode-dropdown-item" data-rdp-scale="100">
+              <span>100% (Nhỏ)</span><span class="mode-check">✓</span>
+            </div>
+            <div class="mode-dropdown-item" data-rdp-scale="125">
+              <span>125% (Vừa)</span><span class="mode-check">✓</span>
+            </div>
+            <div class="mode-dropdown-item is-selected" data-rdp-scale="150">
+              <span>150% (Chuẩn ĐT)</span><span class="mode-check">✓</span>
+            </div>
+            <div class="mode-dropdown-item" data-rdp-scale="175">
+              <span>175% (Lớn)</span><span class="mode-check">✓</span>
+            </div>
+          </div>
+        </div>
+
         <button type="button" id="btn-remote-kb" class="remote-pill-btn">⌨ Phím</button>
         <button type="button" id="btn-remote-zoom-reset" class="remote-pill-btn is-hidden">100%</button>
         <button type="button" id="btn-remote-cfg" class="remote-pill-btn">⚙</button>
@@ -734,7 +757,7 @@
         <div class="remote-login-head">
           <div class="remote-login-title-group">
             <span class="remote-login-title">🖥 Remote PC</span>
-            <span class="remote-res-badge">2248×1080 • 100%</span>
+            <span id="rdp-res-badge" class="remote-res-badge">2248×1080 • 150%</span>
           </div>
           <div class="remote-login-head-actions">
             <button type="button" id="btn-rdp-switch-back" class="remote-head-btn">← Tab</button>
