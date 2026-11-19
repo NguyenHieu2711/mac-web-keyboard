@@ -1299,11 +1299,23 @@ class MacVirtualDisplayManager:
         self._stop_dock_interceptor()
         self._tap_gen += 1
         my_gen = self._tap_gen
+        wake_evt = threading.Event()
+        main_sz = [1512.0, 982.0]
 
         def _cache_worker() -> None:
             while self._tap_gen == my_gen and self.is_active():
                 self._refresh_dock_intercept_cache()
-                time.sleep(0.45)
+                try:
+                    import Quartz as q  # type: ignore
+
+                    mb = q.CGDisplayBounds(q.CGMainDisplayID())
+                    if mb.size.width >= 640 and mb.size.height >= 400:
+                        main_sz[0] = float(mb.size.width)
+                        main_sz[1] = float(mb.size.height)
+                except Exception:
+                    pass
+                wake_evt.wait(timeout=0.35)
+                wake_evt.clear()
 
         def _tap_worker() -> None:
             try:
@@ -1311,6 +1323,7 @@ class MacVirtualDisplayManager:
 
                 tap_holder: list = [None]
                 swallow_up_until = [0.0]
+                last_edge_wake = [0.0]
 
                 def _cb(_proxy, event_type, event, _refcon):
                     try:
@@ -1322,13 +1335,23 @@ class MacVirtualDisplayManager:
                             return event
 
                         if event_type == q.kCGEventMouseMoved:
-                            # Chống Dock macOS (khi đặt đáy) nhảy từ MacBook sang Màn phụ #2
+                            loc = q.CGEventGetLocation(event)
+                            mx, my = float(loc.x), float(loc.y)
+                            # 1. Chống Dock macOS (khi đặt đáy) nhảy từ MacBook sang Màn phụ #2
                             b = self._vdisp_bounds_cache
                             if b and not self._vdisp_has_fullscreen:
-                                loc = q.CGEventGetLocation(event)
                                 bx, by, bw, bh = b["x"], b["y"], b["w"], b["h"]
-                                if (bx <= loc.x < bx + bw) and (loc.y >= by + bh - 2.0):
-                                    q.CGEventSetLocation(event, (loc.x, by + bh - 3.0))
+                                if (bx <= mx < bx + bw) and (my >= by + bh - 4.0):
+                                    q.CGEventSetLocation(event, (mx, by + bh - 5.0))
+                                    return event
+                            # 2. Khi chuột tiến sát vùng Dock MacBook (kể cả lúc bật tự ẩn autohide=1) -> làm mới tọa độ icon tức thì!
+                            mw, mh = main_sz[0], main_sz[1]
+                            if (0.0 <= mx <= mw) and (0.0 <= my <= mh):
+                                if my >= mh - 95.0 or mx >= mw - 95.0 or mx <= 95.0:
+                                    now_t = time.monotonic()
+                                    if (now_t - last_edge_wake[0]) >= 0.09:
+                                        last_edge_wake[0] = now_t
+                                        wake_evt.set()
                             return event
 
                         if event_type == q.kCGEventLeftMouseUp:
@@ -1344,7 +1367,7 @@ class MacVirtualDisplayManager:
                             loc = q.CGEventGetLocation(event)
                             mx, my = float(loc.x), float(loc.y)
                             for rx, ry, rw, rh, title_s in icons:
-                                if (rx - 2.0 <= mx <= rx + rw + 2.0) and (ry - 2.0 <= my <= ry + rh + 2.0):
+                                if (rx - 4.0 <= mx <= rx + rw + 4.0) and (ry - 4.0 <= my <= ry + rh + 4.0):
                                     tpid = self._vdisp_only_apps.get(title_s, 0)
                                     if tpid > 0:
                                         swallow_up_until[0] = time.monotonic() + 0.5
