@@ -640,7 +640,6 @@
           <span id="remote-pill-mode-ico">🖥</span>
           <span class="remote-caret">▾</span>
         </button>
-        <button type="button" id="btn-remote-mouse-pill" class="remote-hud-pill">🖱</button>
       </div>
 
       <div id="remote-hud-bar" class="remote-hud-bar is-hidden">
@@ -664,10 +663,42 @@
           </div>
         </div>
 
+        <!-- Chức năng 1: 2 chế độ thao tác màn hình (Chạm cảm ứng / Dùng trỏ chuột) -->
+        <div class="remote-mode-wrap">
+          <button type="button" id="btn-remote-input-mode" class="remote-pill-btn is-active">
+            <span id="lbl-remote-input-mode">👆 Cảm ứng</span>
+            <span class="remote-caret">▾</span>
+          </button>
+          <div id="remote-input-menu" class="mode-dropdown-menu remote-dropdown-menu is-hidden">
+            <div class="mode-dropdown-item is-selected" data-rdp-input="touch">
+              <span>👆 Chạm cảm ứng</span><span class="mode-check">✓</span>
+            </div>
+            <div class="mode-dropdown-item" data-rdp-input="pointer">
+              <span>🖱 Dùng chuột</span><span class="mode-check">✓</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chức năng 2: 3 chế độ Con chuột vật lý (Ở Mac / Ở Điện thoại / Nối 2 cửa sổ) -->
+        <div class="remote-mode-wrap">
+          <button type="button" id="btn-remote-mouse-mode" class="remote-pill-btn">
+            <span id="lbl-remote-mouse-mode">💻 Chuột: Mac</span>
+            <span class="remote-caret">▾</span>
+          </button>
+          <div id="remote-mouse-menu" class="mode-dropdown-menu remote-dropdown-menu remote-mouse-dropdown is-hidden">
+            <div class="mode-dropdown-item is-selected" data-rdp-mouse="mac">
+              <span>💻 Dùng ở Mac</span><span class="mode-check">✓</span>
+            </div>
+            <div class="mode-dropdown-item" data-rdp-mouse="phone">
+              <span>📱 Dùng ở Điện thoại</span><span class="mode-check">✓</span>
+            </div>
+            <div class="mode-dropdown-item" data-rdp-mouse="bridge">
+              <span>⇔ Nối 2 cửa sổ</span><span class="mode-check">✓</span>
+            </div>
+          </div>
+        </div>
+
         <button type="button" id="btn-remote-coexist" class="remote-pill-btn is-active">⚡ Song song</button>
-        <button type="button" id="btn-remote-spk" class="remote-pill-btn is-active">🔊 Loa</button>
-        <button type="button" id="btn-remote-mic" class="remote-pill-btn is-active">🎤 Mic</button>
-        <button type="button" id="btn-remote-mouse" class="remote-pill-btn">🖱 Chuột</button>
         <button type="button" id="btn-remote-kb" class="remote-pill-btn">⌨ Phím</button>
         <button type="button" id="btn-remote-zoom-reset" class="remote-pill-btn is-hidden">100%</button>
         <button type="button" id="btn-remote-cfg" class="remote-pill-btn">⚙</button>

@@ -1673,24 +1673,25 @@ class LiveLensCapturer:
 
 class MacKvmBridge:
     """
-    Cơ chế chuyển kênh Chuột Bluetooth thông minh (Smart KVM Switch — không dùng đẩy mép màn hình):
-    - Mặc định chuột luôn thuộc về MacBook 100%, chạm 4 mép màn hình Mac tự nhiên không bao giờ bị nhảy nhầm.
-    - Chỉ khi điện thoại đang mở tab `remote` (kvm_enabled = True), người dùng chuyển tức thì `Mac ⇄ Điện thoại` bằng:
-      1) Chạm 1 lần nút `🖱` ngay trên viên thuốc đỉnh màn hình điện thoại; HOẶC
-      2) Nháy đúp nút con lăn giữa (Middle-Click × 2) / bấm nút phụ cạnh hông chuột ngay trên tay cầm chuột; HOẶC
-      3) Nhấn `Ctrl + Option` trên bàn phím MacBook để gọi chuột về lại Mac ngay lập tức.
+    Quản lý 3 chế độ Con chuột vật lý độc lập, rõ ràng (không bao giờ chạy trùng trên cả 2 màn hình):
+    1) `mac`    : Con chuột chỉ dùng riêng trên MacBook 100%.
+    2) `phone`  : Con chuột khóa tách sang riêng màn hình Remote PC trên điện thoại 100% (tắt trên Mac).
+    3) `bridge` : Kết nối 2 cửa sổ (Điện thoại đặt bên trái MacBook) — di chuột chạm mép TRÁI của Mac
+                  sẽ sang mép PHẢI của điện thoại; di chuột chạm mép PHẢI của điện thoại sẽ về mép TRÁI của Mac.
+    (Nhấn `Ctrl + Option` trên bàn phím MacBook bất cứ lúc nào để trả chuột về lại Mac ngay lập tức).
     """
 
     def __init__(self) -> None:
         self.available: bool = False
         self.captured: bool = False
+        self.mode: str = "mac"
         self._kvm_enabled: bool = False
         self._active_ws: Optional[WebSocket] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._send_queue: Optional[asyncio.Queue] = None
         self._saved_pos: Tuple[float, float] = (600.0, 400.0)
-        self._last_mid_click_at: float = 0.0
-        self._swallow_other_up: bool = False
+        self._left_edge_push: float = 0.0
+        self._last_cross_at: float = 0.0
         self._bounds_cache: Tuple[float, float, float, float] = (0.0, 0.0, 1440.0, 900.0)
         self._bounds_at: float = 0.0
         self._quartz: Any = None
@@ -1737,23 +1738,68 @@ class MacKvmBridge:
         except Exception:
             pass
 
+    def _disable_warp_suppression(self) -> None:
+        q = self._quartz
+        if q is None:
+            return
+        try:
+            if hasattr(q, "CGSetLocalEventsSuppressionInterval"):
+                q.CGSetLocalEventsSuppressionInterval(0.0)
+        except Exception:
+            pass
+        try:
+            if hasattr(q, "CGEventSourceSetLocalEventsSuppressionInterval"):
+                q.CGEventSourceSetLocalEventsSuppressionInterval(None, 0.0)
+        except Exception:
+            pass
+
     def attach_client(
         self,
         ws: WebSocket,
         loop: asyncio.AbstractEventLoop,
         send_queue: asyncio.Queue,
         enabled: bool,
-        edge_mode: str = "any",
+        mode: str = "mac",
     ) -> None:
+        clean_mode = mode if mode in ("mac", "phone", "bridge") else "mac"
         with self._lock:
             self._active_ws = ws
             self._loop = loop
             self._send_queue = send_queue
             self._kvm_enabled = bool(enabled)
-            if not self._kvm_enabled and self.captured:
+            self._left_edge_push = 0.0
+            if not self._kvm_enabled:
+                self.mode = clean_mode
+                if self.captured:
+                    self._set_captured_locked(False)
+                else:
+                    self._enqueue_payload(
+                        {
+                            "type": "kvm_state",
+                            "mode": self.mode,
+                            "captured": False,
+                        }
+                    )
+                return
+
+            prev_mode = self.mode
+            self.mode = clean_mode
+            if clean_mode == "mac":
                 self._set_captured_locked(False)
+            elif clean_mode == "phone":
+                self._set_captured_locked(True, enter_edge="center", y_ratio=0.5)
             else:
-                self._enqueue_payload({"type": "kvm_state", "captured": self.captured})
+                # Chế độ `bridge` (Nối 2 màn): nếu trước đó đang khóa cứng `phone` thì nhả về Mac để bắt đầu di tự nhiên
+                if prev_mode == "phone" and self.captured:
+                    self._set_captured_locked(False)
+                else:
+                    self._enqueue_payload(
+                        {
+                            "type": "kvm_state",
+                            "mode": self.mode,
+                            "captured": self.captured,
+                        }
+                    )
 
     def detach_client(self, ws: WebSocket) -> None:
         with self._lock:
@@ -1762,58 +1808,89 @@ class MacKvmBridge:
                 self._active_ws = None
                 self._loop = None
                 self._send_queue = None
+                self._left_edge_push = 0.0
                 if self.captured:
                     self._set_captured_locked(False)
 
-    def _set_captured_locked(self, target: bool) -> None:
+    def _set_captured_locked(
+        self,
+        target: bool,
+        enter_edge: str = "center",
+        y_ratio: float = 0.5,
+        save_cur_pos: bool = True,
+    ) -> None:
         q = self._quartz
         if target and (not self._kvm_enabled or self._active_ws is None):
             target = False
         if self.captured == target:
-            self._enqueue_payload({"type": "kvm_state", "captured": self.captured})
+            self._enqueue_payload(
+                {
+                    "type": "kvm_state",
+                    "mode": self.mode,
+                    "captured": self.captured,
+                    "enter_edge": enter_edge,
+                    "y_ratio": round(y_ratio, 4),
+                }
+            )
             return
 
         self.captured = target
         if q is not None:
             try:
                 min_x, min_y, max_x, max_y = self._get_desktop_bounds()
-                src = q.CGEventSourceCreate(q.kCGEventSourceStateCombinedSessionState)
-                if src is not None and hasattr(q, "CGEventSourceSetLocalEventsSuppressionInterval"):
-                    q.CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0)
+                self._disable_warp_suppression()
                 if target:
-                    try:
-                        loc = q.CGEventGetLocation(q.CGEventCreate(None))
-                        self._saved_pos = (float(loc.x), float(loc.y))
-                    except Exception:
-                        pass
+                    if save_cur_pos:
+                        try:
+                            loc = q.CGEventGetLocation(q.CGEventCreate(None))
+                            self._saved_pos = (float(loc.x), float(loc.y))
+                        except Exception:
+                            pass
+                    # Giấu mũi tên sát viền phải (cách góc dưới 28px để tránh Hot Corner của macOS)
                     q.CGWarpMouseCursorPosition(
-                        (max_x - 1.0, min(max_y - 80.0, min_y + 220.0))
+                        (max_x - 1.0, max(min_y + 40.0, max_y - 28.0))
                     )
                     q.CGAssociateMouseAndMouseCursorPosition(False)
                 else:
                     q.CGAssociateMouseAndMouseCursorPosition(True)
                     rx, ry = self._saved_pos
-                    rx = max(min_x + 12.0, min(max_x - 12.0, rx))
-                    ry = max(min_y + 12.0, min(max_y - 12.0, ry))
+                    rx = max(min_x + 3.0, min(max_x - 8.0, rx))
+                    ry = max(min_y + 8.0, min(max_y - 8.0, ry))
                     q.CGWarpMouseCursorPosition((rx, ry))
             except Exception as exc:
                 logger.debug("KVM switch error: %s", exc)
 
-        self._enqueue_payload({"type": "kvm_state", "captured": self.captured})
+        self._enqueue_payload(
+            {
+                "type": "kvm_state",
+                "mode": self.mode,
+                "captured": self.captured,
+                "enter_edge": enter_edge,
+                "y_ratio": round(y_ratio, 4),
+            }
+        )
+
+    def bridge_return_to_mac(self, y_ratio: float = 0.5) -> None:
+        with self._lock:
+            min_x, min_y, max_x, max_y = self._get_desktop_bounds()
+            clamped_r = max(0.02, min(0.98, float(y_ratio)))
+            ry = min_y + clamped_r * max(1.0, max_y - min_y)
+            self._saved_pos = (min_x + 4.0, ry)
+            self._last_cross_at = time.monotonic()
+            self._left_edge_push = 0.0
+            self._set_captured_locked(False, save_cur_pos=False)
+
+    def emergency_release_to_mac(self) -> None:
+        with self._lock:
+            if self.mode == "phone":
+                self.mode = "mac"
+            self._last_cross_at = time.monotonic()
+            self._left_edge_push = 0.0
+            self._set_captured_locked(False, save_cur_pos=False)
 
     def set_captured(self, target: bool) -> None:
         with self._lock:
             self._set_captured_locked(bool(target))
-
-    def toggle_captured(self) -> None:
-        with self._lock:
-            self._set_captured_locked(not self.captured)
-
-    def release_to_mac(
-        self, mac_edge: Optional[str] = None, ratio: Optional[float] = None
-    ) -> None:
-        with self._lock:
-            self._set_captured_locked(False)
 
     def _start_tap_thread(self) -> None:
         def _runner() -> None:
@@ -1822,6 +1899,7 @@ class MacKvmBridge:
 
                 self._quartz = Quartz
                 q = Quartz
+                self._disable_warp_suppression()
 
                 def _cb(proxy, event_type, event, refcon):
                     try:
@@ -1840,10 +1918,14 @@ class MacKvmBridge:
                                     q.kCGEventFlagMaskAlternate
                                 )
                                 if (flags & req) == req:
-                                    self.set_captured(False)
+                                    self.emergency_release_to_mac()
                             return event
 
-                        if not self._kvm_enabled or self._active_ws is None:
+                        if (
+                            not self._kvm_enabled
+                            or self._active_ws is None
+                            or self.mode == "mac"
+                        ):
                             if self.captured:
                                 self.set_captured(False)
                             return event
@@ -1854,37 +1936,48 @@ class MacKvmBridge:
                         if user_tag == 0x4D4B4231:
                             return event
 
-                        # Kiểm tra thao tác đổi nhanh ngay trên chuột:
-                        # - Bấm nút phụ hông chuột (button >= 3) -> chuyển tức thì 1 chạm
-                        # - Nháy đúp nút con lăn giữa (button == 2, 2 lần trong 0.42s) -> chuyển tức thì
-                        if event_type == q.kCGEventOtherMouseDown:
-                            btn_num = int(
-                                q.CGEventGetIntegerValueField(
-                                    event, q.kCGMouseEventButtonNumber
-                                )
-                            )
-                            if btn_num >= 3:
-                                self._swallow_other_up = True
-                                self.toggle_captured()
-                                return None
-                            if btn_num == 2:
-                                now_m = time.monotonic()
-                                if now_m - self._last_mid_click_at < 0.42:
-                                    self._last_mid_click_at = 0.0
-                                    self._swallow_other_up = True
-                                    self.toggle_captured()
-                                    return None
-                                self._last_mid_click_at = now_m
-
-                        if event_type == q.kCGEventOtherMouseUp and self._swallow_other_up:
-                            self._swallow_other_up = False
-                            return None
-
-                        if not self.captured:
-                            return event
-
                         dx = float(q.CGEventGetIntegerValueField(event, q.kCGMouseEventDeltaX))
                         dy = float(q.CGEventGetIntegerValueField(event, q.kCGMouseEventDeltaY))
+
+                        # Chế độ 3 (`bridge`): đang ở màn Mac, di chuột chạm mép TRÁI của Mac -> sang mép PHẢI của điện thoại
+                        if not self.captured:
+                            if (
+                                self.mode == "bridge"
+                                and event_type == q.kCGEventMouseMoved
+                            ):
+                                loc = q.CGEventGetLocation(event)
+                                cur_x = float(loc.x)
+                                cur_y = float(loc.y)
+                                min_x, min_y, max_x, max_y = self._get_desktop_bounds()
+                                if (
+                                    cur_x <= min_x + 2.0
+                                    and dx < 0.0
+                                    and (time.monotonic() - self._last_cross_at) > 0.12
+                                ):
+                                    self._left_edge_push += -dx
+                                    if self._left_edge_push >= 4.0:
+                                        y_r = max(
+                                            0.02,
+                                            min(
+                                                0.98,
+                                                (cur_y - min_y)
+                                                / max(1.0, max_y - min_y),
+                                            ),
+                                        )
+                                        with self._lock:
+                                            self._left_edge_push = 0.0
+                                            self._saved_pos = (min_x + 6.0, cur_y)
+                                            self._last_cross_at = time.monotonic()
+                                            self._set_captured_locked(
+                                                True,
+                                                enter_edge="right",
+                                                y_ratio=y_r,
+                                                save_cur_pos=False,
+                                            )
+                                        return None
+                                elif cur_x > min_x + 10.0:
+                                    self._left_edge_push = 0.0
+                            return event
 
                         if event_type in (
                             q.kCGEventMouseMoved,
@@ -2009,7 +2102,7 @@ class MacKvmBridge:
                 loop_ref = q.CFRunLoopGetCurrent()
                 q.CFRunLoopAddSource(loop_ref, run_loop_src, q.kCFRunLoopCommonModes)
                 q.CGEventTapEnable(tap, True)
-                logger.info("Đã kích hoạt MacKvmBridge (Chuột Bluetooth xuyên màn hình Mac <-> Điện thoại).")
+                logger.info("Đã kích hoạt MacKvmBridge v3 (3 chế độ Chuột: Mac / Điện thoại / Nối 2 màn).")
                 q.CFRunLoopRun()
             except Exception as exc:
                 logger.warning("Không thể khởi tạo MacKvmBridge: %s", exc)
@@ -3368,7 +3461,8 @@ def _dispatch_parallel_rdp_input(
             btn_idx = int(data.get("btn", 0))
             cnt = max(1, int(data.get("count", 1)))
             state["held_btn"] = btn_idx
-            q.CGWarpMouseCursorPosition((sx, sy))
+            if not kvm_bridge.captured:
+                q.CGWarpMouseCursorPosition((sx, sy))
             if btn_idx == 2:
                 ev_t, cg_b = q.kCGEventRightMouseDown, q.kCGMouseButtonRight
             elif btn_idx == 1:
@@ -3396,7 +3490,8 @@ def _dispatch_parallel_rdp_input(
             q.CGEventPost(q.kCGHIDEventTap, ev)
         elif mtype == "ptr_move":
             held = int(state.get("held_btn", -1))
-            q.CGWarpMouseCursorPosition((sx, sy))
+            if not kvm_bridge.captured:
+                q.CGWarpMouseCursorPosition((sx, sy))
             if held == 0:
                 ev_t, cg_b = q.kCGEventLeftMouseDragged, q.kCGMouseButtonLeft
             elif held == 2:
@@ -3414,7 +3509,8 @@ def _dispatch_parallel_rdp_input(
             q.CGEventPost(q.kCGHIDEventTap, ev)
         elif mtype == "ptr_wheel":
             _activate_mac_pid_if_needed(pid)
-            q.CGWarpMouseCursorPosition((sx, sy))
+            if not kvm_bridge.captured:
+                q.CGWarpMouseCursorPosition((sx, sy))
             wx_d = int(round(float(data.get("dx", 0.0))))
             wy_d = int(round(float(data.get("dy", 0.0))))
             ev = q.CGEventCreateScrollWheelEvent(
@@ -3604,13 +3700,14 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.1.6",
+        "version": "2.1.7",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
         "kb_layout": injector.kb_layout,
         "lens_available": lens_capturer.available,
         "kvm_available": kvm_bridge.available,
+        "kvm_mode": kvm_bridge.mode,
         "kvm_captured": kvm_bridge.captured,
         "screen_recording_ok": check_macos_screen_recording(prompt=False),
         "remote_pc_focused": is_rem,
@@ -3847,13 +3944,14 @@ async def keyboard_ws(ws: WebSocket) -> None:
                 )
             elif msg_type == "kvm_config":
                 kvm_on = bool(data.get("enabled", False))
-                kvm_bridge.attach_client(ws, cur_loop, kvm_queue, kvm_on)
-            elif msg_type == "kvm_toggle":
-                kvm_bridge.toggle_captured()
+                kvm_mode = str(data.get("mode", "mac"))
+                kvm_bridge.attach_client(ws, cur_loop, kvm_queue, kvm_on, kvm_mode)
+            elif msg_type == "kvm_bridge_return":
+                kvm_bridge.bridge_return_to_mac(float(data.get("y_ratio", 0.5)))
             elif msg_type == "kvm_set":
                 kvm_bridge.set_captured(bool(data.get("captured", False)))
             elif msg_type == "kvm_return":
-                kvm_bridge.set_captured(False)
+                kvm_bridge.emergency_release_to_mac()
             elif msg_type == "lens_config":
                 if "enabled" in data:
                     lens_cfg["enabled"] = bool(data["enabled"])
