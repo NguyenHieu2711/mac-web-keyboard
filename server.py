@@ -6090,7 +6090,7 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                     if not wel:
                         continue
                     wt = _gs(wel, s_title).strip().lower()
-                    if wt in ("microsoft remote desktop", "windows app", "connection center", "pcs"):
+                    if not wt or wt in ("microsoft remote desktop", "windows app", "connection center", "pcs", "devices"):
                         if _gb(wel, s_fs):
                             ax.AXUIElementSetAttributeValue(wel, s_fs, kFalse)
                             exited_cc_fs = True
@@ -6151,19 +6151,19 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
             visited = [0]
 
             def _walk_cc(el: Any, depth: int) -> None:
-                if not el or depth > 10 or visited[0] > 350:
+                if not el or depth > 18 or visited[0] > 2500:
                     return
                 visited[0] += 1
                 tx = (_gs(el, s_title) + " " + _gs(el, s_val) + " " + _gs(el, s_desc)).strip().lower()
                 if (t_low and t_low in tx) or "192.168.52.230" in tx:
                     rc_box = _grect(el, s_pos, s_size)
-                    if rc_box and rc_box[2] >= 24.0 and rc_box[3] >= 14.0:
+                    if rc_box and rc_box[2] >= 20.0 and rc_box[3] >= 12.0:
                         candidates.append((rc_box[0], rc_box[1], rc_box[2], rc_box[3], el))
                 ch = ctypes.c_void_p()
                 if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
                     try:
                         nc = cf.CFArrayGetCount(ch.value)
-                        for ci in range(min(nc, 40)):
+                        for ci in range(min(nc, 80)):
                             _walk_cc(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
                     finally:
                         cf.CFRelease(ch.value)
@@ -6177,6 +6177,7 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                 finally:
                     cf.CFRelease(w_arr2.value)
 
+            _RDP_CLOSER_DIAG["cc_walk"] = f"vis={visited[0]},cand={len(candidates)},ex_fs={int(exited_cc_fs)}"
             if candidates:
                 bx, by, bw, bh, bel = candidates[0]
                 ax.AXUIElementSetAttributeValue(bel, s_selected, kTrue)
