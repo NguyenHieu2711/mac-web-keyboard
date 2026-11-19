@@ -405,6 +405,24 @@ static void position_display_left_of_main(CGDirectDisplayID vdispId) {
     [self.panel orderFrontRegardless];
 }
 
+- (void)markPidMinimized:(pid_t)pid {
+    if (pid <= 0) return;
+    NSDictionary *st = self.appState[@(pid)];
+    if (st && st[@"winId"]) {
+        self.knownWins[st[@"winId"]] = @(pid);
+    }
+}
+
+- (void)unmarkPidMinimized:(pid_t)pid {
+    if (pid <= 0) return;
+    NSArray<NSNumber *> *keys = [self.knownWins allKeys];
+    for (NSNumber *wid in keys) {
+        if ([self.knownWins[wid] intValue] == (int)pid) {
+            [self.knownWins removeObjectForKey:wid];
+        }
+    }
+}
+
 - (void)shutdown {
     if (self.panel) {
         [self.panel orderOut:nil];
@@ -526,11 +544,23 @@ int main(int argc, const char * argv[]) {
             dockCtrl = nil;
         }
 
-        // Theo dõi stdin EOF để tự hủy màn ảo nếu server.py thoát đột ngột
+        // Theo dõi stdin lệnh điều khiển (m <pid> / u <pid> / q) và EOF để tự hủy màn ảo
+        __weak SecondaryDockController *weakDock = dockCtrl;
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-            char buf[64];
-            while (read(STDIN_FILENO, buf, sizeof(buf)) > 0) {
-                if (buf[0] == 'q' || buf[0] == 'Q') break;
+            char line[128];
+            while (fgets(line, sizeof(line), stdin) != NULL) {
+                if (line[0] == 'q' || line[0] == 'Q') break;
+                if ((line[0] == 'm' || line[0] == 'u') && line[1] == ' ') {
+                    pid_t tpid = (pid_t)atoi(line + 2);
+                    BOOL isMin = (line[0] == 'm');
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        SecondaryDockController *d = weakDock;
+                        if (!d) return;
+                        if (isMin) [d markPidMinimized:tpid];
+                        else [d unmarkPidMinimized:tpid];
+                        [d refresh];
+                    });
+                }
             }
             g_should_exit = 1;
         });
@@ -598,6 +628,13 @@ class MacVirtualDisplayManager:
         self._ax_lib: Any = None
         self._cf_lib: Any = None
         self._ax_ready: bool = False
+        self._dock_icons: list = []
+        self._vdisp_only_apps: Dict[str, int] = {}
+        self._min_vdisp_pids: set = set()
+        self._vdisp_bounds_cache: Optional[Dict[str, float]] = None
+        self._vdisp_has_fullscreen: bool = False
+        self._tap_loop_ref: Any = None
+        self._tap_gen: int = 0
         atexit.register(self.stop)
 
     def _init_ax_libs(self) -> bool:
@@ -714,11 +751,13 @@ class MacVirtualDisplayManager:
                         cf.CFRelease(min_ref.value)
 
                     if action == "activate":
+                        self._min_vdisp_pids.discard(pid)
                         if is_min:
                             ax.AXUIElementSetAttributeValue(w_ax, s_min, kFalse)
                         ax.AXUIElementPerformAction(w_ax, s_raise)
                         break
                     elif action == "minimize" and not is_min:
+                        self._min_vdisp_pids.add(pid)
                         ax.AXUIElementSetAttributeValue(w_ax, s_min, kTrue)
                         break
             finally:
@@ -931,7 +970,444 @@ class MacVirtualDisplayManager:
             self._hidpi = hd
             self._last_error = ""
             threading.Thread(target=self._stdout_reader_loop, args=(proc,), daemon=True).start()
+            self._start_dock_interceptor()
             return self.status()
+
+    def _send_helper_cmd(self, cmd_line: str) -> None:
+        proc = self._proc
+        if proc is None or proc.stdin is None:
+            return
+        try:
+            proc.stdin.write(cmd_line.rstrip("\n") + "\n")
+            proc.stdin.flush()
+        except Exception:
+            pass
+
+    def _toggle_vdisp_app_from_mac_dock(self, pid: int) -> None:
+        """Khi ấn icon trên Dock MacBook của một app đang nằm trên Màn phụ #2:
+        Thu nhỏ / mở lại trực tiếp cửa sổ ngay trên Màn phụ #2 mà KHÔNG làm mất Dock MacBook!"""
+        if pid <= 0 or not self._init_ax_libs():
+            return
+        bounds = self.get_bounds()
+        if not bounds:
+            return
+        bx, by, bw, bh = bounds["x"], bounds["y"], bounds["w"], bounds["h"]
+        ax = self._ax_lib
+        cf = self._cf_lib
+        kCFStringEncodingUTF8 = 0x08000100
+
+        def _cfstr(s: str) -> ctypes.c_void_p:
+            return cf.CFStringCreateWithCString(None, s.encode("utf-8"), kCFStringEncodingUTF8)
+
+        try:
+            import AppKit  # type: ignore
+
+            ws_shared = AppKit.NSWorkspace.sharedWorkspace()
+            front = ws_shared.frontmostApplication()
+            front_pid = int(front.processIdentifier()) if front is not None else 0
+            rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            if rapp is None:
+                return
+            is_hidden = bool(rapp.isHidden())
+            if is_hidden:
+                self._min_vdisp_pids.discard(pid)
+                self._send_helper_cmd(f"u {pid}")
+                rapp.unhide()
+                rapp.activateWithOptions_(2)
+                return
+
+            app_ax = ax.AXUIElementCreateApplication(int(pid))
+            if not app_ax:
+                return
+            s_wins = _cfstr("AXWindows")
+            s_pos = _cfstr("AXPosition")
+            s_size = _cfstr("AXSize")
+            s_min = _cfstr("AXMinimized")
+            s_fs = _cfstr("AXFullScreen")
+            s_raise = _cfstr("AXRaise")
+            try:
+                wins_ref = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wins_ref)) != 0 or not wins_ref.value:
+                    return
+                try:
+                    cnt = cf.CFArrayGetCount(wins_ref.value)
+                    kTrue = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
+                    kFalse = ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value
+                    vdisp_wins = []
+                    for i in range(cnt):
+                        w_ax = cf.CFArrayGetValueAtIndex(wins_ref.value, i)
+                        if not w_ax:
+                            continue
+                        pos_ref = ctypes.c_void_p()
+                        size_ref = ctypes.c_void_p()
+                        in_vdisp = False
+                        if (
+                            ax.AXUIElementCopyAttributeValue(w_ax, s_pos, ctypes.byref(pos_ref)) == 0
+                            and pos_ref.value
+                            and ax.AXUIElementCopyAttributeValue(w_ax, s_size, ctypes.byref(size_ref)) == 0
+                            and size_ref.value
+                        ):
+                            pt = _CGPoint()
+                            sz = _CGSize()
+                            ok_p = ax.AXValueGetValue(pos_ref.value, 1, ctypes.byref(pt))
+                            ok_s = ax.AXValueGetValue(size_ref.value, 2, ctypes.byref(sz))
+                            cf.CFRelease(pos_ref.value)
+                            cf.CFRelease(size_ref.value)
+                            if ok_p and ok_s and sz.w >= 120 and sz.h >= 80:
+                                cx = pt.x + sz.w * 0.5
+                                cy = pt.y + sz.h * 0.5
+                                in_vdisp = (bx <= cx < bx + bw) and (by <= cy < by + bh)
+                        else:
+                            if pos_ref.value:
+                                cf.CFRelease(pos_ref.value)
+                            if size_ref.value:
+                                cf.CFRelease(size_ref.value)
+                        if not in_vdisp:
+                            continue
+                        min_ref = ctypes.c_void_p()
+                        is_min = False
+                        if ax.AXUIElementCopyAttributeValue(w_ax, s_min, ctypes.byref(min_ref)) == 0 and min_ref.value:
+                            is_min = bool(cf.CFBooleanGetValue(min_ref.value))
+                            cf.CFRelease(min_ref.value)
+                        fs_ref = ctypes.c_void_p()
+                        is_fs = False
+                        if ax.AXUIElementCopyAttributeValue(w_ax, s_fs, ctypes.byref(fs_ref)) == 0 and fs_ref.value:
+                            is_fs = bool(cf.CFBooleanGetValue(fs_ref.value))
+                            cf.CFRelease(fs_ref.value)
+                        vdisp_wins.append((w_ax, is_min, is_fs))
+
+                    if not vdisp_wins:
+                        return
+                    any_visible = any(not m for _, m, _ in vdisp_wins)
+                    if any_visible and front_pid == pid:
+                        # Đang mở nổi trên màn phụ -> thu nhỏ ngay trên màn phụ!
+                        self._min_vdisp_pids.add(pid)
+                        self._send_helper_cmd(f"m {pid}")
+                        for w_ax, is_min, is_fs in vdisp_wins:
+                            if not is_min:
+                                if is_fs:
+                                    rapp.hide()
+                                else:
+                                    ax.AXUIElementSetAttributeValue(w_ax, s_min, kTrue)
+                    else:
+                        # Đang thu nhỏ hoặc bị che -> mở phóng lên ngay trên màn phụ!
+                        self._min_vdisp_pids.discard(pid)
+                        self._send_helper_cmd(f"u {pid}")
+                        rapp.unhide()
+                        for w_ax, is_min, _ in vdisp_wins:
+                            if is_min:
+                                ax.AXUIElementSetAttributeValue(w_ax, s_min, kFalse)
+                            ax.AXUIElementPerformAction(w_ax, s_raise)
+                        rapp.activateWithOptions_(2)
+                finally:
+                    cf.CFRelease(wins_ref.value)
+            finally:
+                cf.CFRelease(app_ax)
+                for s_ref in (s_wins, s_pos, s_size, s_min, s_fs, s_raise):
+                    if s_ref:
+                        cf.CFRelease(s_ref)
+        except Exception:
+            pass
+
+    def _refresh_dock_intercept_cache(self) -> None:
+        if not IS_MACOS or not self._init_ax_libs():
+            return
+        try:
+            import Quartz as q  # type: ignore
+            import AppKit  # type: ignore
+            import objc  # type: ignore
+
+            bounds = self.get_bounds(q)
+            self._vdisp_bounds_cache = bounds
+            if not bounds:
+                self._dock_icons = []
+                self._vdisp_only_apps = {}
+                self._vdisp_has_fullscreen = False
+                return
+            bx, by, bw, bh = bounds["x"], bounds["y"], bounds["w"], bounds["h"]
+            mb = q.CGDisplayBounds(q.CGMainDisplayID())
+            mw, mh = float(mb.size.width), float(mb.size.height)
+
+            ax = self._ax_lib
+            cf = self._cf_lib
+            kCFStringEncodingUTF8 = 0x08000100
+
+            def _cfstr(s: str) -> ctypes.c_void_p:
+                return cf.CFStringCreateWithCString(None, s.encode("utf-8"), kCFStringEncodingUTF8)
+
+            def _cf_to_py(ptr_val: int) -> str:
+                if not ptr_val:
+                    return ""
+                try:
+                    return str(objc.objc_object(c_void_p=ptr_val) or "")
+                except Exception:
+                    return ""
+
+            # 1. Xác định các app đang nằm RIÊNG trên Màn phụ #2 (không có cửa sổ trên màn chính MacBook)
+            with objc.autorelease_pool():
+                wins = q.CGWindowListCopyWindowInfo(
+                    q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements,
+                    q.kCGNullWindowID,
+                ) or []
+                vdisp_pids: set = set(self._min_vdisp_pids)
+                main_pids: set = set()
+                has_fs = False
+                for w in wins:
+                    if int(w.get("kCGWindowLayer", -1)) != 0:
+                        continue
+                    pid = int(w.get("kCGWindowOwnerPID", 0) or 0)
+                    if pid <= 0 or pid == os.getpid():
+                        continue
+                    wb = w.get("kCGWindowBounds") or {}
+                    ww = float(wb.get("Width", 0))
+                    wh = float(wb.get("Height", 0))
+                    if ww < 140 or wh < 90:
+                        continue
+                    wx = float(wb.get("X", 0))
+                    wy = float(wb.get("Y", 0))
+                    cx = wx + ww * 0.5
+                    cy = wy + wh * 0.5
+                    onscr = bool(w.get("kCGWindowIsOnscreen", False))
+                    alpha = float(w.get("kCGWindowAlpha", 1.0) or 0.0)
+                    if (bx <= cx < bx + bw) and (by <= cy < by + bh):
+                        if onscr and alpha > 0.05:
+                            vdisp_pids.add(pid)
+                            if ww >= bw - 4.0 and wh >= bh - 4.0:
+                                has_fs = True
+                    elif (0.0 <= cx < mw) and (0.0 <= cy < mh):
+                        if onscr and alpha > 0.05:
+                            main_pids.add(pid)
+                self._vdisp_has_fullscreen = has_fs
+
+                only_vdisp_pids = vdisp_pids - main_pids
+                vdisp_name_map: Dict[str, int] = {}
+                dock_pid = 0
+                apps = AppKit.NSWorkspace.sharedWorkspace().runningApplications() or []
+                for rapp in apps:
+                    try:
+                        bid = str(rapp.bundleIdentifier() or "")
+                        rpid = int(rapp.processIdentifier())
+                        if bid == "com.apple.dock":
+                            dock_pid = rpid
+                            continue
+                        if rpid in only_vdisp_pids and int(rapp.activationPolicy()) == 0:
+                            lname = str(rapp.localizedName() or "").strip().lower()
+                            if lname:
+                                vdisp_name_map[lname] = rpid
+                            burl = rapp.bundleURL()
+                            if burl is not None:
+                                bpath = str(burl.path() or "")
+                                bstem = Path(bpath).stem.strip().lower()
+                                if bstem:
+                                    vdisp_name_map[bstem] = rpid
+                    except Exception:
+                        continue
+                self._vdisp_only_apps = vdisp_name_map
+
+            # 2. Đọc tọa độ các icon ứng dụng trên thanh Dock của MacBook (cache trong RAM để EventTap chạy 0.005ms)
+            if dock_pid <= 0 or not self._vdisp_only_apps:
+                self._dock_icons = []
+                return
+            s_ch = _cfstr("AXChildren")
+            s_role = _cfstr("AXRole")
+            s_sub = _cfstr("AXSubrole")
+            s_title = _cfstr("AXTitle")
+            s_pos = _cfstr("AXPosition")
+            s_size = _cfstr("AXSize")
+            dock_ax = ax.AXUIElementCreateApplication(dock_pid)
+            new_icons = []
+            try:
+                if not dock_ax:
+                    return
+                ch_ref = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(dock_ax, s_ch, ctypes.byref(ch_ref)) != 0 or not ch_ref.value:
+                    return
+                try:
+                    n_top = cf.CFArrayGetCount(ch_ref.value)
+                    for i in range(n_top):
+                        el = cf.CFArrayGetValueAtIndex(ch_ref.value, i)
+                        if not el:
+                            continue
+                        r_ref = ctypes.c_void_p()
+                        role_s = ""
+                        if ax.AXUIElementCopyAttributeValue(el, s_role, ctypes.byref(r_ref)) == 0 and r_ref.value:
+                            role_s = _cf_to_py(r_ref.value)
+                            cf.CFRelease(r_ref.value)
+                        if role_s != "AXList":
+                            continue
+                        items_ref = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(el, s_ch, ctypes.byref(items_ref)) != 0 or not items_ref.value:
+                            continue
+                        try:
+                            n_items = cf.CFArrayGetCount(items_ref.value)
+                            for j in range(n_items):
+                                item = cf.CFArrayGetValueAtIndex(items_ref.value, j)
+                                if not item:
+                                    continue
+                                sub_ref = ctypes.c_void_p()
+                                sub_s = ""
+                                if ax.AXUIElementCopyAttributeValue(item, s_sub, ctypes.byref(sub_ref)) == 0 and sub_ref.value:
+                                    sub_s = _cf_to_py(sub_ref.value)
+                                    cf.CFRelease(sub_ref.value)
+                                if sub_s != "AXApplicationDockItem":
+                                    continue
+                                t_ref = ctypes.c_void_p()
+                                title_s = ""
+                                if ax.AXUIElementCopyAttributeValue(item, s_title, ctypes.byref(t_ref)) == 0 and t_ref.value:
+                                    title_s = _cf_to_py(t_ref.value).strip().lower()
+                                    cf.CFRelease(t_ref.value)
+                                if not title_s or title_s not in self._vdisp_only_apps:
+                                    continue
+                                p_ref = ctypes.c_void_p()
+                                sz_ref = ctypes.c_void_p()
+                                if (
+                                    ax.AXUIElementCopyAttributeValue(item, s_pos, ctypes.byref(p_ref)) == 0
+                                    and p_ref.value
+                                    and ax.AXUIElementCopyAttributeValue(item, s_size, ctypes.byref(sz_ref)) == 0
+                                    and sz_ref.value
+                                ):
+                                    pt = _CGPoint()
+                                    sz = _CGSize()
+                                    ok_p = ax.AXValueGetValue(p_ref.value, 1, ctypes.byref(pt))
+                                    ok_s = ax.AXValueGetValue(sz_ref.value, 2, ctypes.byref(sz))
+                                    cf.CFRelease(p_ref.value)
+                                    cf.CFRelease(sz_ref.value)
+                                    if ok_p and ok_s and sz.w > 8 and sz.h > 8:
+                                        new_icons.append((pt.x, pt.y, sz.w, sz.h, title_s))
+                                else:
+                                    if p_ref.value:
+                                        cf.CFRelease(p_ref.value)
+                                    if sz_ref.value:
+                                        cf.CFRelease(sz_ref.value)
+                        finally:
+                            cf.CFRelease(items_ref.value)
+                finally:
+                    cf.CFRelease(ch_ref.value)
+            finally:
+                if dock_ax:
+                    cf.CFRelease(dock_ax)
+                for s_ref in (s_ch, s_role, s_sub, s_title, s_pos, s_size):
+                    if s_ref:
+                        cf.CFRelease(s_ref)
+            self._dock_icons = new_icons
+        except Exception:
+            pass
+
+    def _start_dock_interceptor(self) -> None:
+        if not IS_MACOS:
+            return
+        self._stop_dock_interceptor()
+        self._tap_gen += 1
+        my_gen = self._tap_gen
+
+        def _cache_worker() -> None:
+            while self._tap_gen == my_gen and self.is_active():
+                self._refresh_dock_intercept_cache()
+                time.sleep(0.45)
+
+        def _tap_worker() -> None:
+            try:
+                import Quartz as q  # type: ignore
+
+                tap_holder: list = [None]
+                swallow_up_until = [0.0]
+
+                def _cb(_proxy, event_type, event, _refcon):
+                    try:
+                        if event_type in (q.kCGEventTapDisabledByTimeout, q.kCGEventTapDisabledByUserInput):
+                            if tap_holder[0] is not None:
+                                q.CGEventTapEnable(tap_holder[0], True)
+                            return event
+                        if int(q.CGEventGetIntegerValueField(event, q.kCGEventSourceUserData)) == 0x4D4B4231:
+                            return event
+
+                        if event_type == q.kCGEventMouseMoved:
+                            # Chống Dock macOS (khi đặt đáy) nhảy từ MacBook sang Màn phụ #2
+                            b = self._vdisp_bounds_cache
+                            if b and not self._vdisp_has_fullscreen:
+                                loc = q.CGEventGetLocation(event)
+                                bx, by, bw, bh = b["x"], b["y"], b["w"], b["h"]
+                                if (bx <= loc.x < bx + bw) and (loc.y >= by + bh - 2.0):
+                                    q.CGEventSetLocation(event, (loc.x, by + bh - 3.0))
+                            return event
+
+                        if event_type == q.kCGEventLeftMouseUp:
+                            if swallow_up_until[0] > time.monotonic():
+                                swallow_up_until[0] = 0.0
+                                return None
+                            return event
+
+                        if event_type == q.kCGEventLeftMouseDown:
+                            icons = self._dock_icons
+                            if not icons:
+                                return event
+                            loc = q.CGEventGetLocation(event)
+                            mx, my = float(loc.x), float(loc.y)
+                            for rx, ry, rw, rh, title_s in icons:
+                                if (rx - 2.0 <= mx <= rx + rw + 2.0) and (ry - 2.0 <= my <= ry + rh + 2.0):
+                                    tpid = self._vdisp_only_apps.get(title_s, 0)
+                                    if tpid > 0:
+                                        swallow_up_until[0] = time.monotonic() + 0.5
+                                        threading.Thread(
+                                            target=self._toggle_vdisp_app_from_mac_dock,
+                                            args=(tpid,),
+                                            daemon=True,
+                                        ).start()
+                                        return None
+                                    break
+                        return event
+                    except Exception:
+                        return event
+
+                mask = (
+                    (1 << int(q.kCGEventLeftMouseDown))
+                    | (1 << int(q.kCGEventLeftMouseUp))
+                    | (1 << int(q.kCGEventMouseMoved))
+                )
+                tap = q.CGEventTapCreate(
+                    q.kCGHIDEventTap,
+                    q.kCGHeadInsertEventTap,
+                    q.kCGEventTapOptionDefault,
+                    mask,
+                    _cb,
+                    None,
+                )
+                if tap is None:
+                    return
+                tap_holder[0] = tap
+                src = q.CFMachPortCreateRunLoopSource(None, tap, 0)
+                loop_ref = q.CFRunLoopGetCurrent()
+                if self._tap_gen == my_gen:
+                    self._tap_loop_ref = loop_ref
+                q.CFRunLoopAddSource(loop_ref, src, q.kCFRunLoopCommonModes)
+                q.CGEventTapEnable(tap, True)
+                q.CFRunLoopRun()
+                try:
+                    q.CGEventTapEnable(tap, False)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        threading.Thread(target=_cache_worker, daemon=True).start()
+        threading.Thread(target=_tap_worker, daemon=True).start()
+
+    def _stop_dock_interceptor(self) -> None:
+        self._tap_gen += 1
+        self._dock_icons = []
+        self._vdisp_only_apps = {}
+        self._min_vdisp_pids.clear()
+        self._vdisp_bounds_cache = None
+        self._vdisp_has_fullscreen = False
+        loop_ref = self._tap_loop_ref
+        self._tap_loop_ref = None
+        if loop_ref is not None and IS_MACOS:
+            try:
+                import Quartz as q  # type: ignore
+
+                q.CFRunLoopStop(loop_ref)
+            except Exception:
+                pass
 
     def rescue_windows_to_main_display(self, quartz: Any = None) -> int:
         """Kéo toàn bộ cửa sổ đang nằm ngoài màn chính MacBook (x < 0 hoặc lạc ngoài vùng hiển thị)
@@ -1039,6 +1515,7 @@ class MacVirtualDisplayManager:
 
     def stop(self) -> Dict[str, Any]:
         with self._lock:
+            self._stop_dock_interceptor()
             # Trước khi hủy màn ảo, kéo toàn bộ cửa sổ đang ở màn phụ về màn chính MacBook để không bao giờ bị mất tích!
             if self._display_id > 0:
                 try:
