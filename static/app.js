@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.27";
+  const BUNDLED_BOOT_VER = "2.3.28";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -2420,6 +2420,8 @@
   let rdpActiveEngine = "none"; // "none" | "parallel" | "native"
   let macExtWs = null;
   let macExtManualStop = false;
+  let macExtReconnectRetries = 0;
+  let macExtReconnectTimer = null;
   const remoteTouchRing = document.getElementById("remote-touch-ring");
   let macExtCursorVisible = false;
   let macExtTouchMode = "touch"; // "touch" (Cảm ứng) | "pointer" (Trackpad) | "off" (Khóa chạm)
@@ -3811,6 +3813,10 @@
   function closeMacExtWs() {
     parallelQueuedBuf = null;
     macExtCursorVisible = false;
+    if (macExtReconnectTimer !== null) {
+      clearTimeout(macExtReconnectTimer);
+      macExtReconnectTimer = null;
+    }
     if (macExtWs) {
       try {
         macExtWs.onopen = null;
@@ -3848,6 +3854,11 @@
         if (settled) return;
         settled = true;
         clearTimeout(openTimer);
+        macExtReconnectRetries = 0;
+        if (macExtReconnectTimer !== null) {
+          clearTimeout(macExtReconnectTimer);
+          macExtReconnectTimer = null;
+        }
         cursorHiddenByServer = false;
         cursorHotspotX = 1;
         cursorHotspotY = 1;
@@ -3914,11 +3925,21 @@
           syncMacExtDisplayUI();
           syncRdpConnectionUI();
           if (!macExtManualStop && macExtDisplayActive && kbLayout === "mac_ext") {
-            setTimeout(() => {
-              if (macExtDisplayActive && !macExtManualStop && kbLayout === "mac_ext" && !isMacExtConnected()) {
-                void startMacExtStream(macBase).catch(() => {});
-              }
-            }, 700);
+            const backoff = [600, 1200, 2000, 3000, 4500];
+            if (macExtReconnectRetries < backoff.length) {
+              const waitMs = backoff[macExtReconnectRetries];
+              macExtReconnectRetries += 1;
+              if (macExtReconnectTimer !== null) clearTimeout(macExtReconnectTimer);
+              macExtReconnectTimer = setTimeout(() => {
+                macExtReconnectTimer = null;
+                if (macExtDisplayActive && !macExtManualStop && kbLayout === "mac_ext" && !isMacExtConnected()) {
+                  void startMacExtStream(macBase).catch(() => {});
+                }
+              }, waitMs);
+            } else if (macExtOverlay) {
+              setMacExtStatus("Mất kết nối Wi-Fi tới MacBook — bấm Kết nối lại.", false);
+              macExtOverlay.classList.remove("is-hidden");
+            }
           }
         }
       };
@@ -5684,7 +5705,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.27";
+  const BUNDLED_WEB_VERSION = "2.3.28";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();

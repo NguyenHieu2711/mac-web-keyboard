@@ -4709,8 +4709,12 @@ async def mac_virtual_display_toggle(req: Request) -> dict:
     return await asyncio.to_thread(_run_toggle)
 
 
+_ACTIVE_MAC_EXT_WS_COUNT = 0
+
+
 @app.websocket("/mac-virtual-display-ws")
 async def mac_virtual_display_ws(ws: WebSocket) -> None:
+    global _ACTIVE_MAC_EXT_WS_COUNT
     await ws.accept()
     if mac_vdisp is None or not IS_MACOS:
         try:
@@ -4720,6 +4724,7 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
             pass
         return
 
+    _ACTIVE_MAC_EXT_WS_COUNT += 1
     running = True
     cur_bounds: Dict[str, Any] = {}
     input_state: Dict[str, Any] = {"held_btn": -1}
@@ -4878,7 +4883,7 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
                     else:
                         if missing_since is None:
                             missing_since = now
-                        elif (now - missing_since) >= 1.2:
+                        elif (now - missing_since) >= 2.5:
                             await _safe_send_text('{"type":"vdisp_ended","reason":"disabled"}')
                             break
                         await asyncio.sleep(0.12)
@@ -4919,6 +4924,7 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
     except Exception:
         pass
     finally:
+        _ACTIVE_MAC_EXT_WS_COUNT = max(0, _ACTIVE_MAC_EXT_WS_COUNT - 1)
         running = False
         c_task.cancel()
         v_task.cancel()
@@ -5501,12 +5507,22 @@ def start_git_auto_updater(check_every_sec: float = 45.0) -> None:
     """Tự động kiểm tra GitHub định kỳ; nếu có bản server.py mới trên origin/main thì tự git pull và khởi động lại ngầm."""
     import os
 
+    def _is_live_session_busy() -> bool:
+        if _ACTIVE_RDP_WS_COUNT > 0 or _ACTIVE_MAC_EXT_WS_COUNT > 0:
+            return True
+        try:
+            if mac_vdisp is not None and mac_vdisp.is_active():
+                return True
+        except Exception:
+            pass
+        return False
+
     def _updater() -> None:
         pending_respawn = False
         while True:
             time.sleep(check_every_sec)
             try:
-                if pending_respawn and _ACTIVE_RDP_WS_COUNT <= 0:
+                if pending_respawn and not _is_live_session_busy():
                     pending_respawn = False
                     _trigger_clean_respawn()
                     continue
@@ -5533,7 +5549,7 @@ def start_git_auto_updater(check_every_sec: float = 45.0) -> None:
                         check=False,
                     )
                     if pull_res.returncode == 0:
-                        if _ACTIVE_RDP_WS_COUNT > 0:
+                        if _is_live_session_busy():
                             pending_respawn = True
                         else:
                             _trigger_clean_respawn()
