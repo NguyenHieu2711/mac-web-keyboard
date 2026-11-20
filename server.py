@@ -1462,9 +1462,34 @@ class KeyboardInjector:
         if iy == 0 and ix == 0 and phase != 4:
             return
         last_s = float(getattr(self, "_last_scroll_at", 0.0))
-        if phase == 2 and (now_s - last_s) > 0.18:
+        is_new_burst = (now_s - last_s) > 0.22
+        if phase == 2 and is_new_burst:
             phase = 1
         self._last_scroll_at = now_s
+
+        # BẮT BUỘC gắn đúng tọa độ con trỏ thật (CGEventSetLocation) trước khi post vào kCGAnnotatedSessionEventTap!
+        # Vì sau tầng HID, CGEventCreateScrollWheelEvent mặc định location=(0,0) ở góc Menu Bar nên sẽ trượt khỏi cửa sổ đang trỏ nếu không set location!
+        cur_x, cur_y = float(self._mouse_x), float(self._mouse_y)
+        try:
+            cur_ev = q.CGEventCreate(None)
+            if cur_ev is not None:
+                loc = q.CGEventGetLocation(cur_ev)
+                cur_x, cur_y = float(loc.x), float(loc.y)
+                self._mouse_x, self._mouse_y = cur_x, cur_y
+        except Exception:
+            self._sync_mouse_pos_if_needed()
+            cur_x, cur_y = float(self._mouse_x), float(self._mouse_y)
+
+        if is_new_burst:
+            try:
+                mv = q.CGEventCreateMouseEvent(
+                    self._event_source, q.kCGEventMouseMoved, (cur_x, cur_y), q.kCGMouseButtonLeft
+                )
+                q.CGEventSetIntegerValueField(mv, q.kCGEventSourceUserData, 0x4D4B4231)
+                q.CGEventPost(q.kCGHIDEventTap, mv)
+            except Exception:
+                pass
+
         ev = q.CGEventCreateScrollWheelEvent(
             self._event_source,
             q.kCGScrollEventUnitPixel,
@@ -1473,7 +1498,7 @@ class KeyboardInjector:
             ix,
         )
         # Đầy đủ chữ ký Apple Magic Trackpad (IsContinuous=88, PointDelta=96/97, ScrollPhase=99, MomentumPhase=123)
-        # + Post qua kCGAnnotatedSessionEventTap để đi sau CGEventTap của Mos (tránh bị Mos nuốt xung cuộn trên Trackpad & thanh cuộn dọc!).
+        # + CGEventSetLocation(cur_x, cur_y) + Post qua kCGAnnotatedSessionEventTap để đi sau CGEventTap của Mos (tránh bị Mos nuốt xung cuộn!).
         q.CGEventSetIntegerValueField(ev, 88, 1)
         q.CGEventSetIntegerValueField(ev, 96, iy)
         q.CGEventSetIntegerValueField(ev, 97, ix)
@@ -1483,10 +1508,18 @@ class KeyboardInjector:
         else:
             q.CGEventSetIntegerValueField(ev, 99, phase if phase in (1, 2, 4) else 2)
             q.CGEventSetIntegerValueField(ev, 123, 0)
+        try:
+            q.CGEventSetLocation(ev, (cur_x, cur_y))
+        except Exception:
+            pass
         q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
         if self.held_modifiers:
             q.CGEventSetFlags(ev, self._compute_quartz_flags())
         q.CGEventPost(getattr(q, "kCGAnnotatedSessionEventTap", q.kCGSessionEventTap), ev)
+        try:
+            _RDP_CLOSER_DIAG["last_scroll"] = f"dx={ix},dy={iy},ph={phase},loc={int(cur_x)}x{int(cur_y)}@{time.strftime('%H:%M:%S')}"
+        except Exception:
+            pass
 
 
 class LiveLensCapturer:
