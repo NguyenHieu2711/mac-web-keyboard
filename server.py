@@ -6118,8 +6118,9 @@ def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bo
         need_exact_res = False
         if _get_secondary_mac_display_bounds(None) is None:
             want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(None)
+            alt_rh = want_rh + ((4 - (want_rh % 4)) % 4)
             has_w = bool(re.search(rf"desktopwidth:i:{want_rw}\b", ex_txt, re.IGNORECASE))
-            has_h = bool(re.search(rf"desktopheight:i:{want_rh}\b", ex_txt, re.IGNORECASE))
+            has_h = bool(re.search(rf"desktopheight:i:({want_rh}|{alt_rh})\b", ex_txt, re.IGNORECASE))
             need_exact_res = not (has_w and has_h)
         return (not has_retina) or (not has_fit) or has_bad_dyn or need_exact_res
     except Exception:
@@ -6154,8 +6155,9 @@ def _bookmark_already_matches(bookmarks: List[Tuple[str, str]], want_multimon: b
         has_sm = bool(re.search(rf"screen mode id:i:{sm_val}\b", ex_txt, re.IGNORECASE))
         if not want_multimon:
             want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(None)
+            alt_rh = want_rh + ((4 - (want_rh % 4)) % 4)
             has_w = bool(re.search(rf"desktopwidth:i:{want_rw}\b", ex_txt, re.IGNORECASE))
-            has_h = bool(re.search(rf"desktopheight:i:{want_rh}\b", ex_txt, re.IGNORECASE))
+            has_h = bool(re.search(rf"desktopheight:i:({want_rh}|{alt_rh})\b", ex_txt, re.IGNORECASE))
             if not (has_w and has_h):
                 return False
         return has_retina and has_fit and (not has_bad_dyn) and has_mm and has_sm
@@ -6403,11 +6405,18 @@ def _ax_update_bookmark_display_mode(
     def _cg_click_once(cx: float, cy: float) -> None:
         if q is None:
             return
+        try:
+            q.CGWarpMouseCursorPosition((float(cx), float(cy)))
+        except Exception:
+            pass
+        mv = q.CGEventCreateMouseEvent(None, q.kCGEventMouseMoved, (cx, cy), q.kCGMouseButtonLeft)
         d1 = q.CGEventCreateMouseEvent(None, q.kCGEventLeftMouseDown, (cx, cy), q.kCGMouseButtonLeft)
         u1 = q.CGEventCreateMouseEvent(None, q.kCGEventLeftMouseUp, (cx, cy), q.kCGMouseButtonLeft)
         q.CGEventSetIntegerValueField(d1, q.kCGMouseEventClickState, 1)
         q.CGEventSetIntegerValueField(u1, q.kCGMouseEventClickState, 1)
+        q.CGEventPost(q.kCGHIDEventTap, mv)
         q.CGEventPost(q.kCGHIDEventTap, d1)
+        time.sleep(0.025)
         q.CGEventPost(q.kCGHIDEventTap, u1)
 
     orig_pt = None
@@ -6817,7 +6826,8 @@ def _ax_update_bookmark_display_mode(
             # 4B) Khi ở chế độ 1 màn cửa sổ thường: chọn độ phân giải Retina khít 100% (3024 x 1834) để xóa sạch khe hở 45px bên phải!
             if not enable_multimon:
                 want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(q)
-                w_str, h_str = str(want_rw), str(want_rh)
+                alt_rh = want_rh + ((4 - (want_rh % 4)) % 4)
+                w_str, h_str, alt_h_str = str(want_rw), str(want_rh), str(alt_rh)
 
                 def _try_pick_resolution_popup() -> Tuple[bool, List[str]]:
                     pop_rects: List[Tuple[float, float, float, float]] = []
@@ -6835,7 +6845,7 @@ def _ax_update_bookmark_display_mode(
                             mt = _gs(el, s_title).strip()
                             if mt and mt not in seen_items:
                                 seen_items.append(mt)
-                            if w_str in mt and h_str in mt:
+                            if w_str in mt and (h_str in mt or alt_h_str in mt):
                                 if _ax_press_fast(el, 0.45) == 0:
                                     picked_f[0] = True
                                     return
@@ -6857,8 +6867,13 @@ def _ax_update_bookmark_display_mode(
                             return
                         if _gs(el, s_role).strip() == "AXPopUpButton" and _gb(el, s_enabled):
                             cur_txt = (_gs(el, s_val) + " " + _gs(el, s_title)).strip().lower()
-                            if "bit" not in cur_txt and "color" not in cur_txt and "gateway" not in cur_txt and "%" not in cur_txt:
-                                if w_str in cur_txt and h_str in cur_txt:
+                            is_res_pop = (
+                                "default" in cur_txt
+                                or "display" in cur_txt
+                                or bool(re.search(r"\d{3,4}\s*[x\u00d7]\s*\d{3,4}", cur_txt))
+                            )
+                            if is_res_pop and "bit" not in cur_txt and "color" not in cur_txt and "gateway" not in cur_txt and "%" not in cur_txt:
+                                if w_str in cur_txt and (h_str in cur_txt or alt_h_str in cur_txt):
                                     already_has[0] = True
                                     return
                                 rc_p = _grect(el)
@@ -7088,7 +7103,7 @@ def _ax_update_bookmark_display_mode(
 
                     # Cửa sổ nhập độ phân giải mới của MRD 10.9.10 là cửa sổ modal riêng tên "Untitled" (380x148)!
                     _MODAL_RES_TITLES = ("untitled", "add resolution", "custom resolution", "")
-                    tf_rects: List[Tuple[float, float, float, float]] = []
+                    tf_items: List[Tuple[Tuple[float, float, float, float], Any]] = []
 
                     def _collect_tfs(el: Any, depth: int) -> None:
                         if not el or depth > 16:
@@ -7096,7 +7111,8 @@ def _ax_update_bookmark_display_mode(
                         if _gs(el, s_role).strip() == "AXTextField":
                             rb = _grect(el)
                             if rb and rb[2] >= 30.0 and rb[3] >= 14.0:
-                                tf_rects.append(rb)
+                                cf.CFRetain(el)
+                                tf_items.append((rb, el))
                         ch = ctypes.c_void_p()
                         if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
                             try:
@@ -7108,7 +7124,6 @@ def _ax_update_bookmark_display_mode(
                     wp_tf = ctypes.c_void_p()
                     if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_tf)) == 0 and wp_tf.value:
                         try:
-                            # Ưu tiên quét đúng hộp thoại modal "Untitled" (380x148) trước
                             for wi in range(cf.CFArrayGetCount(wp_tf.value)):
                                 wel_u = cf.CFArrayGetValueAtIndex(wp_tf.value, wi)
                                 if not wel_u:
@@ -7120,93 +7135,101 @@ def _ax_update_bookmark_display_mode(
                                     ax.AXUIElementSetAttributeValue(wel_u, s_focused, kTrue)
                                     ax.AXUIElementPerformAction(wel_u, s_raise)
                                     _collect_tfs(wel_u, 0)
-                            if len(tf_rects) < 2:
-                                tf_rects.clear()
+                            if len(tf_items) < 2:
+                                for _, old_tf in tf_items:
+                                    cf.CFRelease(old_tf)
+                                tf_items.clear()
                                 for wi in range(cf.CFArrayGetCount(wp_tf.value)):
                                     wel_p = cf.CFArrayGetValueAtIndex(wp_tf.value, wi)
                                     if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
                                         _collect_tfs(wel_p, 0)
                         finally:
                             cf.CFRelease(wp_tf.value)
-                    tf_rects.sort(key=lambda r: (round(r[1] / 24.0), r[0]))
+                    tf_items.sort(key=lambda pair: (round(pair[0][1] / 24.0), pair[0][0]))
                     confirmed_add = [False]
                     pref_btns: List[str] = []
-                    if len(tf_rects) >= 2:
-                        r0, r1 = tf_rects[0], tf_rects[1]
-                        _cg_click_once(r0[0] + r0[2] * 0.5, r0[1] + r0[3] * 0.5)
-                        time.sleep(0.06)
-                        _cg_tap_vk(0, cmd_flag=True)
-                        for ch_d in w_str:
-                            if ch_d in _DIGIT_VK:
-                                _cg_tap_vk(_DIGIT_VK[ch_d])
-                        time.sleep(0.05)
-                        _cg_tap_vk(48)
-                        time.sleep(0.06)
-                        _cg_click_once(r1[0] + r1[2] * 0.5, r1[1] + r1[3] * 0.5)
-                        time.sleep(0.06)
-                        _cg_tap_vk(0, cmd_flag=True)
-                        for ch_d in h_str:
-                            if ch_d in _DIGIT_VK:
-                                _cg_tap_vk(_DIGIT_VK[ch_d])
-                        time.sleep(0.05)
-                        _cg_tap_vk(48)
-                        time.sleep(0.10)
+                    tf_readback = ""
 
-                        def _click_confirm_add(el: Any, depth: int, allow_any_non_cancel: bool) -> None:
-                            if not el or depth > 16 or confirmed_add[0]:
-                                return
-                            if _gs(el, s_role).strip() == "AXButton":
-                                bt_raw = _gs(el, s_title).strip()
-                                bt_c = bt_raw.lower()
-                                en_c = _gb(el, s_enabled)
-                                rb_c = _grect(el)
-                                if bt_raw:
-                                    pref_btns.append(f"{bt_raw}:{int(en_c)}")
-                                if en_c:
-                                    if bt_c in ("add", "ok", "create", "save", "done", "confirm", "apply", "thêm"):
-                                        if rb_c:
-                                            _cg_click_once(rb_c[0] + rb_c[2] * 0.5, rb_c[1] + rb_c[3] * 0.5)
-                                            confirmed_add[0] = True
-                                            return
-                                        if _ax_press_fast(el, 0.50) in (0, -25204):
-                                            confirmed_add[0] = True
-                                            return
-                                    elif allow_any_non_cancel and bt_raw and bt_c not in ("cancel", "hủy", "close") and rb_c and rb_c[2] >= 45.0:
-                                        _cg_click_once(rb_c[0] + rb_c[2] * 0.5, rb_c[1] + rb_c[3] * 0.5)
-                                        confirmed_add[0] = True
+                    def _type_into_tf(tf_rc: Tuple[float, float, float, float], tf_el: Any, digits_txt: str) -> None:
+                        ax.AXUIElementSetAttributeValue(tf_el, s_focused, kTrue)
+                        _cg_click_once(tf_rc[0] + tf_rc[2] * 0.5, tf_rc[1] + tf_rc[3] * 0.5)
+                        time.sleep(0.05)
+                        _cg_tap_vk(0, cmd_flag=True)
+                        _cg_tap_vk(51)
+                        time.sleep(0.03)
+                        injector._quartz_post_unicode(digits_txt)
+                        time.sleep(0.04)
+                        _cg_tap_vk(48)
+                        time.sleep(0.07)
+
+                    tf_cnt = len(tf_items)
+                    try:
+                        if tf_cnt >= 2:
+                            (r0, tf0_el), (r1, tf1_el) = tf_items[0], tf_items[1]
+                            for try_h in (h_str, alt_h_str):
+                                pref_btns.clear()
+                                _type_into_tf(r0, tf0_el, w_str)
+                                _type_into_tf(r1, tf1_el, try_h)
+                                tf_readback = f"{_gs(tf0_el, s_val)}x{_gs(tf1_el, s_val)}"
+
+                                def _click_confirm_add(el: Any, depth: int, allow_any_non_cancel: bool) -> None:
+                                    if not el or depth > 16 or confirmed_add[0]:
                                         return
-                            ch = ctypes.c_void_p()
-                            if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
-                                try:
-                                    for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
-                                        _click_confirm_add(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1, allow_any_non_cancel)
-                                        if confirmed_add[0]:
-                                            break
-                                finally:
-                                    cf.CFRelease(ch.value)
+                                    if _gs(el, s_role).strip() == "AXButton":
+                                        bt_raw = _gs(el, s_title).strip()
+                                        bt_c = bt_raw.lower()
+                                        en_c = _gb(el, s_enabled)
+                                        rb_c = _grect(el)
+                                        if bt_raw:
+                                            pref_btns.append(f"{bt_raw}:{int(en_c)}")
+                                        if en_c:
+                                            if bt_c in ("add", "ok", "create", "save", "done", "confirm", "apply", "thêm"):
+                                                if rb_c:
+                                                    _cg_click_once(rb_c[0] + rb_c[2] * 0.5, rb_c[1] + rb_c[3] * 0.5)
+                                                    confirmed_add[0] = True
+                                                    return
+                                                if _ax_press_fast(el, 0.50) in (0, -25204):
+                                                    confirmed_add[0] = True
+                                                    return
+                                            elif allow_any_non_cancel and bt_raw and bt_c not in ("cancel", "hủy", "close") and rb_c and rb_c[2] >= 45.0:
+                                                _cg_click_once(rb_c[0] + rb_c[2] * 0.5, rb_c[1] + rb_c[3] * 0.5)
+                                                confirmed_add[0] = True
+                                                return
+                                    ch = ctypes.c_void_p()
+                                    if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                                        try:
+                                            for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
+                                                _click_confirm_add(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1, allow_any_non_cancel)
+                                                if confirmed_add[0]:
+                                                    break
+                                        finally:
+                                            cf.CFRelease(ch.value)
 
-                        wp_cf = ctypes.c_void_p()
-                        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_cf)) == 0 and wp_cf.value:
-                            try:
-                                for wi in range(cf.CFArrayGetCount(wp_cf.value)):
-                                    wel_u = cf.CFArrayGetValueAtIndex(wp_cf.value, wi)
-                                    if not wel_u:
-                                        continue
-                                    wtu = _gs(wel_u, s_title).strip().lower()
-                                    rcu = _grect(wel_u)
-                                    if wtu in _MODAL_RES_TITLES and rcu and rcu[2] <= 540.0 and rcu[3] <= 340.0:
-                                        _click_confirm_add(wel_u, 0, True)
-                                if not confirmed_add[0]:
-                                    for wi in range(cf.CFArrayGetCount(wp_cf.value)):
-                                        wel_p = cf.CFArrayGetValueAtIndex(wp_cf.value, wi)
-                                        if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
-                                            _click_confirm_add(wel_p, 0, False)
-                            finally:
-                                cf.CFRelease(wp_cf.value)
-                        if not confirmed_add[0]:
-                            _cg_tap_vk(36)
-                        time.sleep(0.22)
+                                wp_cf = ctypes.c_void_p()
+                                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_cf)) == 0 and wp_cf.value:
+                                    try:
+                                        for wi in range(cf.CFArrayGetCount(wp_cf.value)):
+                                            wel_u = cf.CFArrayGetValueAtIndex(wp_cf.value, wi)
+                                            if not wel_u:
+                                                continue
+                                            wtu = _gs(wel_u, s_title).strip().lower()
+                                            rcu = _grect(wel_u)
+                                            if wtu in _MODAL_RES_TITLES and rcu and rcu[2] <= 540.0 and rcu[3] <= 340.0:
+                                                _click_confirm_add(wel_u, 0, True)
+                                    finally:
+                                        cf.CFRelease(wp_cf.value)
+                                if confirmed_add[0] or try_h == alt_h_str:
+                                    break
+                            if not confirmed_add[0]:
+                                # Nếu Untitled vẫn mở (Add không bật hoặc đã tồn tại) -> bấm Cancel để đóng sạch Untitled trước khi đóng Preferences!
+                                _cg_tap_vk(53)
+                                time.sleep(0.15)
+                            time.sleep(0.20)
+                    finally:
+                        for _, tf_ref in tf_items:
+                            cf.CFRelease(tf_ref)
                     _RDP_CLOSER_DIAG["pref_btns_seen"] = pref_btns[-10:]
+                    _RDP_CLOSER_DIAG["tf_readback"] = tf_readback
 
                     # Đóng cửa sổ Preferences
                     wp_cl = ctypes.c_void_p()
@@ -7288,7 +7311,7 @@ def _ax_update_bookmark_display_mode(
                             (("optimize for retina", "retina"), True),
                         ])
                         res_ok, res_items = _try_pick_resolution_popup()
-                    _RDP_CLOSER_DIAG["pref_res_trace"] = f"pm={int(opened_pref_menu)},tab={int(res_tab_ok[0])},plus={int(plus_ok[0])},tf={len(tf_rects)},add={int(confirmed_add[0])}"
+                    _RDP_CLOSER_DIAG["pref_res_trace"] = f"pm={int(opened_pref_menu)},tab={int(res_tab_ok[0])},plus={int(plus_ok[0])},tf={tf_cnt},add={int(confirmed_add[0])}"
 
                 _RDP_CLOSER_DIAG["res_sync_trace"] = f"want={w_str}x{h_str},ok={int(res_ok)},items={res_items[:6]}"
 
