@@ -5914,20 +5914,22 @@ def _get_mac_menubar_height(quartz: Any = None) -> float:
 
 
 def _compute_exact_1mon_retina_res(quartz: Any = None) -> Tuple[int, int, float, float, float, float]:
-    """Tính độ phân giải Retina khít 100% khung cửa sổ MacBook (trừ đúng Menubar 37px + Titlebar 28px = 3024x1834, xóa sạch khe hở 45px!)."""
+    """Tính độ phân giải Retina khít 100% khung cửa sổ MacBook (trừ đúng visibleFrame Menubar 38px + Titlebar 28px = 1512x916 @ 2x = 3024x1832 chia hết cho 8, xóa sạch khe hở 45px!)."""
     q = quartz if quartz is not None else injector._quartz
     if q is None:
         try:
             import Quartz as q  # type: ignore
         except Exception:
-            return 3024, 1834, 0.0, 37.0, 1512.0, 945.0
+            return 3024, 1832, 0.0, 38.0, 1512.0, 944.0
     mb = q.CGDisplayBounds(q.CGMainDisplayID())
     mx, my, mw, mh = float(mb.origin.x), float(mb.origin.y), float(mb.size.width), float(mb.size.height)
-    mbar_h = _get_mac_menubar_height(q)
+    mbar_h = max(38.0, _get_mac_menubar_height(q))
     win_h = max(600.0, mh - mbar_h)
     content_h = max(500.0, win_h - 28.0)
     rw = int(round(mw * 2.0))
     rh = int(round(content_h * 2.0))
+    # Căn chẵn bội số của 4 cho chuẩn H.264 RDP (1832 = 458 * 4)
+    rh = rh - (rh % 4)
     return rw, rh, mx, my + mbar_h, mw, win_h
 
 
@@ -6997,11 +6999,11 @@ def _ax_update_bookmark_display_mode(
                         return False, ["missing_item"] + seen_items[-6:]
 
                     after_v = ""
-                    # Cách 1: Click trực tiếp tâm dòng "3024 x 1834" ngay khi menu đang mở (không đóng mở lại tránh lệch neo Y!)
+                    # Cách 1: Click trực tiếp tâm dòng "3024 x 1832" ngay khi menu đang mở & chờ 0.45s cho NSMenu nháy xong để commit Cocoa Binding!
                     if item_rects:
                         ir0 = item_rects[0]
                         _cg_click_once(ir0[0] + ir0[2] * 0.5, ir0[1] + ir0[3] * 0.5)
-                        time.sleep(0.22)
+                        time.sleep(0.45)
                         after_v = _read_res_pop_val()
 
                     # Cách 2 (Dự phòng chuẩn xác 100% bất kể cuộn dài): Option+Up về dòng đầu -> bấm Down đúng số dòng -> Enter!
@@ -7414,6 +7416,7 @@ def _ax_update_bookmark_display_mode(
                 _RDP_CLOSER_DIAG["res_sync_trace"] = f"want={w_str}x{h_str},ok={int(res_ok)},items={res_items[:6]}"
 
             # 5) Bấm nút Save (hoặc Cancel nếu Save không tồn tại để không bao giờ treo hộp thoại)
+            time.sleep(0.20)
             saved_ok = [False]
             btn_seen: List[str] = []
 
@@ -7425,7 +7428,12 @@ def _ax_update_bookmark_display_mode(
                     if bt:
                         btn_seen.append(bt)
                     if bt.lower() in want_names and _gb(el, s_enabled):
-                        if ax.AXUIElementPerformAction(el, s_press) == 0:
+                        rb_s = _grect(el)
+                        if rb_s:
+                            _cg_click_once(rb_s[0] + rb_s[2] * 0.5, rb_s[1] + rb_s[3] * 0.5)
+                            saved_ok[0] = True
+                            return
+                        if _ax_press_fast(el, 0.50) == 0:
                             saved_ok[0] = True
                             return
                 ch = ctypes.c_void_p()
@@ -7460,7 +7468,7 @@ def _ax_update_bookmark_display_mode(
                     finally:
                         cf.CFRelease(w_can.value)
                 _RDP_CLOSER_DIAG["bmk_write_status"] = f"ax_no_save:mm={int(enable_multimon)}"
-            time.sleep(0.22)
+            time.sleep(0.38)
 
         if connect_after:
             if not _click_menu_item(("connections", "connection"), ("connect",)):
