@@ -7541,8 +7541,8 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
 
                 want_check_close = (
                     (all_has_launcher or all_has_unnamed_big)
-                    and (now_m - session_first_seen_at) >= 1.8
-                    and (now_m - last_close_try_at) >= 0.55
+                    and (now_m - session_first_seen_at) >= 0.35
+                    and (now_m - last_close_try_at) >= 0.45
                 )
                 want_check_jump = (
                     front_pid == rdp_pid
@@ -7764,7 +7764,8 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                         try:
                             cnt = cf.CFArrayGetCount(wins_ref.value)
                             ax_summary = []
-                            launcher_wins = []
+                            parsed_wins = []
+                            ax_confirmed_session = False
                             for i in range(cnt):
                                 w_ax = cf.CFArrayGetValueAtIndex(wins_ref.value, i)
                                 if not w_ax:
@@ -7779,6 +7780,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                     ax_has_dialog = True
                                     break
                                 if title_l in session_titles_lower:
+                                    ax_confirmed_session = True
                                     if is_fs:
                                         has_fs_session = True
                                     elif sub_s == "AXStandardWindow":
@@ -7786,19 +7788,23 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                         # Phát hiện cửa sổ bị ép ngang 2 màn hình chia đôi (VD: 1511x459, tỷ lệ ~3.3:1) sau khi thoát Full-Screen!
                                         if sw >= 800.0 and sh > 120.0 and sw >= sh * 2.15:
                                             has_squished_2mon_window = True
+                                parsed_wins.append((w_ax, title_raw, title_l, sub_s, is_fs, sw, sh))
+
+                            launcher_wins = []
+                            for w_ax, title_raw, title_l, sub_s, is_fs, sw, sh in parsed_wins:
                                 if (
                                     not is_fs
                                     and sub_s == "AXStandardWindow"
                                     and title_l not in session_titles_lower
                                     and (
                                         title_l in launcher_titles
-                                        or (title_l == "" and 680.0 <= sw <= 980.0 and 480.0 <= sh <= 720.0)
+                                        or (ax_confirmed_session and title_l == "" and sw >= 480.0 and sh >= 300.0)
                                     )
                                 ):
                                     launcher_wins.append((w_ax, title_raw or "<empty>"))
 
                             _RDP_CLOSER_DIAG["last_ax_wins"] = ax_summary[:10]
-                            if not ax_has_dialog and launcher_wins and (now_m - session_first_seen_at) >= 1.8 and (now_m - last_close_try_at) >= 0.55:
+                            if not ax_has_dialog and launcher_wins and (now_m - session_first_seen_at) >= 0.35 and (now_m - last_close_try_at) >= 0.45:
                                 last_close_try_at = now_m
                                 for lw, ltitle in launcher_wins:
                                     btn_ref = ctypes.c_void_p()
