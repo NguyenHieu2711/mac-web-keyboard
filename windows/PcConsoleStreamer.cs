@@ -64,6 +64,32 @@ namespace MacWebKeyboard
         [DllImport("user32.dll", SetLastError = true)]
         private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
+        private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MONITORINFO
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
+        }
+
         [DllImport("user32.dll")]
         private static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
 
@@ -375,16 +401,31 @@ namespace MacWebKeyboard
 
         private static bool TryGetSecondaryScreenBounds(out Rectangle secBounds)
         {
-            foreach (Screen s in Screen.AllScreens)
+            Rectangle found = Rectangle.Empty;
+            long bestArea = -1;
+            try
             {
-                if (!s.Primary && s.Bounds.Width >= 200 && s.Bounds.Height >= 200)
+                EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr hMon, IntPtr hdc, ref RECT rcMon, IntPtr data) =>
                 {
-                    secBounds = s.Bounds;
+                    var mi = new MONITORINFO();
+                    mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+                    if (GetMonitorInfo(hMon, ref mi) && (mi.dwFlags & 1U) == 0)
+                    {
+                        int w = mi.rcMonitor.Right - mi.rcMonitor.Left;
+                        int h = mi.rcMonitor.Bottom - mi.rcMonitor.Top;
+                        long area = (long)w * h;
+                        if (w >= 200 && h >= 200 && area > bestArea)
+                        {
+                            bestArea = area;
+                            found = new Rectangle(mi.rcMonitor.Left, mi.rcMonitor.Top, w, h);
+                        }
+                    }
                     return true;
-                }
+                }, IntPtr.Zero);
             }
-            secBounds = Rectangle.Empty;
-            return false;
+            catch { }
+            secBounds = found;
+            return bestArea > 0;
         }
 
         private static void SavePrimaryCursorIfOutside(Rectangle sb)

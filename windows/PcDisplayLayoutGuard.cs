@@ -46,6 +46,32 @@ namespace MacWebKeyboard
         };
 
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct MONITORINFOEX
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string szDevice;
+        }
+
+        private sealed class DispScreen
+        {
+            public string DeviceName;
+            public bool Primary;
+            public Rectangle Bounds;
+            public Rectangle WorkingArea;
+        }
 
         [DllImport("shcore.dll")]
         private static extern int SetProcessDpiAwareness(int value);
@@ -204,16 +230,42 @@ namespace MacWebKeyboard
             return GetWindowLong32(hWnd, GWL_EXSTYLE);
         }
 
-        private static Screen[] GetCurrentScreens(out Screen primary, out Screen secondary)
+        private static DispScreen[] GetCurrentScreens(out DispScreen primary, out DispScreen secondary)
         {
-            Screen[] all = Screen.AllScreens;
-            primary = Screen.PrimaryScreen;
-            secondary = null;
-            if (all == null || all.Length == 0) return new Screen[0];
+            var list = new List<DispScreen>();
+            try
+            {
+                EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr hMon, IntPtr hdc, ref RECT rcMon, IntPtr data) =>
+                {
+                    var mi = new MONITORINFOEX();
+                    mi.cbSize = Marshal.SizeOf(typeof(MONITORINFOEX));
+                    if (GetMonitorInfo(hMon, ref mi))
+                    {
+                        Rectangle b = RectFromWin32(mi.rcMonitor);
+                        Rectangle w = RectFromWin32(mi.rcWork);
+                        if (w.Width <= 0 || w.Height <= 0) w = b;
+                        if (b.Width > 0 && b.Height > 0)
+                        {
+                            list.Add(new DispScreen
+                            {
+                                DeviceName = mi.szDevice ?? "",
+                                Primary = (mi.dwFlags & 1U) != 0,
+                                Bounds = b,
+                                WorkingArea = w,
+                            });
+                        }
+                    }
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
 
-            if (primary == null) primary = all[0];
+            primary = null;
+            secondary = null;
+            if (list.Count == 0) return new DispScreen[0];
+
             long bestArea = -1;
-            foreach (Screen sc in all)
+            foreach (DispScreen sc in list)
             {
                 if (sc.Primary)
                 {
@@ -227,14 +279,15 @@ namespace MacWebKeyboard
                     secondary = sc;
                 }
             }
-            return all;
+            if (primary == null) primary = list[0];
+            return list.ToArray();
         }
 
-        private static string BuildTopologySig(Screen[] all)
+        private static string BuildTopologySig(DispScreen[] all)
         {
             if (all == null || all.Length == 0) return "0|";
             var parts = new List<string>(all.Length);
-            var list = new List<Screen>(all);
+            var list = new List<DispScreen>(all);
             list.Sort((a, b) =>
             {
                 if (a.Primary != b.Primary) return a.Primary ? -1 : 1;
@@ -242,7 +295,7 @@ namespace MacWebKeyboard
                 if (cmpX != 0) return cmpX;
                 return a.Bounds.Y.CompareTo(b.Bounds.Y);
             });
-            foreach (Screen sc in list)
+            foreach (DispScreen sc in list)
             {
                 parts.Add(string.Format("{0}:{1}@{2},{3},{4}x{5}",
                     sc.Primary ? "P" : "S",
@@ -311,7 +364,7 @@ namespace MacWebKeyboard
             return Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
         }
 
-        private static bool IsPointCloserToSecondary(int cx, int cy, Screen pri, Screen sec)
+        private static bool IsPointCloserToSecondary(int cx, int cy, DispScreen pri, DispScreen sec)
         {
             if (sec == null) return false;
             if (sec.Bounds.Contains(cx, cy)) return true;
@@ -326,7 +379,7 @@ namespace MacWebKeyboard
             return dSec < dPri;
         }
 
-        private static Dictionary<long, WindowSlot> CaptureCurrentLayout(Screen pri, Screen sec)
+        private static Dictionary<long, WindowSlot> CaptureCurrentLayout(DispScreen pri, DispScreen sec)
         {
             var map = new Dictionary<long, WindowSlot>();
             if (pri == null || sec == null) return map;
@@ -375,9 +428,46 @@ namespace MacWebKeyboard
                     bool isSec = IsPointCloserToSecondary(cx, cy, pri, sec);
 
                     Rectangle monWA = isSec ? sec.WorkingArea : pri.WorkingArea;
-                    Rectangle normR = isMax ? RectFromWin32(wp.rcNormalPosition) : r;
                     double mw = Math.Max(1.0, monWA.Width);
                     double mh = Math.Max(1.0, monWA.Height);
+
+                    double relX, relY, relW, relH;
+                    // Chống lỗi Electron (như Obsidian) có rcNormalPosition 400x300 khi đang phóng cực đại hoặc bị RDP thu nhỏ thành ô vuông góc trái!
+                    bool tinyCollapsedOnBigMon = (!isMin && !isMax && monWA.Width >= 1200 && r.Width <= 650 && r.Height <= 500);
+                    if (isMax || (isSec && tinyCollapsedOnBigMon))
+                    {
+                        isMax = true;
+                        relX = 0.0;
+                        relY = 0.0;
+                        relW = 1.0;
+                        relH = 1.0;
+                    }
+                    else if (tinyCollapsedOnBigMon)
+                    {
+                        WindowSlot prevSlot;
+                        if (_saved2MonLayout != null && _saved2MonLayout.TryGetValue(hWnd.ToInt64(), out prevSlot))
+                        {
+                            isMax = prevSlot.IsMaximized;
+                            relX = prevSlot.RelX;
+                            relY = prevSlot.RelY;
+                            relW = Math.Max(0.85, prevSlot.RelW);
+                            relH = Math.Max(0.85, prevSlot.RelH);
+                        }
+                        else
+                        {
+                            relX = 0.04;
+                            relY = 0.04;
+                            relW = 0.92;
+                            relH = 0.92;
+                        }
+                    }
+                    else
+                    {
+                        relX = Clamp((r.Left - monWA.Left) / mw, 0.0, 0.85);
+                        relY = Clamp((r.Top - monWA.Top) / mh, 0.0, 0.85);
+                        relW = Clamp(r.Width / mw, 0.35, 1.0);
+                        relH = Clamp(r.Height / mh, 0.35, 1.0);
+                    }
 
                     var slot = new WindowSlot
                     {
@@ -387,10 +477,10 @@ namespace MacWebKeyboard
                         IsSecondary = isSec,
                         IsMaximized = isMax,
                         IsMinimized = isMin,
-                        RelX = Clamp((normR.Left - monWA.Left) / mw, 0.0, 0.85),
-                        RelY = Clamp((normR.Top - monWA.Top) / mh, 0.0, 0.85),
-                        RelW = Clamp(normR.Width / mw, 0.25, 1.0),
-                        RelH = Clamp(normR.Height / mh, 0.25, 1.0),
+                        RelX = relX,
+                        RelY = relY,
+                        RelW = relW,
+                        RelH = relH,
                     };
                     map[slot.Hwnd] = slot;
                 }
@@ -419,7 +509,7 @@ namespace MacWebKeyboard
             return v;
         }
 
-        private static bool MoveWindowToTargetScreen(WindowSlot slot, Screen targetScreen)
+        private static bool MoveWindowToTargetScreen(WindowSlot slot, DispScreen targetScreen)
         {
             IntPtr hWnd = new IntPtr(slot.Hwnd);
             if (!IsWindow(hWnd) || !IsWindowVisible(hWnd) || IsHungAppWindow(hWnd)) return false;
@@ -443,40 +533,45 @@ namespace MacWebKeyboard
                 curRect = RectFromWin32(wr);
             }
 
+            Rectangle wa = targetScreen.WorkingArea;
+            bool wantFullOnTarget = slot.IsMaximized || (slot.IsSecondary && slot.RelW >= 0.85 && slot.RelH >= 0.85);
+            bool curIsTinyCollapsed = (!curMin && !curMax && wa.Width >= 1200 && curRect.Width <= 650 && curRect.Height <= 500);
+
             int cx = curRect.Left + curRect.Width / 2;
             int cy = curRect.Top + curRect.Height / 2;
-            // Nếu cửa sổ đã nằm đúng màn hình đích rồi -> không đụng vào
-            if (targetScreen.Bounds.Contains(cx, cy)) return false;
+            // Nếu cửa sổ đã nằm đúng màn hình đích VÀ không bị co cụm thành ô vuông bé (400x300) -> không đụng vào
+            if (targetScreen.Bounds.Contains(cx, cy) && !curIsTinyCollapsed && (!wantFullOnTarget || curMax || (curRect.Width >= wa.Width * 0.85 && curRect.Height >= wa.Height * 0.85)))
+            {
+                return false;
+            }
 
-            Rectangle wa = targetScreen.WorkingArea;
-            int minW = Math.Min(420, Math.Max(220, wa.Width - 20));
-            int minH = Math.Min(300, Math.Max(180, wa.Height - 20));
-            int nw = ClampInt((int)Math.Round(slot.RelW * wa.Width), minW, wa.Width);
-            int nh = ClampInt((int)Math.Round(slot.RelH * wa.Height), minH, wa.Height);
-            int nx = ClampInt(wa.Left + (int)Math.Round(slot.RelX * wa.Width), wa.Left, Math.Max(wa.Left, wa.Right - nw));
-            int ny = ClampInt(wa.Top + (int)Math.Round(slot.RelY * wa.Height), wa.Top, Math.Max(wa.Top, wa.Bottom - nh));
+            int minW = Math.Min(900, Math.Max(420, (int)(wa.Width * 0.55)));
+            int minH = Math.Min(640, Math.Max(320, (int)(wa.Height * 0.55)));
+            int nw = wantFullOnTarget ? wa.Width : ClampInt((int)Math.Round(slot.RelW * wa.Width), minW, wa.Width);
+            int nh = wantFullOnTarget ? wa.Height : ClampInt((int)Math.Round(slot.RelH * wa.Height), minH, wa.Height);
+            int nx = wantFullOnTarget ? wa.Left : ClampInt(wa.Left + (int)Math.Round(slot.RelX * wa.Width), wa.Left, Math.Max(wa.Left, wa.Right - nw));
+            int ny = wantFullOnTarget ? wa.Top : ClampInt(wa.Top + (int)Math.Round(slot.RelY * wa.Height), wa.Top, Math.Max(wa.Top, wa.Bottom - nh));
 
             if (curMin)
             {
                 wp.rcNormalPosition = new RECT { Left = nx, Top = ny, Right = nx + nw, Bottom = ny + nh };
-                if (slot.IsMaximized) wp.flags |= WPF_RESTORETOMAXIMIZED;
+                if (wantFullOnTarget) wp.flags |= WPF_RESTORETOMAXIMIZED;
                 SetWindowPlacement(hWnd, ref wp);
                 return true;
             }
 
-            if (curMax || slot.IsMaximized)
+            if (curMax || wantFullOnTarget)
             {
                 if (curMax)
                 {
                     ShowWindow(hWnd, SW_RESTORE);
                     Thread.Sleep(35);
                 }
-                int rx = slot.IsMaximized ? (wa.Left + Math.Max(0, (wa.Width - nw) / 2)) : nx;
-                int ry = slot.IsMaximized ? (wa.Top + Math.Max(0, (wa.Height - nh) / 2)) : ny;
-                SetWindowPos(hWnd, IntPtr.Zero, rx, ry, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
+                // Đặt kích thước nền phủ kín 100% WorkingArea của màn đích trước khi phóng cực đại để Electron (Obsidian) không bao giờ rớt về 400x300!
+                SetWindowPos(hWnd, IntPtr.Zero, wa.Left, wa.Top, wa.Width, wa.Height, SWP_NOZORDER | SWP_NOACTIVATE);
                 Thread.Sleep(40);
-                SetWindowPos(hWnd, IntPtr.Zero, rx, ry, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
-                if (slot.IsMaximized)
+                SetWindowPos(hWnd, IntPtr.Zero, wa.Left, wa.Top, wa.Width, wa.Height, SWP_NOZORDER | SWP_NOACTIVATE);
+                if (wantFullOnTarget)
                 {
                     Thread.Sleep(35);
                     ShowWindow(hWnd, SW_SHOWMAXIMIZED);
@@ -544,8 +639,8 @@ namespace MacWebKeyboard
                             snapshotCopy = new Dictionary<long, WindowSlot>(_saved2MonLayout);
                         }
 
-                        Screen pri, sec;
-                        Screen[] all = GetCurrentScreens(out pri, out sec);
+                        DispScreen pri, sec;
+                        DispScreen[] all = GetCurrentScreens(out pri, out sec);
                         if (all.Length < 2 || pri == null || sec == null)
                         {
                             lock (StateLock)
@@ -559,7 +654,7 @@ namespace MacWebKeyboard
                         foreach (var kv in snapshotCopy)
                         {
                             WindowSlot slot = kv.Value;
-                            Screen target = slot.IsSecondary ? sec : pri;
+                            DispScreen target = slot.IsSecondary ? sec : pri;
                             try
                             {
                                 if (MoveWindowToTargetScreen(slot, target))
@@ -601,7 +696,7 @@ namespace MacWebKeyboard
             th.Start();
         }
 
-        private static int RescueOffscreenWindowsToPrimary(Screen pri)
+        private static int RescueOffscreenWindowsToPrimary(DispScreen pri)
         {
             if (pri == null) return 0;
             Rectangle wa = pri.WorkingArea;
@@ -635,31 +730,40 @@ namespace MacWebKeyboard
                     }
                     if (curRect.Width < 180 || curRect.Height < 100) return true;
 
+                    bool tinyCollapsed = (!curMin && !curMax && wa.Width >= 1200 && curRect.Width <= 650 && curRect.Height <= 500);
                     int cx = curRect.Left + curRect.Width / 2;
                     int cy = curRect.Top + curRect.Height / 2;
-                    // Nếu đã nằm gọn trong màn chính -> giữ nguyên, không chớp nháy
-                    if (pri.Bounds.Contains(cx, cy)) return true;
+                    // Nếu đã nằm gọn trong màn chính VÀ không bị rớt về ô vuông 400x300 -> giữ nguyên
+                    if (pri.Bounds.Contains(cx, cy) && !tinyCollapsed) return true;
 
-                    int nw = ClampInt(curRect.Width, Math.Min(500, wa.Width), wa.Width);
-                    int nh = ClampInt(curRect.Height, Math.Min(350, wa.Height), wa.Height);
-                    int nx = wa.Left + Math.Max(0, (wa.Width - nw) / 2);
-                    int ny = wa.Top + Math.Max(0, (wa.Height - nh) / 2);
+                    WindowSlot savedSlot = null;
+                    if (_saved2MonLayout != null) _saved2MonLayout.TryGetValue(hWnd.ToInt64(), out savedSlot);
+                    bool shouldMax = curMax || (savedSlot != null && savedSlot.IsMaximized) || tinyCollapsed;
+
+                    int nw = shouldMax ? wa.Width : ClampInt(curRect.Width, Math.Min(900, wa.Width), wa.Width);
+                    int nh = shouldMax ? wa.Height : ClampInt(curRect.Height, Math.Min(640, wa.Height), wa.Height);
+                    int nx = shouldMax ? wa.Left : (wa.Left + Math.Max(0, (wa.Width - nw) / 2));
+                    int ny = shouldMax ? wa.Top : (wa.Top + Math.Max(0, (wa.Height - nh) / 2));
 
                     if (curMin)
                     {
                         wp.rcNormalPosition = new RECT { Left = nx, Top = ny, Right = nx + nw, Bottom = ny + nh };
+                        if (shouldMax) wp.flags |= WPF_RESTORETOMAXIMIZED;
                         SetWindowPlacement(hWnd, ref wp);
                         rescued++;
                         return true;
                     }
 
-                    if (curMax)
+                    if (shouldMax)
                     {
-                        ShowWindow(hWnd, SW_RESTORE);
-                        Thread.Sleep(30);
-                        SetWindowPos(hWnd, IntPtr.Zero, nx, ny, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
+                        if (curMax)
+                        {
+                            ShowWindow(hWnd, SW_RESTORE);
+                            Thread.Sleep(30);
+                        }
+                        SetWindowPos(hWnd, IntPtr.Zero, wa.Left, wa.Top, wa.Width, wa.Height, SWP_NOZORDER | SWP_NOACTIVATE);
                         Thread.Sleep(35);
-                        SetWindowPos(hWnd, IntPtr.Zero, nx, ny, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
+                        SetWindowPos(hWnd, IntPtr.Zero, wa.Left, wa.Top, wa.Width, wa.Height, SWP_NOZORDER | SWP_NOACTIVATE);
                         Thread.Sleep(30);
                         ShowWindow(hWnd, SW_SHOWMAXIMIZED);
                     }
@@ -699,8 +803,8 @@ namespace MacWebKeyboard
                         {
                             if (gen != _restoreGen) return;
                         }
-                        Screen pri, sec;
-                        Screen[] all = GetCurrentScreens(out pri, out sec);
+                        DispScreen pri, sec;
+                        DispScreen[] all = GetCurrentScreens(out pri, out sec);
                         if (all.Length != 1 || pri == null) return;
                         total += RescueOffscreenWindowsToPrimary(pri);
                     }
@@ -806,8 +910,8 @@ namespace MacWebKeyboard
 
         private static void CheckTopologyAndSnapshot(bool forceCheck, bool fromSessionEvent)
         {
-            Screen pri, sec;
-            Screen[] all = GetCurrentScreens(out pri, out sec);
+            DispScreen pri, sec;
+            DispScreen[] all = GetCurrentScreens(out pri, out sec);
             string sig = BuildTopologySig(all);
             DateTime now = DateTime.UtcNow;
 
@@ -872,9 +976,30 @@ namespace MacWebKeyboard
                         }
                         else if (savedSec > 0)
                         {
-                            // Khởi động lại guard ngay lúc vừa trở về 2 màn (toàn bộ app vẫn đang bị dồn về màn 1)
+                            // Khởi động lại guard ngay lúc vừa trở về 2 màn (toàn bộ app vẫn đang bị dồn về màn 1 hoặc bị co cụm 400x300)
                             var curCheck = CaptureCurrentLayout(pri, sec);
-                            if (CountSecondary(curCheck) == 0)
+                            bool hasCollapsedSec = false;
+                            if (sec.WorkingArea.Width >= 1200)
+                            {
+                                EnumWindows((hW, lP) =>
+                                {
+                                    string c1, t1, p1;
+                                    if (!IsEligibleUserWindow(hW, out c1, out t1, out p1)) return true;
+                                    RECT wr1;
+                                    if (GetWindowRect(hW, out wr1))
+                                    {
+                                        Rectangle r1 = RectFromWin32(wr1);
+                                        if (sec.Bounds.Contains(r1.Left + r1.Width / 2, r1.Top + r1.Height / 2) &&
+                                            r1.Width >= 180 && r1.Width <= 650 && r1.Height >= 100 && r1.Height <= 500)
+                                        {
+                                            hasCollapsedSec = true;
+                                            return false;
+                                        }
+                                    }
+                                    return true;
+                                }, IntPtr.Zero);
+                            }
+                            if (CountSecondary(curCheck) == 0 || hasCollapsedSec)
                             {
                                 bool anySavedSecAlive = false;
                                 foreach (var kv in _saved2MonLayout)
