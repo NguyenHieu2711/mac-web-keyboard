@@ -5846,6 +5846,7 @@ _RDP_RECONNECT_UNTIL: float = 0.0
 _LAST_2MON_SYNC_AT: float = 0.0
 _LAST_1MON_SYNC_AT: float = 0.0
 _LAST_DOWNGRADED_1MON_PID: int = 0
+_LAST_APPLIED_BOOKMARK_MODE: Optional[bool] = None
 _SMART_MULTIMON_LOCK = threading.Lock()
 _RDP_CLOSER_DIAG: Dict[str, Any] = {
     "sessions": [],
@@ -5963,7 +5964,10 @@ def _get_secondary_mac_display_bounds(quartz: Any = None) -> Optional[Dict[str, 
 
 
 def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bool:
-    """Kiểm tra trực tiếp qua bookmark export xem --retina (forcehidpioptimizations=1) và --dynamicdisplay (dynamic resolution=1) đã chuẩn chưa."""
+    """Kiểm tra trực tiếp qua bookmark export (100% read-only):
+    - forcehidpioptimizations=1 (Optimize for Retina = ON)
+    - smart sizing=1 (Fit session to window = ON)
+    - dynamic resolution=0 (Update session resolution on resize = OFF -> BẮT BUỘC OFF vì khi ON trên MRD 10.9.10 sẽ khóa tắt Fit to Window gây phóng cận cảnh 200%!)."""
     if not IS_MACOS or not bookmarks:
         return False
     mrd_bin, _ = _get_mrd_cli_info()
@@ -5979,16 +5983,20 @@ def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bo
         if "full address:s:" not in ex_txt.lower():
             return False
         has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
-        has_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
-        return (not has_retina) or (not has_dyn)
+        has_fit = bool(re.search(r"smart sizing:i:1", ex_txt, re.IGNORECASE))
+        has_bad_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
+        return (not has_retina) or (not has_fit) or has_bad_dyn
     except Exception:
         return False
 
 
 def _bookmark_already_matches(bookmarks: List[Tuple[str, str]], want_multimon: bool) -> bool:
-    """Kiểm tra bookmark đã khớp đúng chế độ 1 màn / 2 màn + Retina + Dynamic Display chưa để KHÔNG ghi lại bookmark hay tắt MRD vô ích."""
+    """Kiểm tra bookmark đã khớp đúng chế độ 1 màn / 2 màn + Retina ON + Fit to Window ON + Dynamic Resolution OFF chưa."""
     if not IS_MACOS or not bookmarks:
         return False
+    if _LAST_APPLIED_BOOKMARK_MODE is not None and _LAST_APPLIED_BOOKMARK_MODE == bool(want_multimon):
+        if not _bookmark_needs_retina_or_dyn_repair(bookmarks):
+            return True
     mrd_bin, _ = _get_mrd_cli_info()
     if not mrd_bin:
         return False
@@ -6002,76 +6010,512 @@ def _bookmark_already_matches(bookmarks: List[Tuple[str, str]], want_multimon: b
         if "full address:s:" not in ex_txt.lower():
             return False
         has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
-        has_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
+        has_fit = bool(re.search(r"smart sizing:i:1", ex_txt, re.IGNORECASE))
+        has_bad_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
         mm_val = 1 if want_multimon else 0
         sm_val = 2 if want_multimon else 1
         has_mm = bool(re.search(rf"use multimon:i:{mm_val}\b", ex_txt, re.IGNORECASE))
         has_sm = bool(re.search(rf"screen mode id:i:{sm_val}\b", ex_txt, re.IGNORECASE))
-        return has_retina and has_dyn and has_mm and has_sm
+        return has_retina and has_fit and (not has_bad_dyn) and has_mm and has_sm
     except Exception:
         return False
 
 
-def sync_mrd_bookmark_multimon(enable_multimon: bool) -> List[Tuple[str, str]]:
-    """Dùng CLI chính chủ --script bookmark write của Microsoft Remote Desktop (chỉ gọi khi thực sự đổi 1<->2 màn và MRD đã đóng sạch):
-    - Luôn giữ BẬT --retina true + --dynamicdisplay true + --scaling false + --colordepth 32.
-    - Khi có màn phụ (2 màn): --useallmonitors true --fullscreen true.
-    - Khi chỉ 1 màn: --useallmonitors false --fullscreen false."""
-    if not IS_MACOS:
-        return []
-    mrd_bin, _ = _get_mrd_cli_info()
-    if not mrd_bin:
-        return []
-    found = _list_mrd_bookmarks()
+def _ax_update_bookmark_display_mode(
+    enable_multimon: bool,
+    target_title: str,
+    connect_after: bool,
+) -> int:
+    """Chuyển chế độ 1 màn <-> 2 màn trực tiếp trên bảng Edit PC -> Display -> Save của Microsoft Remote Desktop bằng AXUIElement:
+    - TUYỆT ĐỐI KHÔNG BAO GIỜ gọi `--script bookmark write` (vì CLI của MRD làm mất mật khẩu Keychain bắt nhập lại mật khẩu!).
+    - Giữ nguyên 100% User account + mật khẩu đã lưu trong Keychain.
+    - Luôn khóa chuẩn: Optimize for Retina = ON, Fit session to window = ON, Update session resolution on resize = OFF (xóa vĩnh viễn lỗi zoom cận cảnh 200%)."""
+    global _LAST_APPLIED_BOOKMARK_MODE
+    if not IS_MACOS or mac_vdisp is None or not mac_vdisp._init_ax_libs():
+        return 0
+    import ctypes
+    import AppKit  # type: ignore
+    import objc  # type: ignore
+    from mac_virtual_display import _CGPoint, _CGSize
+
+    _, app_name = _get_mrd_cli_info()
+    if not app_name:
+        return 0
+
+    q = injector._quartz
+    if q is None:
+        try:
+            import Quartz as q  # type: ignore
+        except Exception:
+            q = None
+    ax = mac_vdisp._ax_lib
+    cf = mac_vdisp._cf_lib
+    kCFStringEncodingUTF8 = 0x08000100
+
+    def _cfstr(s: str) -> ctypes.c_void_p:
+        return cf.CFStringCreateWithCString(None, s.encode("utf-8"), kCFStringEncodingUTF8)
+
+    # Ghi nhận ứng dụng đang active trước khi chỉnh ngầm (nếu connect_after=False sẽ trả lại focus)
+    orig_front_pid = 0
+    sys_ax = ax.AXUIElementCreateSystemWide()
+    if sys_ax:
+        sf_app = _cfstr("AXFocusedApplication")
+        try:
+            fr = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(sys_ax, sf_app, ctypes.byref(fr)) == 0 and fr.value:
+                try:
+                    pv = ctypes.c_int32(0)
+                    if ax.AXUIElementGetPid(fr.value, ctypes.byref(pv)) == 0:
+                        orig_front_pid = int(pv.value)
+                finally:
+                    cf.CFRelease(fr.value)
+        finally:
+            cf.CFRelease(sys_ax)
+            if sf_app:
+                cf.CFRelease(sf_app)
+
+    live_pids = _find_live_mrd_pids()
+    rdp_pid = live_pids[0] if live_pids else 0
+    if rdp_pid <= 0:
+        subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(20):
+            time.sleep(0.16)
+            live_pids = _find_live_mrd_pids()
+            if live_pids:
+                rdp_pid = live_pids[0]
+                break
+        time.sleep(0.45)
+    if rdp_pid <= 0:
+        return 0
+
     try:
-        flag = "true" if enable_multimon else "false"
-        last_status = ""
-        for bname, buuid in found:
-            rc_ex = subprocess.run(
-                [mrd_bin, "--script", "bookmark", "export", buuid],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2.5,
-            )
-            ex_txt = (rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")
-            m_host = re.search(r"full address:s:([^\r\n]+)", ex_txt, re.IGNORECASE)
-            host_val = m_host.group(1).strip() if m_host else "192.168.52.230"
+        with objc.autorelease_pool():
+            rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
+            if rapp is not None:
+                rapp.unhide()
+                rapp.activateWithOptions_(3)
+    except Exception:
+        pass
+    time.sleep(0.22)
 
-            # TUYỆT ĐỐI KHÔNG truyền --username vào bookmark write vì MRD sẽ tạo ZCREDENTIALENTITY mới làm đứt liên kết mật khẩu Keychain cũ!
-            preserve_flags: List[str] = [
-                "--useallmonitors", flag,
-                "--fullscreen", flag,
-                "--retina", "true",
-                "--dynamicdisplay", "true",
-                "--scaling", "false",
-                "--colordepth", "32",
-            ]
-            if re.search(r"audiocapturemode:i:1", ex_txt, re.IGNORECASE):
-                preserve_flags += ["--redirectmicrophones", "true"]
-            if re.search(r"camerastoredirect:s:[^\r\n]+", ex_txt, re.IGNORECASE):
-                preserve_flags += ["--redirectcameras", "true"]
-            if re.search(r"drivestoredirect:s:[^\r\n]+", ex_txt, re.IGNORECASE):
-                preserve_flags += ["--redirectfolders", "true"]
-            if re.search(r"redirectprinters:i:1", ex_txt, re.IGNORECASE):
-                preserve_flags += ["--redirectprinters", "true"]
-            if re.search(r"redirectsmartcards:i:1", ex_txt, re.IGNORECASE):
-                preserve_flags += ["--redirectsmartcards", "true"]
+    app_ax = ax.AXUIElementCreateApplication(rdp_pid)
+    if not app_ax:
+        return rdp_pid
 
-            w_args = [mrd_bin, "--script", "bookmark", "write", buuid] + preserve_flags
-            rc_w = subprocess.run(w_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3.0)
-            w_msg = ((rc_w.stdout or "") + " " + (rc_w.stderr or "")).strip()
-            if rc_w.returncode != 0 or "required" in w_msg.lower() or "error" in w_msg.lower():
-                w_args2 = [
-                    mrd_bin, "--script", "bookmark", "write", buuid,
-                    "--hostname", host_val,
-                    "--friendlyname", bname,
-                ] + preserve_flags
-                rc_w = subprocess.run(w_args2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3.0)
-                w_msg = ((rc_w.stdout or "") + " " + (rc_w.stderr or "")).strip()
-            last_status = f"rc={rc_w.returncode}:retina=1,dyn=1,mm={flag}:{w_msg[:40]}"
-        _RDP_CLOSER_DIAG["multimon_bookmark"] = bool(enable_multimon)
-        _RDP_CLOSER_DIAG["bmk_write_status"] = last_status
-    except Exception as exc:
-        _RDP_CLOSER_DIAG["last_err"] = f"bmk_sync:{str(exc)[:100]}"
-    return found
+    s_wins = _cfstr("AXWindows")
+    s_role = _cfstr("AXRole")
+    s_subrole = _cfstr("AXSubrole")
+    s_title = _cfstr("AXTitle")
+    s_desc = _cfstr("AXDescription")
+    s_val = _cfstr("AXValue")
+    s_pos = _cfstr("AXPosition")
+    s_size = _cfstr("AXSize")
+    s_close = _cfstr("AXCloseButton")
+    s_press = _cfstr("AXPress")
+    s_menubar = _cfstr("AXMenuBar")
+    s_children = _cfstr("AXChildren")
+    s_enabled = _cfstr("AXEnabled")
+    s_fs = _cfstr("AXFullScreen")
+    s_main = _cfstr("AXMain")
+    s_focused = _cfstr("AXFocused")
+    s_raise = _cfstr("AXRaise")
+    kTrue = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
+    kFalse = ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value
+
+    def _gs(el: Any, attr: Any) -> str:
+        r = ctypes.c_void_p()
+        if ax.AXUIElementCopyAttributeValue(el, attr, ctypes.byref(r)) == 0 and r.value:
+            try:
+                with objc.autorelease_pool():
+                    return str(objc.objc_object(c_void_p=r.value) or "")
+            finally:
+                cf.CFRelease(r.value)
+        return ""
+
+    def _gb(el: Any, attr: Any) -> bool:
+        r = ctypes.c_void_p()
+        if ax.AXUIElementCopyAttributeValue(el, attr, ctypes.byref(r)) == 0 and r.value:
+            try:
+                return bool(cf.CFBooleanGetValue(r.value))
+            finally:
+                cf.CFRelease(r.value)
+        return False
+
+    def _gi(el: Any, attr: Any) -> int:
+        r = ctypes.c_void_p()
+        if ax.AXUIElementCopyAttributeValue(el, attr, ctypes.byref(r)) == 0 and r.value:
+            try:
+                with objc.autorelease_pool():
+                    obj = objc.objc_object(c_void_p=r.value)
+                    return int(bool(obj)) if obj is not None else 0
+            finally:
+                cf.CFRelease(r.value)
+        return 0
+
+    def _grect(el: Any) -> Optional[Tuple[float, float, float, float]]:
+        rp = ctypes.c_void_p()
+        rs = ctypes.c_void_p()
+        ok = False
+        pt = _CGPoint()
+        sz = _CGSize()
+        if ax.AXUIElementCopyAttributeValue(el, s_pos, ctypes.byref(rp)) == 0 and rp.value:
+            if ax.AXUIElementCopyAttributeValue(el, s_size, ctypes.byref(rs)) == 0 and rs.value:
+                ok = bool(ax.AXValueGetValue(rp.value, 1, ctypes.byref(pt)) and ax.AXValueGetValue(rs.value, 2, ctypes.byref(sz)))
+        if rp.value:
+            cf.CFRelease(rp.value)
+        if rs.value:
+            cf.CFRelease(rs.value)
+        return (float(pt.x), float(pt.y), float(sz.w), float(sz.h)) if ok else None
+
+    def _click_menu_item(bar_names: Tuple[str, ...], item_exact_set: Tuple[str, ...]) -> bool:
+        mb = ctypes.c_void_p()
+        if ax.AXUIElementCopyAttributeValue(app_ax, s_menubar, ctypes.byref(mb)) != 0 or not mb.value:
+            return False
+        try:
+            bars = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(mb.value, s_children, ctypes.byref(bars)) != 0 or not bars.value:
+                return False
+            try:
+                nb = cf.CFArrayGetCount(bars.value)
+                for bi in range(nb):
+                    bel = cf.CFArrayGetValueAtIndex(bars.value, bi)
+                    if not bel or _gs(bel, s_title).strip().lower() not in bar_names:
+                        continue
+                    sub = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(bel, s_children, ctypes.byref(sub)) != 0 or not sub.value:
+                        continue
+                    try:
+                        if cf.CFArrayGetCount(sub.value) <= 0:
+                            continue
+                        mel = cf.CFArrayGetValueAtIndex(sub.value, 0)
+                        its = ctypes.c_void_p()
+                        if mel and ax.AXUIElementCopyAttributeValue(mel, s_children, ctypes.byref(its)) == 0 and its.value:
+                            try:
+                                ni = cf.CFArrayGetCount(its.value)
+                                for mi in range(ni):
+                                    iel = cf.CFArrayGetValueAtIndex(its.value, mi)
+                                    if not iel:
+                                        continue
+                                    it_l = _gs(iel, s_title).strip().lower()
+                                    if it_l in item_exact_set and _gb(iel, s_enabled):
+                                        if ax.AXUIElementPerformAction(iel, s_press) == 0:
+                                            return True
+                            finally:
+                                cf.CFRelease(its.value)
+                    finally:
+                        cf.CFRelease(sub.value)
+            finally:
+                cf.CFRelease(bars.value)
+        finally:
+            cf.CFRelease(mb.value)
+        return False
+
+    def _cg_click_once(cx: float, cy: float) -> None:
+        if q is None:
+            return
+        d1 = q.CGEventCreateMouseEvent(None, q.kCGEventLeftMouseDown, (cx, cy), q.kCGMouseButtonLeft)
+        u1 = q.CGEventCreateMouseEvent(None, q.kCGEventLeftMouseUp, (cx, cy), q.kCGMouseButtonLeft)
+        q.CGEventSetIntegerValueField(d1, q.kCGMouseEventClickState, 1)
+        q.CGEventSetIntegerValueField(u1, q.kCGMouseEventClickState, 1)
+        q.CGEventPost(q.kCGHIDEventTap, d1)
+        q.CGEventPost(q.kCGHIDEventTap, u1)
+
+    orig_pt = None
+    if q is not None:
+        oev = q.CGEventCreate(None)
+        if oev is not None:
+            orig_pt = q.CGEventGetLocation(oev)
+
+    try:
+        t_low = target_title.strip().lower()
+        # 1) Đóng cửa sổ phiên đang mở của target_title (KHÔNG thoát MRD để giữ nguyên phiên/Keychain!)
+        closed_sess = False
+        w_arr = ctypes.c_void_p()
+        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_arr)) == 0 and w_arr.value:
+            try:
+                for wi in range(cf.CFArrayGetCount(w_arr.value)):
+                    wel = cf.CFArrayGetValueAtIndex(w_arr.value, wi)
+                    if not wel:
+                        continue
+                    wt = _gs(wel, s_title).strip().lower()
+                    if wt == t_low or (t_low and t_low in wt and wt not in ("microsoft remote desktop", "windows app", "connection center")):
+                        if _gb(wel, s_fs):
+                            ax.AXUIElementSetAttributeValue(wel, s_fs, kFalse)
+                        b_ref = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(wel, s_close, ctypes.byref(b_ref)) == 0 and b_ref.value:
+                            try:
+                                if ax.AXUIElementPerformAction(b_ref.value, s_press) == 0:
+                                    closed_sess = True
+                            finally:
+                                cf.CFRelease(b_ref.value)
+            finally:
+                cf.CFRelease(w_arr.value)
+        if not closed_sess:
+            if _click_menu_item(("window", "cửa sổ"), (t_low,)):
+                time.sleep(0.12)
+                if _click_menu_item(("window", "cửa sổ"), ("close", "đóng")):
+                    closed_sess = True
+        if closed_sess:
+            time.sleep(0.55)
+
+        # 2) Hiện Connection Center & chọn thẻ PC Hieu
+        _click_menu_item(("window", "cửa sổ"), ("connection center",))
+        time.sleep(0.18)
+        w_cc = ctypes.c_void_p()
+        exited_cc_fs = False
+        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_cc)) == 0 and w_cc.value:
+            try:
+                for wi in range(cf.CFArrayGetCount(w_cc.value)):
+                    wel = cf.CFArrayGetValueAtIndex(w_cc.value, wi)
+                    if not wel:
+                        continue
+                    wt = _gs(wel, s_title).strip().lower()
+                    if not wt or wt in ("microsoft remote desktop", "windows app", "connection center", "pcs", "devices"):
+                        if _gb(wel, s_fs):
+                            ax.AXUIElementSetAttributeValue(wel, s_fs, kFalse)
+                            exited_cc_fs = True
+                        ax.AXUIElementSetAttributeValue(wel, s_main, kTrue)
+                        ax.AXUIElementSetAttributeValue(wel, s_focused, kTrue)
+                        ax.AXUIElementPerformAction(wel, s_raise)
+            finally:
+                cf.CFRelease(w_cc.value)
+        if exited_cc_fs:
+            time.sleep(0.90)
+
+        opened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc..."))
+        if not opened_edit:
+            cands: List[Tuple[float, float, float, float]] = []
+            vis_c = [0]
+
+            def _find_card(el: Any, depth: int) -> None:
+                if not el or depth > 18 or vis_c[0] > 2500:
+                    return
+                vis_c[0] += 1
+                tx = (_gs(el, s_title) + " " + _gs(el, s_val) + " " + _gs(el, s_desc)).strip().lower()
+                if (t_low and t_low in tx) or "192.168.52.230" in tx:
+                    rc_b = _grect(el)
+                    if rc_b and rc_b[2] >= 20.0 and rc_b[3] >= 12.0:
+                        cands.append(rc_b)
+                ch = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                    try:
+                        nc = cf.CFArrayGetCount(ch.value)
+                        for ci in range(min(nc, 80)):
+                            _find_card(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                    finally:
+                        cf.CFRelease(ch.value)
+
+            w_scan = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_scan)) == 0 and w_scan.value:
+                try:
+                    for wi in range(cf.CFArrayGetCount(w_scan.value)):
+                        _find_card(cf.CFArrayGetValueAtIndex(w_scan.value, wi), 0)
+                finally:
+                    cf.CFRelease(w_scan.value)
+            if cands:
+                bx, by, bw, bh = cands[0]
+                cx = bx + bw * 0.5
+                cy = (by - 36.0) if (bh < 32.0 and by > 120.0) else (by + min(32.0, bh * 0.4))
+                _cg_click_once(cx, cy)
+                time.sleep(0.16)
+                opened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc..."))
+
+        if opened_edit:
+            time.sleep(0.25)
+
+            # 3) Bấm sang tab "Display" trong bảng Edit PC
+            disp_tab_rects: List[Tuple[float, float, float, float]] = []
+            pressed_disp = [False]
+
+            def _click_display_tab(el: Any, depth: int) -> None:
+                if not el or depth > 14 or pressed_disp[0]:
+                    return
+                rl = _gs(el, s_role).strip()
+                tl = (_gs(el, s_title) or _gs(el, s_desc) or _gs(el, s_val)).strip().lower()
+                if tl in ("display", "hiển thị"):
+                    rb = _grect(el)
+                    if rb and rb[2] >= 24.0 and rb[3] >= 14.0:
+                        disp_tab_rects.append(rb)
+                    if rl in ("AXRadioButton", "AXButton", "AXTab"):
+                        if ax.AXUIElementPerformAction(el, s_press) == 0:
+                            pressed_disp[0] = True
+                            return
+                ch = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                    try:
+                        nc = cf.CFArrayGetCount(ch.value)
+                        for ci in range(min(nc, 80)):
+                            _click_display_tab(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                            if pressed_disp[0]:
+                                break
+                    finally:
+                        cf.CFRelease(ch.value)
+
+            w_t = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_t)) == 0 and w_t.value:
+                try:
+                    for wi in range(cf.CFArrayGetCount(w_t.value)):
+                        _click_display_tab(cf.CFArrayGetValueAtIndex(w_t.value, wi), 0)
+                finally:
+                    cf.CFRelease(w_t.value)
+            if not pressed_disp[0] and disp_tab_rects:
+                rx, ry, rw, rh = disp_tab_rects[0]
+                _cg_click_once(rx + rw * 0.5, ry + rh * 0.5)
+            time.sleep(0.16)
+
+            # 4) Chỉnh các ô tích trong tab Display theo đúng thứ tự mở khóa phụ thuộc
+            cb_logs: List[str] = []
+
+            def _apply_checkbox_pass(rules: List[Tuple[Tuple[str, ...], bool]]) -> int:
+                toggled = [0]
+
+                def _walk_cb(el: Any, depth: int) -> None:
+                    if not el or depth > 16:
+                        return
+                    if _gs(el, s_role).strip() == "AXCheckBox":
+                        ct = (_gs(el, s_title) or _gs(el, s_desc)).strip()
+                        ctl = ct.lower()
+                        en = _gb(el, s_enabled)
+                        cv = _gi(el, s_val)
+                        for kw_set, want_b in rules:
+                            if any(k in ctl for k in kw_set):
+                                if en and bool(cv) != bool(want_b):
+                                    ax.AXUIElementPerformAction(el, s_press)
+                                    toggled[0] += 1
+                                    cb_logs.append(f"{ct}:{cv}->{int(want_b)}")
+                                else:
+                                    cb_logs.append(f"{ct}:ok={cv}(e={int(en)})")
+                                break
+                    ch = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                        try:
+                            nc = cf.CFArrayGetCount(ch.value)
+                            for ci in range(min(nc, 80)):
+                                _walk_cb(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                        finally:
+                            cf.CFRelease(ch.value)
+
+                w_c = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_c)) == 0 and w_c.value:
+                    try:
+                        for wi in range(cf.CFArrayGetCount(w_c.value)):
+                            _walk_cb(cf.CFArrayGetValueAtIndex(w_c.value, wi), 0)
+                    finally:
+                        cf.CFRelease(w_c.value)
+                return toggled[0]
+
+            # Lượt 1: Mở khóa Start session in full screen (khi tắt Use all monitors) & tắt Update session resolution on resize
+            _apply_checkbox_pass([
+                (("use all monitors",), bool(enable_multimon)),
+                (("update session resolution", "on resize"), False),
+            ])
+            time.sleep(0.10)
+            # Lượt 2: Đặt Start session in full screen & đảm bảo Update session resolution on resize đã tắt hẳn
+            _apply_checkbox_pass([
+                (("start session in full screen", "in full screen"), bool(enable_multimon)),
+                (("update session resolution", "on resize"), False),
+            ])
+            time.sleep(0.08)
+            # Lượt 3: Luôn BẬT Fit session to window + Optimize for Retina displays (chống zoom 200% tuyệt đối!)
+            _apply_checkbox_pass([
+                (("fit session to window",), True),
+                (("optimize for retina", "retina"), True),
+            ])
+            _RDP_CLOSER_DIAG["edit_pc_checkboxes"] = cb_logs[-12:]
+
+            # 5) Bấm nút Save (hoặc Cancel nếu Save không tồn tại để không bao giờ treo hộp thoại)
+            saved_ok = [False]
+            btn_seen: List[str] = []
+
+            def _click_sheet_btn(want_names: Tuple[str, ...], el: Any, depth: int) -> None:
+                if not el or depth > 14 or saved_ok[0]:
+                    return
+                if _gs(el, s_role).strip() == "AXButton":
+                    bt = _gs(el, s_title).strip()
+                    if bt:
+                        btn_seen.append(bt)
+                    if bt.lower() in want_names and _gb(el, s_enabled):
+                        if ax.AXUIElementPerformAction(el, s_press) == 0:
+                            saved_ok[0] = True
+                            return
+                ch = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                    try:
+                        nc = cf.CFArrayGetCount(ch.value)
+                        for ci in range(min(nc, 80)):
+                            _click_sheet_btn(want_names, cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                            if saved_ok[0]:
+                                break
+                    finally:
+                        cf.CFRelease(ch.value)
+
+            w_s = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_s)) == 0 and w_s.value:
+                try:
+                    for wi in range(cf.CFArrayGetCount(w_s.value)):
+                        _click_sheet_btn(("save", "lưu", "done"), cf.CFArrayGetValueAtIndex(w_s.value, wi), 0)
+                finally:
+                    cf.CFRelease(w_s.value)
+            _RDP_CLOSER_DIAG["edit_pc_buttons"] = btn_seen[-10:]
+            if saved_ok[0]:
+                _LAST_APPLIED_BOOKMARK_MODE = bool(enable_multimon)
+                _RDP_CLOSER_DIAG["multimon_bookmark"] = bool(enable_multimon)
+                _RDP_CLOSER_DIAG["bmk_write_status"] = f"ax_saved:mm={int(enable_multimon)},fit=1,dyn=0,ret=1"
+            else:
+                w_can = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_can)) == 0 and w_can.value:
+                    try:
+                        for wi in range(cf.CFArrayGetCount(w_can.value)):
+                            _click_sheet_btn(("cancel", "hủy"), cf.CFArrayGetValueAtIndex(w_can.value, wi), 0)
+                    finally:
+                        cf.CFRelease(w_can.value)
+                _RDP_CLOSER_DIAG["bmk_write_status"] = f"ax_no_save:mm={int(enable_multimon)}"
+            time.sleep(0.22)
+
+        if connect_after:
+            if not _click_menu_item(("connections", "connection"), ("connect",)):
+                _ax_close_session_and_relaunch(rdp_pid, target_title, close_existing_session=False)
+        else:
+            # Nếu chỉ đồng bộ nền khi chưa mở phiên -> đóng Connection Center và trả lại focus cho app cũ
+            w_cl = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_cl)) == 0 and w_cl.value:
+                try:
+                    for wi in range(cf.CFArrayGetCount(w_cl.value)):
+                        wel = cf.CFArrayGetValueAtIndex(w_cl.value, wi)
+                        if not wel:
+                            continue
+                        wt = _gs(wel, s_title).strip().lower()
+                        if not wt or wt in ("microsoft remote desktop", "windows app", "connection center", "pcs", "devices"):
+                            br = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(wel, s_close, ctypes.byref(br)) == 0 and br.value:
+                                try:
+                                    ax.AXUIElementPerformAction(br.value, s_press)
+                                finally:
+                                    cf.CFRelease(br.value)
+                finally:
+                    cf.CFRelease(w_cl.value)
+            if orig_front_pid > 0 and orig_front_pid != rdp_pid:
+                try:
+                    with objc.autorelease_pool():
+                         prev_app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(orig_front_pid)
+                         if prev_app is not None:
+                             prev_app.activateWithOptions_(2)
+                except Exception:
+                    pass
+    finally:
+        if orig_pt is not None and q is not None:
+            try:
+                q.CGWarpMouseCursorPosition((float(orig_pt.x), float(orig_pt.y)))
+            except Exception:
+                pass
+        cf.CFRelease(app_ax)
+        for sr in (
+            s_wins, s_role, s_subrole, s_title, s_desc, s_val, s_pos, s_size,
+            s_close, s_press, s_menubar, s_children, s_enabled, s_fs, s_main, s_focused, s_raise,
+        ):
+            if sr:
+                cf.CFRelease(sr)
+    return rdp_pid
 
 
 def _rdp_probe_vdisp_state() -> Tuple[int, List[str], bool]:
@@ -6608,46 +7052,22 @@ def _has_rdp_session_or_connecting(target_pid: int, target_sess: str) -> bool:
 
 
 def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
-    """Đóng êm phiên cũ -> thoát sạch MRD -> ghi bookmark mới (giữ nguyên Retina + Dynamic Display) -> tự nối lại target_sess."""
+    """Đóng êm phiên cũ -> chỉnh trực tiếp Edit PC -> Display -> Save bằng AXUIElement (KHÔNG thoát MRD, KHÔNG đụng mật khẩu Keychain, khóa Fit to Window = ON chống zoom 200%) -> tự nối lại target_sess."""
     global _LAST_DOWNGRADED_1MON_PID
     import AppKit  # type: ignore
     import objc  # type: ignore
 
-    _, app_name = _get_mrd_cli_info()
-    _quit_mrd_cleanly()
-    sync_mrd_bookmark_multimon(enable_multimon)
-    if not app_name:
-        return
-
-    subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    new_pid = 0
-    for _ in range(20):
-        time.sleep(0.18)
-        p_chk, _, _ = _rdp_probe_vdisp_state()
-        if p_chk <= 0:
-            live_p = _find_live_mrd_pids()
-            if live_p:
-                p_chk = live_p[0]
-        if p_chk > 0:
-            new_pid = p_chk
-            break
+    new_pid = _ax_update_bookmark_display_mode(
+        enable_multimon=enable_multimon,
+        target_title=target_sess,
+        connect_after=True,
+    )
     if new_pid <= 0:
         return
     if not enable_multimon:
         _LAST_DOWNGRADED_1MON_PID = new_pid
     else:
         _LAST_DOWNGRADED_1MON_PID = 0
-
-    # Đưa Microsoft Remote Desktop lên tiền cảnh và chờ trượt Space xong trước khi thao tác Connection Center
-    try:
-        with objc.autorelease_pool():
-            rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(new_pid)
-            if rapp is not None:
-                rapp.unhide()
-                rapp.activateWithOptions_(3)
-    except Exception:
-        pass
-    time.sleep(0.75)
 
     for _ in range(4):
         if _has_rdp_session_or_connecting(new_pid, target_sess):
@@ -6660,7 +7080,7 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
         if _has_rdp_session_or_connecting(new_pid, target_sess):
             break
 
-    # Đảm bảo cửa sổ PC Hieu (kể cả hộp Connecting 550x184) nổi hẳn lên trên Connection Center
+    # Đảm bảo cửa sổ PC Hieu nổi hẳn lên trên Connection Center
     try:
         with objc.autorelease_pool():
             rapp2 = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(new_pid)
@@ -6669,19 +7089,13 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
     except Exception:
         pass
 
-    # Khi về 1 màn cửa sổ thường: bung khít 1512x944 ngay khi cửa sổ mở và lặp lại sau khi kênh Dynamic Display bắt tay xong!
+    # Khi về 1 màn cửa sổ thường: bung cửa sổ gọn trên màn chính MacBook
     if not enable_multimon:
-        first_matched = False
         for _ in range(16):
             time.sleep(0.22)
             ok_m, _, _ = _apply_full_mac_window_bounds(new_pid, target_sess)
             if ok_m:
-                first_matched = True
                 break
-        if first_matched:
-            for extra_wait in (0.55, 0.70):
-                time.sleep(extra_wait)
-                _apply_full_mac_window_bounds(new_pid, target_sess)
 
 
 def trigger_smart_rdp_multimon_sync(
@@ -6730,14 +7144,19 @@ def trigger_smart_rdp_multimon_sync(
                             _RDP_RECONNECT_UNTIL = time.monotonic() + 2.5
                         return
 
-                    # Chỉ ghi bookmark khi thực sự đang ở chế độ 2 màn cũ (KHÔNG đụng MRD nếu bookmark đã đúng 1 màn!)
+                    # Chỉ chỉnh Edit PC -> Display khi thực sự cần (KHÔNG thoát MRD, KHÔNG đụng mật khẩu Keychain!)
                     if not sess:
                         if not _bookmark_already_matches(bookmarks, want_multimon=False):
-                            had_live = bool(_find_live_mrd_pids())
-                            if had_live:
-                                _quit_mrd_cleanly()
-                            sync_mrd_bookmark_multimon(False)
-                            _RDP_CLOSER_DIAG["last_reconnect"] = f"set_1mon@{time.strftime('%H:%M:%S')}"
+                            _RDP_RECONNECT_UNTIL = time.monotonic() + 8.0
+                            try:
+                                _ax_update_bookmark_display_mode(
+                                    enable_multimon=False,
+                                    target_title=default_title,
+                                    connect_after=False,
+                                )
+                                _RDP_CLOSER_DIAG["last_reconnect"] = f"set_1mon_ax@{time.strftime('%H:%M:%S')}"
+                            finally:
+                                _RDP_RECONNECT_UNTIL = time.monotonic() + 1.5
                         else:
                             _RDP_CLOSER_DIAG["multimon_bookmark"] = False
                     return
@@ -6745,10 +7164,16 @@ def trigger_smart_rdp_multimon_sync(
                 if not upgrade_running:
                     _, sess_idle, _ = _rdp_probe_vdisp_state()
                     if not sess_idle and not _bookmark_already_matches(bookmarks, want_multimon=True):
-                        if _find_live_mrd_pids():
-                            _quit_mrd_cleanly()
-                        sync_mrd_bookmark_multimon(True)
-                        _RDP_CLOSER_DIAG["last_reconnect"] = f"set_2mon_idle@{time.strftime('%H:%M:%S')}"
+                        _RDP_RECONNECT_UNTIL = time.monotonic() + 8.0
+                        try:
+                            _ax_update_bookmark_display_mode(
+                                enable_multimon=True,
+                                target_title=default_title,
+                                connect_after=False,
+                            )
+                            _RDP_CLOSER_DIAG["last_reconnect"] = f"set_2mon_idle_ax@{time.strftime('%H:%M:%S')}"
+                        finally:
+                            _RDP_RECONNECT_UNTIL = time.monotonic() + 1.5
                     return
 
                 now_m = time.monotonic()
@@ -6768,14 +7193,15 @@ def trigger_smart_rdp_multimon_sync(
                 rpid, sess, has_vdisp = _rdp_probe_vdisp_state()
                 if not sess:
                     if not _bookmark_already_matches(bookmarks, want_multimon=True):
-                        had_live_mrd = bool(_find_live_mrd_pids())
-                        if had_live_mrd:
-                            _quit_mrd_cleanly()
-                        sync_mrd_bookmark_multimon(True)
-                        if had_live_mrd:
-                            _, app_name = _get_mrd_cli_info()
-                            if app_name:
-                                subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        _RDP_RECONNECT_UNTIL = time.monotonic() + 8.0
+                        try:
+                            _ax_update_bookmark_display_mode(
+                                enable_multimon=True,
+                                target_title=default_title,
+                                connect_after=False,
+                            )
+                        finally:
+                            _RDP_RECONNECT_UNTIL = time.monotonic() + 1.5
                     _RDP_CLOSER_DIAG["last_reconnect"] = f"ready_2mon_no_sess@{time.strftime('%H:%M:%S')}"
                     return
                 if has_vdisp and not _bookmark_needs_retina_or_dyn_repair(bookmarks):
@@ -7148,6 +7574,10 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                             en = _get_bool(m_el, s_enabled)
                                             if len(dbg) < 40:
                                                 dbg.append(f"{bt}:{mt_raw}[m={mk}|e={int(en)}]")
+                                            if "fit" in mt_l and "window" in mt_l and en and not mk:
+                                                if ax.AXUIElementPerformAction(m_el, s_press) == 0:
+                                                    _RDP_CLOSER_DIAG["last_action"] = f"auto_fit_window@{time.strftime('%H:%M:%S')}"
+                                                    return True
                                     finally:
                                         cf.CFRelease(items_arr.value)
                                 finally:
@@ -7375,7 +7805,7 @@ if __name__ == "__main__":
     trigger_smart_rdp_multimon_sync(
         enable_multimon=_init_has_2mon,
         upgrade_running=_init_has_2mon,
-        repair_clamped=False,
+        repair_clamped=(not _init_has_2mon),
     )
     start_rdp_launcher_auto_closer(poll_sec=0.15)
     start_git_auto_updater(check_every_sec=45.0)
