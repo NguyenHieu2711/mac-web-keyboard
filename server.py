@@ -5161,6 +5161,9 @@ async def mac_virtual_display_rescue() -> dict:
     return {"ok": True, "rescued": moved}
 
 
+_MANUAL_WINDOWED_OPEN_UNTIL: float = 0.0
+
+
 @app.post("/mac-virtual-display/open-rdp")
 @app.get("/mac-virtual-display/open-rdp")
 async def mac_virtual_display_open_rdp(windowed: int = 0) -> dict:
@@ -5168,11 +5171,12 @@ async def mac_virtual_display_open_rdp(windowed: int = 0) -> dict:
         return {"ok": False}
 
     def _do_open() -> dict:
-        global _RDP_RECONNECT_UNTIL
+        global _RDP_RECONNECT_UNTIL, _MANUAL_WINDOWED_OPEN_UNTIL
         with _SMART_MULTIMON_LOCK:
             # Khi chuyển từ "Chỉ Điện thoại" -> "Song song" (windowed=1): BẮT BUỘC mở cửa sổ bình thường (KHÔNG bật Full-Screen / All Monitors)!
             if windowed:
                 want_mm = False
+                _MANUAL_WINDOWED_OPEN_UNTIL = time.monotonic() + 18.0
             else:
                 want_mm = bool((mac_vdisp is not None and mac_vdisp.is_active()) or (_get_secondary_mac_display_bounds(injector._quartz) is not None))
             bmks = _list_mrd_bookmarks()
@@ -9065,18 +9069,17 @@ def trigger_smart_rdp_multimon_sync(
 
                 if not enable_multimon:
                     rpid, sess, _ = _rdp_probe_vdisp_state()
-                    need_downgrade = bool(downgrade_running and sess)
-                    reopen_repaired = False
+                    # NGUYÊN TẮC BẮT BUỘC: Nếu Remote Mac KHÔNG đang mở (not sess) -> MẶC KỆ 100%, tuyệt đối không tự bật hay đụng vào Microsoft Remote Desktop!
+                    if not sess:
+                        _RDP_CLOSER_DIAG["worker_trace"] += "|idle_no_sess_1mon"
+                        return
+                    need_downgrade = bool(downgrade_running)
                     if not need_downgrade and repair_clamped:
                         if _bookmark_needs_retina_or_dyn_repair(bookmarks):
-                            if sess:
-                                need_downgrade = True
-                            elif _find_live_mrd_pids() and _USER_1MON_BOUNDS_PATH.exists():
-                                need_downgrade = True
-                                reopen_repaired = True
-                    _RDP_CLOSER_DIAG["worker_trace"] += f"|rpid={rpid},sess={len(sess)},nd={int(need_downgrade)},ro={int(reopen_repaired)}"
+                            need_downgrade = True
+                    _RDP_CLOSER_DIAG["worker_trace"] += f"|rpid={rpid},sess={len(sess)},nd={int(need_downgrade)}"
 
-                    if need_downgrade and (sess or reopen_repaired):
+                    if need_downgrade:
                         now_d = time.monotonic()
                         if _LAST_1MON_SYNC_AT > 0.0 and (now_d - _LAST_1MON_SYNC_AT) < 3.5:
                             _RDP_CLOSER_DIAG["ax_stage"] = f"debounced:{now_d:.2f}"
@@ -9092,38 +9095,13 @@ def trigger_smart_rdp_multimon_sync(
                         finally:
                             _LAST_1MON_SYNC_AT = time.monotonic()
                             _RDP_RECONNECT_UNTIL = time.monotonic() + 2.5
-                        return
-
-                    # Chỉ chỉnh Edit PC -> Display khi thực sự cần (KHÔNG thoát MRD, KHÔNG đụng mật khẩu Keychain!)
-                    if not sess:
-                        if not _bookmark_already_matches(bookmarks, want_multimon=False):
-                            _RDP_RECONNECT_UNTIL = time.monotonic() + 8.0
-                            try:
-                                _ax_update_bookmark_display_mode(
-                                    enable_multimon=False,
-                                    target_title=default_title,
-                                    connect_after=False,
-                                )
-                                _RDP_CLOSER_DIAG["last_reconnect"] = f"set_1mon_ax@{time.strftime('%H:%M:%S')}"
-                            finally:
-                                _RDP_RECONNECT_UNTIL = time.monotonic() + 1.5
-                        else:
-                            _RDP_CLOSER_DIAG["multimon_bookmark"] = False
                     return
 
-                if not upgrade_running:
-                    _, sess_idle, _ = _rdp_probe_vdisp_state()
-                    if not sess_idle and not _bookmark_already_matches(bookmarks, want_multimon=True):
-                        _RDP_RECONNECT_UNTIL = time.monotonic() + 8.0
-                        try:
-                            _ax_update_bookmark_display_mode(
-                                enable_multimon=True,
-                                target_title=default_title,
-                                connect_after=False,
-                            )
-                            _RDP_CLOSER_DIAG["last_reconnect"] = f"set_2mon_idle_ax@{time.strftime('%H:%M:%S')}"
-                        finally:
-                            _RDP_RECONNECT_UNTIL = time.monotonic() + 1.5
+                # Khi kết nối màn hình phụ (enable_multimon=True): kiểm tra ngay xem Remote Mac có đang bật không.
+                # Nếu Remote Mac KHÔNG bật -> MẶC KỆ 100% (chỉ dùng màn hình phụ thuần cho MacBook, không tự mở hay kích hoạt MRD)!
+                rpid_pre, sess_pre, _ = _rdp_probe_vdisp_state()
+                if not upgrade_running or not sess_pre:
+                    _RDP_CLOSER_DIAG["worker_trace"] += f"|idle_no_sess_2mon:up={int(upgrade_running)},sess={len(sess_pre)}"
                     return
 
                 now_m = time.monotonic()
@@ -9142,17 +9120,7 @@ def trigger_smart_rdp_multimon_sync(
 
                 rpid, sess, has_vdisp = _rdp_probe_vdisp_state()
                 if not sess:
-                    if not _bookmark_already_matches(bookmarks, want_multimon=True):
-                        _RDP_RECONNECT_UNTIL = time.monotonic() + 8.0
-                        try:
-                            _ax_update_bookmark_display_mode(
-                                enable_multimon=True,
-                                target_title=default_title,
-                                connect_after=False,
-                            )
-                        finally:
-                            _RDP_RECONNECT_UNTIL = time.monotonic() + 1.5
-                    _RDP_CLOSER_DIAG["last_reconnect"] = f"ready_2mon_no_sess@{time.strftime('%H:%M:%S')}"
+                    _RDP_CLOSER_DIAG["last_reconnect"] = f"skip_2mon_closed@{time.strftime('%H:%M:%S')}"
                     return
                 if has_vdisp and not _bookmark_needs_retina_or_dyn_repair(bookmarks):
                     _RDP_CLOSER_DIAG["last_reconnect"] = f"already_2mon@{time.strftime('%H:%M:%S')}"
@@ -9238,6 +9206,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
         prev_front_pid = 0
         jump_attempt_idx = 0
         prev_had_sessions = False
+        pending_open_topo_sync = False
         prev_sec_disp: Optional[bool] = None
         sec_disp_flip_at: float = 0.0
 
@@ -9382,6 +9351,8 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                 prev_front_pid = front_pid
 
                 if rdp_pid <= 0:
+                    prev_had_sessions = False
+                    pending_open_topo_sync = False
                     session_first_seen_at = 0.0
                     _RDP_CLOSER_DIAG["sessions"] = []
                     _RDP_CLOSER_DIAG["on_screen_main"] = False
@@ -9396,13 +9367,27 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
 
                 if not session_titles:
                     prev_had_sessions = False
+                    pending_open_topo_sync = False
                     session_first_seen_at = 0.0
                     continue
-                prev_had_sessions = True
+                if not prev_had_sessions:
+                    prev_had_sessions = True
+                    pending_open_topo_sync = True
                 if session_first_seen_at <= 0.0:
                     session_first_seen_at = now_m
                 if all_has_dialog or (now_m - session_first_seen_at) < 0.35:
                     continue
+
+                # Nếu người dùng VỪA CHỦ ĐỘNG MỞ Remote Mac lên trong khi màn hình phụ điện thoại đang kết nối sẵn ->
+                # tự động nâng cấp phiên Remote vừa mở sang 2 màn hình để đẩy sang màn phụ!
+                if pending_open_topo_sync and (now_m - session_first_seen_at) >= 0.60:
+                    pending_open_topo_sync = False
+                    if now_m >= _MANUAL_WINDOWED_OPEN_UNTIL:
+                        has_sec_open = (_get_secondary_mac_display_bounds(q) is not None)
+                        _, live_sess_o, live_vd_o = _rdp_probe_vdisp_state()
+                        if has_sec_open and live_sess_o and not live_vd_o:
+                            trigger_smart_rdp_multimon_sync(enable_multimon=True, upgrade_running=True)
+                            continue
 
                 want_check_close = (
                     (all_has_launcher or all_has_unnamed_big)
