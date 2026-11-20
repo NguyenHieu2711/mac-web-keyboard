@@ -6625,7 +6625,7 @@ def _ax_update_bookmark_display_mode(
                                 return
                             if _gs(el_t, s_role).strip() == "AXRadioButton":
                                 lbl_t = (_gs(el_t, s_title) or _gs(el_t, s_desc)).strip().lower()
-                                if lbl_t == "pcs":
+                                if lbl_t in ("pcs", "icon view"):
                                     if _gi(el_t, s_val) == 0 and _gb(el_t, s_enabled):
                                         _ax_press_fast(el_t, 0.45)
                                         rc_pt = _grect(el_t)
