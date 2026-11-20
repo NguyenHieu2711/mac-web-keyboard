@@ -6807,18 +6807,62 @@ def _ax_update_bookmark_display_mode(
                         cf.CFRelease(w_c.value)
                 return toggled[0]
 
+            def _unlock_custom_resolution_mode(want_custom: bool) -> None:
+                disp_ctrls: List[str] = []
+                tab_names = ("general", "display", "devices & audio", "devices and audio", "folders", "hiển thị", "chung")
+
+                def _walk_disp_ctrls(el: Any, depth: int) -> None:
+                    if not el or depth > 16:
+                        return
+                    rl_d = _gs(el, s_role).strip()
+                    if rl_d in ("AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXComboBox"):
+                        tl_d = (_gs(el, s_title) or _gs(el, s_desc)).strip()
+                        vl_d = _gs(el, s_val).strip()
+                        en_d = _gb(el, s_enabled)
+                        disp_ctrls.append(f"{rl_d}:{tl_d}|v={vl_d}|e={int(en_d)}")
+                        tl_low = tl_d.lower()
+                        if rl_d == "AXCheckBox" and "default for this display" in tl_low and en_d:
+                            cv_d = _gi(el, s_val)
+                            want_chk = not want_custom
+                            if bool(cv_d) != bool(want_chk):
+                                _ax_press_fast(el, 0.45)
+                        elif rl_d == "AXRadioButton" and tl_low not in tab_names and en_d:
+                            cv_r = _gi(el, s_val)
+                            is_def_radio = ("default" in tl_low)
+                            if want_custom and (not is_def_radio) and cv_r == 0:
+                                _ax_press_fast(el, 0.45)
+                            elif (not want_custom) and is_def_radio and cv_r == 0:
+                                _ax_press_fast(el, 0.45)
+                    ch = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                        try:
+                            for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
+                                _walk_disp_ctrls(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                        finally:
+                            cf.CFRelease(ch.value)
+
+                w_dc = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_dc)) == 0 and w_dc.value:
+                    try:
+                        for wi in range(cf.CFArrayGetCount(w_dc.value)):
+                            _walk_disp_ctrls(cf.CFArrayGetValueAtIndex(w_dc.value, wi), 0)
+                    finally:
+                        cf.CFRelease(w_dc.value)
+                _RDP_CLOSER_DIAG["disp_tab_controls"] = disp_ctrls[-18:]
+
             # Lượt 1: Mở khóa Start session in full screen (khi tắt Use all monitors) & tắt Update session resolution on resize
             _apply_checkbox_pass([
                 (("use all monitors",), bool(enable_multimon)),
                 (("update session resolution", "on resize"), False),
             ])
             time.sleep(0.10)
-            # Lượt 2: Đặt Start session in full screen & đảm bảo Update session resolution on resize đã tắt hẳn
+            # Lượt 2: Đặt Start session in full screen & mở khóa Custom Resolution (khi về 1 màn)
             _apply_checkbox_pass([
                 (("start session in full screen", "in full screen"), bool(enable_multimon)),
                 (("update session resolution", "on resize"), False),
             ])
-            time.sleep(0.08)
+            _unlock_custom_resolution_mode(want_custom=(not enable_multimon))
+            time.sleep(0.10)
             # Lượt 3: Luôn BẬT Fit session to window + Optimize for Retina displays (chống zoom 200% tuyệt đối!)
             _apply_checkbox_pass([
                 (("fit session to window",), True),
@@ -6868,7 +6912,7 @@ def _ax_update_bookmark_display_mode(
                     def _find_and_open_res_popup(el: Any, depth: int, mode_click: bool) -> None:
                         if not el or depth > 16 or picked[0] or already_has[0] or pop_rects:
                             return
-                        if _gs(el, s_role).strip() == "AXPopUpButton" and _gb(el, s_enabled):
+                        if _gs(el, s_role).strip() in ("AXPopUpButton", "AXComboBox") and _gb(el, s_enabled):
                             cur_txt = (_gs(el, s_val) + " " + _gs(el, s_title)).strip().lower()
                             bad_pop = (
                                 "bit" in cur_txt
@@ -7306,6 +7350,8 @@ def _ax_update_bookmark_display_mode(
                             (("use all monitors",), False),
                             (("update session resolution", "on resize"), False),
                         ])
+                        time.sleep(0.08)
+                        _unlock_custom_resolution_mode(want_custom=True)
                         time.sleep(0.08)
                         _apply_checkbox_pass([
                             (("start session in full screen", "in full screen"), False),
