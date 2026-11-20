@@ -7487,8 +7487,10 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                         wname_l = wname_raw.lower()
                         is_onscreen = bool(w.get("kCGWindowIsOnscreen", False))
                         in_main = (main_x <= (wx + ww * 0.5) < (main_x + main_w))
-                        if is_onscreen and wname_l and any(k in wname_l for k in dialog_keywords):
-                            all_has_dialog = True
+                        if wname_l and any(k in wname_l for k in dialog_keywords):
+                            if is_onscreen:
+                                all_has_dialog = True
+                            continue
                         elif wname_l in launcher_titles:
                             all_has_launcher = True
                         elif wname_raw and ww >= 620.0 and wh >= 200.0:
