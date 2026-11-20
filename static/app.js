@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.85";
+  const BUNDLED_BOOT_VER = "2.3.87";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -2145,7 +2145,7 @@
               velocityPxMs = velocityPxMs * 0.55 + vNow * 0.45;
             }
             setSharedThumbOffset(sharedThumbOffset + dy * 0.42);
-            emitUnifiedScroll(0, dy, dt);
+            emitUnifiedScroll(0, dy * 1.85, dt);
             break;
           }
         }
@@ -2173,11 +2173,11 @@
             const relY = rect.height > 0 ? (t.clientY - rect.top) / rect.height : 0.5;
             if (relY < 0.3) {
               triggerHaptic(6);
-              sendPayload({ type: "mouse_scroll", dx: 0, dy: 28, phase: 1 });
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: 36, phase: 1 });
               sendPayload({ type: "mouse_scroll", dx: 0, dy: 0, phase: 4 });
             } else if (relY > 0.7) {
               triggerHaptic(6);
-              sendPayload({ type: "mouse_scroll", dx: 0, dy: -28, phase: 1 });
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: -36, phase: 1 });
               sendPayload({ type: "mouse_scroll", dx: 0, dy: 0, phase: 4 });
             }
             return;
@@ -5876,7 +5876,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.85";
+  const BUNDLED_WEB_VERSION = "2.3.87";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();

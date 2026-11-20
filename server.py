@@ -1457,38 +1457,42 @@ class KeyboardInjector:
                 pass
             return
         q = self._quartz
-        iy = int(round(dy))
-        ix = int(round(dx))
-        if iy == 0 and ix == 0 and phase != 4:
-            return
         last_s = float(getattr(self, "_last_scroll_at", 0.0))
         is_new_burst = (now_s - last_s) > 0.22
+        if is_new_burst:
+            self._rdp_scroll_rem_x = 0.0
+            self._rdp_scroll_rem_y = 0.0
         if phase == 2 and is_new_burst:
             phase = 1
         self._last_scroll_at = now_s
 
-        # BẮT BUỘC gắn đúng tọa độ con trỏ thật (CGEventSetLocation) trước khi post vào kCGAnnotatedSessionEventTap!
-        # Vì sau tầng HID, CGEventCreateScrollWheelEvent mặc định location=(0,0) ở góc Menu Bar nên sẽ trượt khỏi cửa sổ đang trỏ nếu không set location!
-        cur_x, cur_y = float(self._mouse_x), float(self._mouse_y)
-        try:
-            cur_ev = q.CGEventCreate(None)
-            if cur_ev is not None:
-                loc = q.CGEventGetLocation(cur_ev)
-                cur_x, cur_y = float(loc.x), float(loc.y)
-                self._mouse_x, self._mouse_y = cur_x, cur_y
-        except Exception:
-            self._sync_mouse_pos_if_needed()
-            cur_x, cur_y = float(self._mouse_x), float(self._mouse_y)
-
-        if is_new_burst:
-            try:
-                mv = q.CGEventCreateMouseEvent(
-                    self._event_source, q.kCGEventMouseMoved, (cur_x, cur_y), q.kCGMouseButtonLeft
-                )
-                q.CGEventSetIntegerValueField(mv, q.kCGEventSourceUserData, 0x4D4B4231)
-                q.CGEventPost(q.kCGHIDEventTap, mv)
-            except Exception:
-                pass
+        in_rdp = self.is_remote_pc_focused()
+        if in_rdp:
+            # Trong Microsoft Remote Desktop: các xung pixel nhỏ 1-5px có DeltaAxis1=0 nên hay bị nuốt.
+            # Gom đủ bước >= 6px thành bội số 12px (DeltaAxis1 >= 1, PointDeltaAxis1 >= 12) + IsContinuous=1 (né Mos) + post kCGHIDEventTap!
+            if phase == 4:
+                self._rdp_scroll_rem_x = 0.0
+                self._rdp_scroll_rem_y = 0.0
+                ix, iy = 0, 0
+            else:
+                acc_x = float(getattr(self, "_rdp_scroll_rem_x", 0.0)) + float(dx)
+                acc_y = float(getattr(self, "_rdp_scroll_rem_y", 0.0)) + float(dy)
+                step_px = 6.0
+                lx = int(acc_x / step_px) if abs(acc_x) >= step_px else 0
+                ly = int(acc_y / step_px) if abs(acc_y) >= step_px else 0
+                self._rdp_scroll_rem_x = acc_x - (lx * step_px)
+                self._rdp_scroll_rem_y = acc_y - (ly * step_px)
+                if lx == 0 and ly == 0:
+                    return
+                lx = max(-8, min(8, lx))
+                ly = max(-8, min(8, ly))
+                ix = lx * 12
+                iy = ly * 12
+        else:
+            iy = int(round(dy))
+            ix = int(round(dx))
+            if iy == 0 and ix == 0 and phase != 4:
+                return
 
         ev = q.CGEventCreateScrollWheelEvent(
             self._event_source,
@@ -1497,27 +1501,29 @@ class KeyboardInjector:
             iy,
             ix,
         )
-        # Đầy đủ chữ ký Apple Magic Trackpad (IsContinuous=88, PointDelta=96/97, ScrollPhase=99, MomentumPhase=123)
-        # + CGEventSetLocation(cur_x, cur_y) + Post qua kCGAnnotatedSessionEventTap để đi sau CGEventTap của Mos (tránh bị Mos nuốt xung cuộn!).
+        # IsContinuous=1 (88=1) để Mos bỏ qua không chặn/đảo chiều; post vào kCGHIDEventTap để WindowServer định tuyến thẳng tới cửa sổ dưới con trỏ!
         q.CGEventSetIntegerValueField(ev, 88, 1)
         q.CGEventSetIntegerValueField(ev, 96, iy)
         q.CGEventSetIntegerValueField(ev, 97, ix)
-        if phase == 8:
+        if in_rdp:
+            if iy != 0:
+                q.CGEventSetIntegerValueField(ev, 11, int(iy / 12))
+            if ix != 0:
+                q.CGEventSetIntegerValueField(ev, 12, int(ix / 12))
+            q.CGEventSetIntegerValueField(ev, 99, 1 if is_new_burst else (4 if phase == 4 else 2))
+            q.CGEventSetIntegerValueField(ev, 123, 0)
+        elif phase == 8:
             q.CGEventSetIntegerValueField(ev, 99, 0)
             q.CGEventSetIntegerValueField(ev, 123, 2)
         else:
             q.CGEventSetIntegerValueField(ev, 99, phase if phase in (1, 2, 4) else 2)
             q.CGEventSetIntegerValueField(ev, 123, 0)
-        try:
-            q.CGEventSetLocation(ev, (cur_x, cur_y))
-        except Exception:
-            pass
         q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
         if self.held_modifiers:
             q.CGEventSetFlags(ev, self._compute_quartz_flags())
-        q.CGEventPost(getattr(q, "kCGAnnotatedSessionEventTap", q.kCGSessionEventTap), ev)
+        q.CGEventPost(q.kCGHIDEventTap, ev)
         try:
-            _RDP_CLOSER_DIAG["last_scroll"] = f"dx={ix},dy={iy},ph={phase},loc={int(cur_x)}x{int(cur_y)}@{time.strftime('%H:%M:%S')}"
+            _RDP_CLOSER_DIAG["last_scroll"] = f"mode={'rdp' if in_rdp else 'mac'},dx={ix},dy={iy},ph={phase},tap=hid@{time.strftime('%H:%M:%S')}"
         except Exception:
             pass
 
