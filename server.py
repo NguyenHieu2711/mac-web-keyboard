@@ -2748,6 +2748,13 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def _add_private_network_cors_header(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers["Access-Control-Allow-Private-Network"] = "true"
+    return resp
+
+
 _CACHED_WEB_BUNDLE: Optional[Dict[str, Any]] = None
 _CACHED_WEB_MTIMES: str = ""
 
@@ -5214,17 +5221,8 @@ async def mac_virtual_display_toggle(req: Request) -> dict:
         _cancel_orphan_vdisp_shutdown()
         if want_enable:
             mac_vdisp.start(logical_w=logical_w, logical_h=logical_h, hidpi=hidpi)
-            trigger_smart_rdp_multimon_sync(enable_multimon=True, upgrade_running=True)
         else:
-            was_vdisp_active = bool(mac_vdisp.is_active())
-            _, _, was_2mon = _rdp_probe_vdisp_state()
             mac_vdisp.stop()
-            if was_vdisp_active and was_2mon:
-                trigger_smart_rdp_multimon_sync(
-                    enable_multimon=False,
-                    upgrade_running=False,
-                    downgrade_running=True,
-                )
         return mac_vdisp.status(injector._quartz)
 
     return await asyncio.to_thread(_run_toggle)
@@ -5260,13 +5258,7 @@ def _schedule_orphan_vdisp_shutdown(delay_sec: float = 15.0) -> None:
         if _ACTIVE_MAC_EXT_WS_COUNT <= 0 and mac_vdisp is not None and mac_vdisp.is_active():
             try:
                 logger.info("Không còn điện thoại kết nối Màn phụ Mac sau %.0fs -> tự hủy màn ảo & kéo app về MacBook.", delay_sec)
-                _, sess_before, was_2mon = _rdp_probe_vdisp_state()
                 mac_vdisp.stop()
-                trigger_smart_rdp_multimon_sync(
-                    enable_multimon=False,
-                    upgrade_running=False,
-                    downgrade_running=bool(was_2mon or sess_before),
-                )
             except Exception:
                 pass
 
@@ -6370,25 +6362,16 @@ def _compute_exact_1mon_retina_res(quartz: Any = None) -> Tuple[int, int, float,
 def _load_saved_1mon_bounds() -> Optional[Dict[str, float]]:
     global _SAVED_USER_1MON_BOUNDS
     if _SAVED_USER_1MON_BOUNDS is not None:
-        if _is_clamped_1467_box(_SAVED_USER_1MON_BOUNDS["w"], _SAVED_USER_1MON_BOUNDS["h"]):
-            _SAVED_USER_1MON_BOUNDS = None
-        else:
-            return _SAVED_USER_1MON_BOUNDS
+        return _SAVED_USER_1MON_BOUNDS
     try:
         if _USER_1MON_BOUNDS_PATH.exists():
             raw = json.loads(_USER_1MON_BOUNDS_PATH.read_text(encoding="utf-8"))
             bw = float(raw.get("w", 0.0))
             bh = float(raw.get("h", 0.0))
-            if (
-                bw >= 650.0
-                and bh >= 420.0
-                and not _is_mrd_tiny_default_box(bw, bh)
-                and not _is_clamped_1467_box(bw, bh)
-                and bw < bh * 2.15
-            ):
+            if bw >= 360.0 and bh >= 240.0 and not _is_mrd_tiny_default_box(bw, bh):
                 _SAVED_USER_1MON_BOUNDS = {
                     "x": float(raw.get("x", 0.0)),
-                    "y": float(raw.get("y", 37.0)),
+                    "y": float(raw.get("y", 38.0)),
                     "w": bw,
                     "h": bh,
                 }
@@ -6399,9 +6382,9 @@ def _load_saved_1mon_bounds() -> Optional[Dict[str, float]]:
 
 
 def _save_user_1mon_bounds(bx: float, by: float, bw: float, bh: float) -> None:
-    """Lưu lại đúng vị trí & kích thước cửa sổ thường mà người dùng tự đặt trên MacBook trước khi vào Full-Screen."""
+    """Lưu lại đúng vị trí & kích thước cửa sổ thường mà người dùng tự đặt trên MacBook (mở bé hay mở to giữ nguyên y hệt!)."""
     global _SAVED_USER_1MON_BOUNDS
-    if bw < 650.0 or bh < 420.0 or _is_mrd_tiny_default_box(bw, bh) or _is_clamped_1467_box(bw, bh) or bw >= bh * 2.15:
+    if bw < 360.0 or bh < 240.0 or _is_mrd_tiny_default_box(bw, bh):
         return
     prev = _SAVED_USER_1MON_BOUNDS
     if (
@@ -6534,45 +6517,14 @@ def _get_secondary_mac_display_bounds(quartz: Any = None) -> Optional[Dict[str, 
 
 
 def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bool:
-    """Kiểm tra trực tiếp qua bookmark export (100% read-only):
-    - forcehidpioptimizations=1 (Optimize for Retina = ON)
-    - smart sizing=1 (Fit session to window = ON)
-    - dynamic resolution=0 (Update session resolution on resize = OFF -> BẮT BUỘC OFF vì khi ON trên MRD 10.9.10 sẽ khóa tắt Fit to Window gây phóng cận cảnh 200%!)."""
-    if not IS_MACOS or not bookmarks:
-        return False
-    mrd_bin, _ = _get_mrd_cli_info()
-    if not mrd_bin:
-        return False
-    try:
-        _, buuid = bookmarks[0]
-        rc_ex = subprocess.run(
-            [mrd_bin, "--script", "bookmark", "export", buuid],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=6.0,
-        )
-        ex_txt = (rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")
-        if "full address:s:" not in ex_txt.lower():
-            return False
-        has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
-        has_fit = bool(re.search(r"smart sizing:i:1", ex_txt, re.IGNORECASE))
-        has_bad_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
-        if _get_secondary_mac_display_bounds(None) is None:
-            want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(None)
-            alt_rh = want_rh - (want_rh % 8)
-            has_w = bool(re.search(rf"desktopwidth:i:{want_rw}\b", ex_txt, re.IGNORECASE))
-            has_h = bool(re.search(rf"desktopheight:i:({want_rh}|{alt_rh})\b", ex_txt, re.IGNORECASE))
-            return (not has_fit) or has_bad_dyn or (not (has_w and has_h))
-        return (not has_retina) or (not has_fit) or has_bad_dyn
-    except Exception:
-        return False
+    """Giữ nguyên 100% toàn bộ cài đặt độ phân giải / Retina / Fit mà người dùng đã tự cấu hình trong Remote Desktop."""
+    return False
 
 
 def _bookmark_already_matches(bookmarks: List[Tuple[str, str]], want_multimon: bool) -> bool:
-    """Kiểm tra bookmark đã khớp đúng chế độ 1 màn / 2 màn + Retina ON + Fit to Window ON + Dynamic Resolution OFF + độ phân giải khít 3024x1834 chưa."""
+    """Chỉ kiểm tra duy nhất 2 cờ 1 màn / 2 màn (use multimon & screen mode id); tuyệt đối không động vào độ phân giải hay tỉ lệ người dùng đã cài!"""
     if not IS_MACOS or not bookmarks:
         return False
-    if _LAST_APPLIED_BOOKMARK_MODE is not None and _LAST_APPLIED_BOOKMARK_MODE == bool(want_multimon):
-        if not _bookmark_needs_retina_or_dyn_repair(bookmarks):
-            return True
     mrd_bin, _ = _get_mrd_cli_info()
     if not mrd_bin:
         return False
@@ -6585,20 +6537,11 @@ def _bookmark_already_matches(bookmarks: List[Tuple[str, str]], want_multimon: b
         ex_txt = (rc_ex.stdout or "") + "\n" + (rc_ex.stderr or "")
         if "full address:s:" not in ex_txt.lower():
             return False
-        has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
-        has_fit = bool(re.search(r"smart sizing:i:1", ex_txt, re.IGNORECASE))
-        has_bad_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
         mm_val = 1 if want_multimon else 0
         sm_val = 2 if want_multimon else 1
         has_mm = bool(re.search(rf"use multimon:i:{mm_val}\b", ex_txt, re.IGNORECASE))
         has_sm = bool(re.search(rf"screen mode id:i:{sm_val}\b", ex_txt, re.IGNORECASE))
-        if not want_multimon:
-            want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(None)
-            alt_rh = want_rh - (want_rh % 8)
-            has_w = bool(re.search(rf"desktopwidth:i:{want_rw}\b", ex_txt, re.IGNORECASE))
-            has_h = bool(re.search(rf"desktopheight:i:({want_rh}|{alt_rh})\b", ex_txt, re.IGNORECASE))
-            return has_fit and (not has_bad_dyn) and has_mm and has_sm and has_w and has_h
-        return has_retina and has_fit and (not has_bad_dyn) and has_mm and has_sm
+        return has_mm and has_sm
     except Exception:
         return False
 
@@ -7468,27 +7411,17 @@ def _ax_update_bookmark_display_mode(
                         cf.CFRelease(w_c.value)
                 return toggled[0]
 
-            # Lượt 1: Mở khóa Start session in full screen & tắt Update session resolution on resize
+            # CHỈ bật/tắt đúng 2 cờ 1 màn <-> 2 màn; TUYỆT ĐỐI KHÔNG động vào độ phân giải, Retina, Fit hay Preferences mà người dùng đã tự cài!
             _apply_checkbox_pass([
                 (("use all monitors",), bool(enable_multimon)),
-                (("update session resolution", "on resize"), False),
             ])
-            time.sleep(0.10)
-            # Lượt 2: Trên MRD 10.9.10, khi về 1 màn phải TẮT Optimize for Retina displays thì nút chọn Resolution (3024 x 1834) mới được mở khóa (e=1)!
+            time.sleep(0.08)
             _apply_checkbox_pass([
                 (("start session in full screen", "in full screen"), bool(enable_multimon)),
-                (("optimize for retina", "retina"), bool(enable_multimon)),
-                (("update session resolution", "on resize"), False),
-            ])
-            time.sleep(0.10)
-            # Lượt 3: Luôn BẬT Fit session to window (scale chuẩn 3024x1834 khít 2x Retina vào khung 1512x917, chống zoom 200% tuyệt đối!)
-            _apply_checkbox_pass([
-                (("fit session to window",), True),
             ])
             _RDP_CLOSER_DIAG["edit_pc_checkboxes"] = cb_logs[-12:]
 
-            # 4B) Khi ở chế độ 1 màn cửa sổ thường: chọn độ phân giải chuẩn 1:1 tỷ lệ thật Windows (1512 x 916) để vừa đúng cỡ chữ Windows thật vừa xóa sạch khe hở!
-            if not enable_multimon:
+            if False and not enable_multimon:
                 want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(q)
                 alt_rh = want_rh - (want_rh % 8)
                 w_str, h_str, alt_h_str = str(want_rw), str(want_rh), str(alt_rh)
@@ -8195,8 +8128,14 @@ def _ax_update_bookmark_display_mode(
                 q.CGEventSetFlags(rk_u, 0)
                 q.CGEventPost(q.kCGHIDEventTap, rk_d)
                 q.CGEventPost(q.kCGHIDEventTap, rk_u)
-                time.sleep(0.16)
-            if not _has_rdp_session_or_connecting(rdp_pid, target_title):
+            # Chờ hộp thoại Connecting / phiên Remote kịp bật lên (tránh bấm Connect lặp 2-3 lần!)
+            started_conn = False
+            for _ in range(7):
+                time.sleep(0.10)
+                if _has_rdp_session_or_connecting(rdp_pid, target_title):
+                    started_conn = True
+                    break
+            if not started_conn:
                 _ax_close_session_and_relaunch(rdp_pid, target_title, close_existing_session=False)
             # Ẩn ngay toàn bộ Microsoft Remote Desktop (giấu tiệt bảng Connecting... 540x340 & Connection Center) trong lúc chờ phiên kết nối xong!
             try:
@@ -8861,8 +8800,8 @@ def _apply_full_mac_window_bounds(target_pid: int, target_sess: str) -> Tuple[bo
     mx, my, mw, mh = float(mb.origin.x), float(mb.origin.y), float(mb.size.width), float(mb.size.height)
     saved_b = _load_saved_1mon_bounds()
     if saved_b is not None:
-        tw = max(650.0, min(mw, float(saved_b["w"])))
-        th = max(420.0, min(mh - 24.0, float(saved_b["h"])))
+        tw = max(360.0, min(mw, float(saved_b["w"])))
+        th = max(240.0, min(mh - 24.0, float(saved_b["h"])))
         tx = max(mx, min(mx + mw - tw, float(saved_b["x"])))
         ty = max(my + 24.0, min(my + mh - th, float(saved_b["y"])))
     else:
@@ -8972,7 +8911,12 @@ def _has_rdp_session_or_connecting(target_pid: int, target_sess: str) -> bool:
             ww = float(wb.get("Width", 0))
             wh = float(wb.get("Height", 0))
             wn = str(w.get("kCGWindowName", "") or "").strip().lower()
-            if ww >= 350.0 and wh >= 120.0 and wn and (wn == t_low or (t_low and t_low in wn and wn not in ("microsoft remote desktop", "windows app", "connection center"))):
+            if ww >= 300.0 and wh >= 120.0 and wn and (
+                "connecting" in wn
+                or "authenticat" in wn
+                or wn == t_low
+                or (t_low and t_low in wn and wn not in ("microsoft remote desktop", "windows app", "connection center"))
+            ):
                 return True
     return False
 
@@ -9131,16 +9075,24 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
         else:
             _LAST_DOWNGRADED_1MON_PID = 0
 
-        for _ in range(4):
-            if _has_rdp_session_or_connecting(new_pid, target_sess):
-                break
-            _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
+        # Chờ tối đa 0.6s xem lệnh Connect trước đó đã bật Connecting.../PC Hieu chưa trước khi fallback
+        conn_started = _has_rdp_session_or_connecting(new_pid, target_sess)
+        if not conn_started:
             for _ in range(5):
-                time.sleep(0.14)
+                time.sleep(0.12)
                 if _has_rdp_session_or_connecting(new_pid, target_sess):
+                    conn_started = True
                     break
-            if _has_rdp_session_or_connecting(new_pid, target_sess):
-                break
+        if not conn_started:
+            for _ in range(2):
+                _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
+                for _ in range(6):
+                    time.sleep(0.14)
+                    if _has_rdp_session_or_connecting(new_pid, target_sess):
+                        conn_started = True
+                        break
+                if conn_started:
+                    break
 
         # Giữ MRD ẩn hoàn toàn (rapp.hide) suốt quá trình hộp thoại Connecting... (540x340) đang bắt tay RDP!
         try:
@@ -9204,7 +9156,7 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
                 time.sleep(extra_wait)
                 _apply_full_mac_window_bounds(new_pid, target_sess)
     finally:
-        _RDP_RECONNECT_UNTIL = time.monotonic() + 1.5
+        _RDP_RECONNECT_UNTIL = time.monotonic() + 5.0
 
 
 def trigger_smart_rdp_multimon_sync(
@@ -9247,7 +9199,7 @@ def trigger_smart_rdp_multimon_sync(
 
                     if need_downgrade:
                         now_d = time.monotonic()
-                        if _LAST_1MON_SYNC_AT > 0.0 and (now_d - _LAST_1MON_SYNC_AT) < 3.5:
+                        if _LAST_1MON_SYNC_AT > 0.0 and (now_d - _LAST_1MON_SYNC_AT) < 12.0:
                             _RDP_CLOSER_DIAG["ax_stage"] = f"debounced:{now_d:.2f}"
                             return
                         _LAST_1MON_SYNC_AT = now_d
@@ -9260,7 +9212,7 @@ def trigger_smart_rdp_multimon_sync(
                             _RDP_CLOSER_DIAG["last_reconnect"] = f"downgraded_1mon:{target_sess}@{time.strftime('%H:%M:%S')}"
                         finally:
                             _LAST_1MON_SYNC_AT = time.monotonic()
-                            _RDP_RECONNECT_UNTIL = time.monotonic() + 2.5
+                            _RDP_RECONNECT_UNTIL = time.monotonic() + 5.0
                     return
 
                 # Khi kết nối màn hình phụ (enable_multimon=True): kiểm tra ngay xem Remote Mac có đang bật không.
@@ -9271,7 +9223,7 @@ def trigger_smart_rdp_multimon_sync(
                     return
 
                 now_m = time.monotonic()
-                if (now_m - _LAST_2MON_SYNC_AT) < 3.5:
+                if (now_m - _LAST_2MON_SYNC_AT) < 12.0:
                     return
                 _LAST_2MON_SYNC_AT = now_m
 
@@ -9288,7 +9240,7 @@ def trigger_smart_rdp_multimon_sync(
                 if not sess:
                     _RDP_CLOSER_DIAG["last_reconnect"] = f"skip_2mon_closed@{time.strftime('%H:%M:%S')}"
                     return
-                if has_vdisp and not _bookmark_needs_retina_or_dyn_repair(bookmarks):
+                if has_vdisp:
                     _RDP_CLOSER_DIAG["last_reconnect"] = f"already_2mon@{time.strftime('%H:%M:%S')}"
                     return
 
@@ -9299,7 +9251,7 @@ def trigger_smart_rdp_multimon_sync(
                     _RDP_CLOSER_DIAG["last_reconnect"] = f"upgraded_2mon:{target_sess}@{time.strftime('%H:%M:%S')}"
                 finally:
                     _LAST_2MON_SYNC_AT = time.monotonic()
-                    _RDP_RECONNECT_UNTIL = time.monotonic() + 2.5
+                    _RDP_RECONNECT_UNTIL = time.monotonic() + 5.0
         except Exception as w_exc:
             _RDP_CLOSER_DIAG["last_err"] = f"smart_worker:{repr(w_exc)[:140]}"
 
@@ -9546,20 +9498,15 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                     continue
 
                 # Nếu người dùng VỪA CHỦ ĐỘNG MỞ Remote Mac lên trong khi màn hình phụ điện thoại đang kết nối sẵn ->
-                # tự động nâng cấp phiên Remote vừa mở sang 2 màn hình để đẩy sang màn phụ!
-                if pending_open_topo_sync and (now_m - session_first_seen_at) >= 0.60:
+                # tự động nâng cấp phiên Remote vừa mở sang 2 màn hình để đẩy sang màn phụ (CHỈ 1 lần, không lặp)!
+                if pending_open_topo_sync and (now_m - session_first_seen_at) >= 0.70:
                     pending_open_topo_sync = False
-                    if now_m >= _MANUAL_WINDOWED_OPEN_UNTIL:
+                    if now_m >= _MANUAL_WINDOWED_OPEN_UNTIL and (now_m - _LAST_2MON_SYNC_AT) >= 12.0:
                         has_sec_open = (_get_secondary_mac_display_bounds(q) is not None)
                         _, live_sess_o, live_vd_o = _rdp_probe_vdisp_state()
                         if has_sec_open and live_sess_o and not live_vd_o:
                             trigger_smart_rdp_multimon_sync(enable_multimon=True, upgrade_running=True)
                             continue
-                        elif not has_sec_open and live_sess_o and not repaired_3024_once:
-                            repaired_3024_once = True
-                            if _bookmark_needs_retina_or_dyn_repair(_list_mrd_bookmarks()):
-                                trigger_smart_rdp_multimon_sync(enable_multimon=False, repair_clamped=True)
-                                continue
 
                 want_check_close = (
                     (all_has_launcher or all_has_unnamed_big)
@@ -9578,11 +9525,8 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                         )
                     )
                 )
-                want_check_fit = (
-                    front_pid == rdp_pid
-                    and on_screen_session_main
-                    and (now_m - last_fit_try_at) >= 3.0
-                )
+                # Giữ nguyên 100% tùy chọn Fit/tỉ lệ người dùng đã tự cài trong Remote Desktop
+                want_check_fit = False
                 want_check_fs_state = (
                     on_screen_session_main
                     and (now_m - last_fs_poll_at) >= 0.55

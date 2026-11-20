@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.75";
+  const BUNDLED_BOOT_VER = "2.3.79";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -4480,7 +4480,8 @@
     const want = typeof forceState === "boolean" ? forceState : !macExtDisplayActive;
     // Cho phép TẮT ngay lập tức kể cả khi đang kết nối dở, tránh để lại màn ảo mồ côi trên MacBook
     if (want && macExtDisplayBusy) return;
-    const macBase = resolveMacHttpBase();
+    const macBases = resolveTrueMacHttpBases();
+    let macBase = macBases[0] || resolveMacHttpBase();
     macExtDisplayBusy = true;
     syncMacExtDisplayUI();
     closeAllRemoteSubMenus();
@@ -4501,24 +4502,43 @@
     }
 
     try {
-      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-      const timer = ctrl ? setTimeout(() => ctrl.abort(), 16000) : null;
       let resData = null;
-      try {
-        const res = await fetch(`${macBase}/mac-virtual-display/toggle`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            enable: want,
-            logical_w: 1798,
-            logical_h: 864,
-            hidpi: true,
-          }),
-          signal: ctrl ? ctrl.signal : undefined,
-        });
-        resData = await res.json();
-      } finally {
-        if (timer) clearTimeout(timer);
+      let lastFetchErr = null;
+      for (let attempt = 0; attempt < 2 && !resData; attempt += 1) {
+        if (attempt > 0) {
+          await new Promise((r) => setTimeout(r, 280));
+        }
+        for (const candBase of macBases) {
+          const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+          const timer = ctrl ? setTimeout(() => ctrl.abort(), 16000) : null;
+          try {
+            const res = await fetch(`${candBase}/mac-virtual-display/toggle`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                enable: want,
+                logical_w: 1798,
+                logical_h: 864,
+                hidpi: true,
+              }),
+              signal: ctrl ? ctrl.signal : undefined,
+            });
+            if (!res.ok) {
+              lastFetchErr = new Error(`HTTP ${res.status}`);
+              continue;
+            }
+            resData = await res.json();
+            macBase = candBase;
+            break;
+          } catch (eCand) {
+            lastFetchErr = eCand;
+          } finally {
+            if (timer) clearTimeout(timer);
+          }
+        }
+      }
+      if (!resData) {
+        throw lastFetchErr || new Error("Failed to fetch");
       }
 
       if (want) {
@@ -5829,7 +5849,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.75";
+  const BUNDLED_WEB_VERSION = "2.3.79";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
