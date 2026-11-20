@@ -6623,10 +6623,15 @@ def _ax_update_bookmark_display_mode(
                         def _ensure_pcs_tab(el_t: Any, depth_t: int) -> None:
                             if not el_t or depth_t > 12:
                                 return
-                            if _gs(el_t, s_role).strip() == "AXRadioButton" and _gs(el_t, s_title).strip().lower() == "pcs":
-                                if _gi(el_t, s_val) == 0 and _gb(el_t, s_enabled):
-                                    _ax_press_fast(el_t, 0.45)
-                                return
+                            if _gs(el_t, s_role).strip() == "AXRadioButton":
+                                lbl_t = (_gs(el_t, s_title) or _gs(el_t, s_desc)).strip().lower()
+                                if lbl_t == "pcs":
+                                    if _gi(el_t, s_val) == 0 and _gb(el_t, s_enabled):
+                                        _ax_press_fast(el_t, 0.45)
+                                        rc_pt = _grect(el_t)
+                                        if rc_pt and _gi(el_t, s_val) == 0:
+                                            _cg_click_once(rc_pt[0] + rc_pt[2] * 0.5, rc_pt[1] + rc_pt[3] * 0.5)
+                                    return
                             ch_t = ctypes.c_void_p()
                             if ax.AXUIElementCopyAttributeValue(el_t, s_children, ctypes.byref(ch_t)) == 0 and ch_t.value:
                                 try:
@@ -6636,6 +6641,7 @@ def _ax_update_bookmark_display_mode(
                                     cf.CFRelease(ch_t.value)
 
                         _ensure_pcs_tab(wel, 0)
+                        time.sleep(0.10)
             finally:
                 cf.CFRelease(w_cc.value)
         if exited_cc_fs:
