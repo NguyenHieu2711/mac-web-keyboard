@@ -32,6 +32,7 @@ namespace MacWebKeyboard
         private const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
         private const uint MOUSEEVENTF_WHEEL = 0x0800;
         private const uint MOUSEEVENTF_HWHEEL = 0x1000;
+        private const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
         private const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
 
         private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
@@ -65,6 +66,25 @@ namespace MacWebKeyboard
 
         [DllImport("user32.dll")]
         private static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetCursorPos(out POINT lpPoint);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetCursorPos(int X, int Y);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT
+        {
+            public int X;
+            public int Y;
+        }
+
+        private static readonly object _secCursorLock = new object();
+        private static POINT _savedPriCursor;
+        private static bool _hasSavedPriCursor = false;
+        private static bool _secBtnHeld = false;
+        private static long _lastSecWheelTick = 0;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct INPUT
@@ -353,10 +373,71 @@ namespace MacWebKeyboard
             }
         }
 
-        private static void SendMouseEvent(double rx, double ry, uint flags, uint mouseData)
+        private static bool TryGetSecondaryScreenBounds(out Rectangle secBounds)
         {
-            int ax = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, rx)) * 65535.0);
-            int ay = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, ry)) * 65535.0);
+            foreach (Screen s in Screen.AllScreens)
+            {
+                if (!s.Primary && s.Bounds.Width >= 200 && s.Bounds.Height >= 200)
+                {
+                    secBounds = s.Bounds;
+                    return true;
+                }
+            }
+            secBounds = Rectangle.Empty;
+            return false;
+        }
+
+        private static void SavePrimaryCursorIfOutside(Rectangle sb)
+        {
+            lock (_secCursorLock)
+            {
+                if (_hasSavedPriCursor) return;
+                POINT cp;
+                if (GetCursorPos(out cp) && !sb.Contains(cp.X, cp.Y))
+                {
+                    _savedPriCursor = cp;
+                    _hasSavedPriCursor = true;
+                }
+            }
+        }
+
+        private static void RestorePrimaryCursorNow()
+        {
+            lock (_secCursorLock)
+            {
+                if (!_hasSavedPriCursor) return;
+                POINT p = _savedPriCursor;
+                _hasSavedPriCursor = false;
+                try { SetCursorPos(p.X, p.Y); } catch { }
+            }
+        }
+
+        private static void SendMouseEvent(double rx, double ry, uint flags, uint mouseData, bool isSecondary = false)
+        {
+            int ax;
+            int ay;
+            Rectangle sb;
+            if (isSecondary && TryGetSecondaryScreenBounds(out sb))
+            {
+                SavePrimaryCursorIfOutside(sb);
+                double px = sb.Left + Math.Max(0.0, Math.Min(1.0, rx)) * Math.Max(1, sb.Width - 1);
+                double py = sb.Top + Math.Max(0.0, Math.Min(1.0, ry)) * Math.Max(1, sb.Height - 1);
+                int vx = GetSystemMetrics(76);
+                int vy = GetSystemMetrics(77);
+                int vw = Math.Max(1, GetSystemMetrics(78));
+                int vh = Math.Max(1, GetSystemMetrics(79));
+                ax = (int)Math.Round(((px - vx) * 65535.0) / Math.Max(1, vw - 1));
+                ay = (int)Math.Round(((py - vy) * 65535.0) / Math.Max(1, vh - 1));
+                if ((flags & MOUSEEVENTF_ABSOLUTE) != 0)
+                {
+                    flags |= MOUSEEVENTF_VIRTUALDESK;
+                }
+            }
+            else
+            {
+                ax = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, rx)) * 65535.0);
+                ay = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, ry)) * 65535.0);
+            }
             var inp = new INPUT
             {
                 type = INPUT_MOUSE,
@@ -466,11 +547,12 @@ namespace MacWebKeyboard
         {
             if (string.IsNullOrWhiteSpace(json)) return;
             string mtype = ExtractJsonString(json, "type");
+            bool isSec = (ExtractJsonString(json, "mon") == "sec");
             if (mtype == "ptr_move")
             {
                 double rx = ExtractJsonDouble(json, "rx", 0.5);
                 double ry = ExtractJsonDouble(json, "ry", 0.5);
-                SendMouseEvent(rx, ry, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0);
+                SendMouseEvent(rx, ry, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, isSec);
             }
             else if (mtype == "ptr_down" || mtype == "ptr_up")
             {
@@ -478,11 +560,17 @@ namespace MacWebKeyboard
                 double ry = ExtractJsonDouble(json, "ry", 0.5);
                 int btn = ExtractJsonInt(json, "btn", 0);
                 bool isDown = (mtype == "ptr_down");
+                if (isSec) _secBtnHeld = isDown;
                 uint btnFlag;
                 if (btn == 2) btnFlag = isDown ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
                 else if (btn == 1) btnFlag = isDown ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
                 else btnFlag = isDown ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
-                SendMouseEvent(rx, ry, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | btnFlag, 0);
+                SendMouseEvent(rx, ry, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | btnFlag, 0, isSec);
+                if (isSec && !isDown)
+                {
+                    Thread.Sleep(15);
+                    RestorePrimaryCursorNow();
+                }
             }
             else if (mtype == "ptr_wheel")
             {
@@ -490,11 +578,15 @@ namespace MacWebKeyboard
                 double ry = ExtractJsonDouble(json, "ry", 0.5);
                 double dx = ExtractJsonDouble(json, "dx", 0.0);
                 double dy = ExtractJsonDouble(json, "dy", 0.0);
-                SendMouseEvent(rx, ry, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0);
+                SendMouseEvent(rx, ry, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, isSec);
                 int wy = (int)Math.Round(dy * 3.0);
                 int wx = (int)Math.Round(-dx * 3.0);
-                if (wy != 0) SendMouseEvent(rx, ry, MOUSEEVENTF_WHEEL, unchecked((uint)wy));
-                if (wx != 0) SendMouseEvent(rx, ry, MOUSEEVENTF_HWHEEL, unchecked((uint)wx));
+                if (wy != 0) SendMouseEvent(rx, ry, MOUSEEVENTF_WHEEL, unchecked((uint)wy), isSec);
+                if (wx != 0) SendMouseEvent(rx, ry, MOUSEEVENTF_HWHEEL, unchecked((uint)wx), isSec);
+                if (isSec)
+                {
+                    lock (_secCursorLock) { _lastSecWheelTick = Environment.TickCount; }
+                }
             }
             else if (mtype == "key_tap")
             {
@@ -569,6 +661,16 @@ namespace MacWebKeyboard
                         byte[] rb = Encoding.UTF8.GetBytes(reply);
                         ns.Write(rb, 0, rb.Length);
                         ns.Flush();
+                        return;
+                    }
+
+                    if (cmd == "INPUT")
+                    {
+                        string line;
+                        while ((line = reader.ReadLine()) != null)
+                        {
+                            try { DispatchInputJson(line); } catch { }
+                        }
                         return;
                     }
 
@@ -673,6 +775,27 @@ namespace MacWebKeyboard
             {
                 return 0;
             }
+
+            var restoreWatcher = new Thread(() =>
+            {
+                while (true)
+                {
+                    Thread.Sleep(120);
+                    bool needRestore = false;
+                    lock (_secCursorLock)
+                    {
+                        if (_hasSavedPriCursor && !_secBtnHeld && _lastSecWheelTick != 0 &&
+                            unchecked(Environment.TickCount - _lastSecWheelTick) >= 450)
+                        {
+                            _lastSecWheelTick = 0;
+                            needRestore = true;
+                        }
+                    }
+                    if (needRestore) RestorePrimaryCursorNow();
+                }
+            });
+            restoreWatcher.IsBackground = true;
+            restoreWatcher.Start();
 
             while (true)
             {

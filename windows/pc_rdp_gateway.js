@@ -1208,6 +1208,44 @@ const PREVIEW_HELPER_PORT = Number(process.env.PC_PREVIEW_PORT || 5052);
 const CONSOLE_STREAMER_EXE = path.join(__dirname, 'pc_console_streamer.exe');
 const DISPLAY_LAYOUT_GUARD_EXE = path.join(__dirname, 'pc_display_layout_guard.exe');
 const pcParallelClients = new Set();
+let secInputSock = null;
+let secInputConnecting = false;
+const secInputQueue = [];
+
+function forwardSecInputToStreamer(payloadObj) {
+  if (!payloadObj || typeof payloadObj !== 'object') return;
+  const line = JSON.stringify(payloadObj) + '\n';
+  if (secInputSock && !secInputSock.destroyed && secInputSock.writable) {
+    try {
+      secInputSock.write(line);
+      return;
+    } catch (_) {
+      try { secInputSock.destroy(); } catch (__) {}
+      secInputSock = null;
+    }
+  }
+  if (secInputQueue.length < 64) secInputQueue.push(line);
+  if (secInputConnecting) return;
+  secInputConnecting = true;
+  const sock = net.createConnection({ host: '127.0.0.1', port: PREVIEW_HELPER_PORT });
+  sock.setNoDelay(true);
+  sock.on('connect', () => {
+    secInputConnecting = false;
+    secInputSock = sock;
+    try {
+      sock.write('INPUT\n');
+      while (secInputQueue.length > 0) {
+        sock.write(secInputQueue.shift());
+      }
+    } catch (_) {}
+  });
+  const onDead = () => {
+    secInputConnecting = false;
+    if (secInputSock === sock) secInputSock = null;
+  };
+  sock.on('error', onDead);
+  sock.on('close', onDead);
+}
 
 function tryStartDisplayLayoutGuard() {
   if (!fs.existsSync(DISPLAY_LAYOUT_GUARD_EXE)) return;
@@ -1697,6 +1735,8 @@ function connectOutboundMacBridge() {
           syncWasapiProcess();
         } else if (msg.cmd === 'sync_ime') {
           setWindowsUnikeyMode(Boolean(msg.vn));
+        } else if (msg.cmd === 'sec_input' && msg.payload) {
+          forwardSecInputToStreamer(msg.payload);
         }
       } catch (_) {}
     };

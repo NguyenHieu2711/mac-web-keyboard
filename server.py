@@ -4380,7 +4380,8 @@ def _dispatch_parallel_rdp_input(
             except Exception:
                 pass
             q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
-            q.CGEventPost(q.kCGHIDEventTap, ev)
+            # Post qua kCGAnnotatedSessionEventTap để đi sau CGEventTap của Mos (PID 775), tránh bị Mos đảo ngược chiều cuộn hoặc nuốt xung nhỏ!
+            q.CGEventPost(getattr(q, "kCGAnnotatedSessionEventTap", q.kCGSessionEventTap), ev)
         return
 
     if mtype == "key_tap":
@@ -4922,6 +4923,7 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
         if (now_p - float(state.get("hit_pid_at", 0.0))) < 0.35 and int(state.get("hit_pid", 0)) > 0:
             return int(state["hit_pid"])
         found_pid = 0
+        found_is_mrd = False
         try:
             import objc  # type: ignore
             with objc.autorelease_pool():
@@ -4939,10 +4941,18 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
                     wh = float(wb.get("Height", 0))
                     if ww >= 120.0 and wh >= 80.0 and (wx <= px < wx + ww) and (wy <= py < wy + wh):
                         found_pid = int(w.get("kCGWindowOwnerPID", 0) or 0)
+                        own_l = str(w.get("kCGWindowOwnerName", "") or "").strip().lower()
+                        found_is_mrd = (
+                            "microsoft remote desktop" in own_l
+                            or "windows app" in own_l
+                            or "com.microsoft.rdc" in own_l
+                        )
                         break
         except Exception:
             found_pid = 0
+            found_is_mrd = False
         state["hit_pid"] = found_pid
+        state["hit_is_mrd"] = found_is_mrd
         state["hit_pid_at"] = now_p
         return found_pid
 
@@ -5170,6 +5180,23 @@ async def mac_virtual_display_ws(ws: WebSocket) -> None:
             except Exception:
                 continue
             if cur_bounds:
+                pc_ws = _PC_BRIDGE_WS
+                if pc_ws is not None:
+                    mtype_in = str(data.get("type", ""))
+                    if mtype_in in ("ptr_down", "ptr_wheel") or (time.monotonic() - float(input_state.get("hit_pid_at", 0.0))) >= 0.35:
+                        rx_c = max(0.0, min(1.0, float(data.get("rx", 0.5))))
+                        ry_c = max(0.0, min(1.0, float(data.get("ry", 0.5))))
+                        hx_c = float(cur_bounds["content_x"]) + rx_c * float(cur_bounds["content_w"])
+                        hy_c = float(cur_bounds["content_y"]) + ry_c * float(cur_bounds["content_h"])
+                        await asyncio.to_thread(_resolve_vdisp_top_pid, hx_c, hy_c, cur_bounds, input_state)
+                    if bool(input_state.get("hit_is_mrd", False)):
+                        try:
+                            await pc_ws.send_text(
+                                json.dumps({"cmd": "sec_input", "payload": {**data, "mon": "sec"}})
+                            )
+                            continue
+                        except Exception:
+                            pass
                 await asyncio.to_thread(
                     _dispatch_mac_ext_touch, cur_bounds, data, input_state
                 )
