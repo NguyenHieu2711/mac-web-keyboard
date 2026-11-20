@@ -4600,10 +4600,24 @@ async def mac_virtual_display_diag() -> dict:
                         else:
                             out["mrd_cli_list"] = list_txt[:800]
                         import sqlite3
-                        c_root = Path.home() / "Library/Containers/com.microsoft.rdc.macos/Data/Library/Application Support"
-                        sq_files = [str(p) for p in c_root.rglob("*.sqlite*")] if c_root.exists() else []
+                        search_roots = [
+                            Path.home() / "Library/Group Containers",
+                            Path.home() / "Library/Application Support",
+                            Path.home() / "Library/Containers/com.microsoft.rdc.macos/Data/Library",
+                        ]
+                        sq_files: List[str] = []
+                        for sr_p in search_roots:
+                            if sr_p.exists():
+                                try:
+                                    for p in sr_p.rglob("*rdc*"):
+                                        if p.is_dir():
+                                            sq_files.extend(str(x) for x in p.rglob("*.sqlite*"))
+                                        elif ".sqlite" in p.name:
+                                            sq_files.append(str(p))
+                                except Exception:
+                                    pass
                         sq_main = [p for p in sq_files if p.endswith(".sqlite")]
-                        sq_dump: Dict[str, Any] = {"files": sq_files[:10]}
+                        sq_dump: Dict[str, Any] = {"files": sq_files[:12]}
                         if sq_main:
                             con = sqlite3.connect(f"file:{sq_main[0]}?mode=ro", uri=True, timeout=1.5)
                             con.row_factory = sqlite3.Row
@@ -4612,8 +4626,8 @@ async def mac_virtual_display_diag() -> dict:
                                 sq_dump["tables"] = tbls
                                 for tb in tbls:
                                     cols = [r[1] for r in con.execute(f"PRAGMA table_info('{tb}')").fetchall()]
-                                    if any("WIDTH" in c.upper() or "MULTIMON" in c.upper() or "SCREEN" in c.upper() or "BOOKMARK" in tb.upper() for c in cols + [tb]):
-                                        rows = [dict(r) for r in con.execute(f"SELECT * FROM '{tb}' LIMIT 3").fetchall()]
+                                    if any(k in c.upper() for c in cols + [tb] for k in ("WIDTH", "MULTIMON", "SCREEN", "BOOKMARK", "RESOLUTION")):
+                                        rows = [dict(r) for r in con.execute(f"SELECT * FROM '{tb}' LIMIT 5").fetchall()]
                                         clean_rows = [{k: (v if not isinstance(v, bytes) else f"<bytes:{len(v)}>") for k, v in rw.items()} for rw in rows]
                                         sq_dump[tb] = {"cols": cols, "rows": clean_rows}
                             finally:
