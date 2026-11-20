@@ -9025,10 +9025,11 @@ def _close_cc_silently_while_hidden(target_pid: int) -> None:
                 cf.CFRelease(k_r)
 
 
-def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
+def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str, reload_only: bool = False) -> None:
     """Chuyển đổi 1 màn <-> 2 màn CHẠY NGẦM 100%:
     - Giấu toàn bộ bảng Connection Center, Edit PC và hộp thoại Connecting... (540x340) ở chế độ ẩn nền.
-    - CHỈ hiện duy nhất cửa sổ Remote Mac (PC Hieu) lên màn hình SAU KHI đã kết nối xong và căn chuẩn kích thước!"""
+    - Khi reload_only=True: CHỈ đóng phiên cũ và kết nối lại (reload), tuyệt đối không mở Edit PC, giữ nguyên 100% cài đặt Full-Screen / Use all monitors của người dùng!
+    - CHỈ hiện duy nhất cửa sổ Remote Mac (PC Hieu) lên màn hình SAU KHI đã kết nối xong!"""
     global _LAST_DOWNGRADED_1MON_PID, _RESTORE_1MON_BOUNDS_UNTIL, _RDP_RECONNECT_UNTIL
     import AppKit  # type: ignore
     import objc  # type: ignore
@@ -9045,8 +9046,8 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
 
     try:
         bmks_fast = _list_mrd_bookmarks()
-        # Nếu cấu hình bookmark ĐÃ KHỚP SẴN chế độ đích (VD: 3024x1832 + Fit to Window = ON ở 1 màn) -> BỎ QUA 100% Edit PC & Preferences, chỉ đóng phiên cũ và kết nối thẳng!
-        if _bookmark_already_matches(bmks_fast, want_multimon=enable_multimon):
+        # Nếu reload_only=True hoặc bookmark ĐÃ KHỚP SẴN -> BỎ QUA 100% Edit PC, chỉ đóng phiên cũ và kết nối lại thẳng!
+        if reload_only or _bookmark_already_matches(bmks_fast, want_multimon=enable_multimon):
             live_pids_f = _find_live_mrd_pids()
             if not live_pids_f:
                 _, app_nm_c = _get_mrd_cli_info()
@@ -9070,7 +9071,7 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
             )
         if new_pid <= 0:
             return
-        if not enable_multimon:
+        if not enable_multimon and not reload_only:
             _LAST_DOWNGRADED_1MON_PID = new_pid
         else:
             _LAST_DOWNGRADED_1MON_PID = 0
@@ -9126,9 +9127,9 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
                 pass
             time.sleep(0.08)
 
-        # Trong khi MRD vẫn đang ẩn: đóng sạch Connection Center + ép sẵn kích thước cửa sổ 1512x944 trước khi hiện lên màn hình!
+        # Trong khi MRD vẫn đang ẩn: đóng sạch Connection Center; chỉ căn kích thước cửa sổ thường khi KHÔNG phải reload_only (giữ Full-Screen)
         _close_cc_silently_while_hidden(new_pid)
-        if not enable_multimon:
+        if not enable_multimon and not reload_only:
             _RESTORE_1MON_BOUNDS_UNTIL = time.monotonic() + 12.0
             if sess_ready:
                 time.sleep(0.14)
@@ -9151,7 +9152,7 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
         _close_cc_silently_while_hidden(new_pid)
         _RDP_CLOSER_DIAG["stealth_reveal"] = f"ready={int(sess_ready)},ticks={ready_tick},sz={int(fin_w)}x{int(fin_h)}"
 
-        if not enable_multimon:
+        if not enable_multimon and not reload_only:
             for extra_wait in (0.12, 0.45, 0.85):
                 time.sleep(extra_wait)
                 _apply_full_mac_window_bounds(new_pid, target_sess)
@@ -9166,9 +9167,8 @@ def trigger_smart_rdp_multimon_sync(
     repair_clamped: bool = False,
 ) -> None:
     """Điều phối thông minh 1 màn <-> 2 màn theo topology màn hình thật của MacBook (KHÔNG cần bật Full-Screen trước):
-    - Chỉ 1 màn hình MacBook: Remote Desktop chạy bình thường ở mọi cỡ cửa sổ (giữ Retina + Dynamic Display).
-    - Kết nối điện thoại làm màn phụ (1 -> 2 màn): nếu Remote đang mở ở MacBook (bất kỳ cỡ cửa sổ nào), tự động tắt đi mở lại (reload) sang 2 màn để đẩy Obsidian sang điện thoại.
-    - Ngắt màn phụ điện thoại (2 -> 1 màn): tự động reload phiên về lại 1 cửa sổ MacBook chuẩn Retina."""
+    - Kết nối điện thoại làm màn phụ (1 -> 2 màn): nếu Remote đang mở ở MacBook, tự động reload sang 2 màn để đẩy sang điện thoại.
+    - Ngắt màn phụ điện thoại (2 -> 1 màn): nếu Remote đang mở, CHỈ reload lại phiên (giữ nguyên Full-Screen và toàn bộ cài đặt, dồn tất cả tab về lại MacBook)."""
     if not IS_MACOS:
         return
 
@@ -9187,14 +9187,9 @@ def trigger_smart_rdp_multimon_sync(
                     if not sess:
                         _RDP_CLOSER_DIAG["worker_trace"] += "|idle_no_sess_1mon"
                         return
-                    # Nếu phiên ĐÃ ở 1 màn hình và cấu hình bookmark đã chuẩn 1 màn -> TUYỆT ĐỐI KHÔNG tắt đi mở lại!
-                    if not was_2mon_now and _bookmark_already_matches(bookmarks, want_multimon=False):
-                        _RDP_CLOSER_DIAG["worker_trace"] += "|already_1mon_noop"
-                        return
-                    need_downgrade = bool(downgrade_running and was_2mon_now)
-                    if not need_downgrade and repair_clamped:
-                        if _bookmark_needs_retina_or_dyn_repair(bookmarks):
-                            need_downgrade = True
+                    # Khi vừa ngắt màn hình phụ điện thoại (downgrade_running=True) và Remote Mac đang mở:
+                    # CHỈ reload lại đúng 1 lần (reload_only=True), KHÔNG mở Edit PC, KHÔNG tắt Full-Screen -> tất cả tab tự dồn về 1 màn MacBook!
+                    need_downgrade = bool(downgrade_running)
                     _RDP_CLOSER_DIAG["worker_trace"] += f"|rpid={rpid},sess={len(sess)},w2={int(was_2mon_now)},nd={int(need_downgrade)}"
 
                     if need_downgrade:
@@ -9205,11 +9200,11 @@ def trigger_smart_rdp_multimon_sync(
                         _LAST_1MON_SYNC_AT = now_d
                         target_sess = sess[0] if sess else default_title
                         _RDP_RECONNECT_UNTIL = time.monotonic() + 14.0
-                        _RDP_CLOSER_DIAG["ax_stage"] = f"calling_restart:{target_sess}"
+                        _RDP_CLOSER_DIAG["ax_stage"] = f"calling_reload_1mon:{target_sess}"
                         try:
                             time.sleep(0.25)
-                            _restart_mrd_and_connect(enable_multimon=False, target_sess=target_sess)
-                            _RDP_CLOSER_DIAG["last_reconnect"] = f"downgraded_1mon:{target_sess}@{time.strftime('%H:%M:%S')}"
+                            _restart_mrd_and_connect(enable_multimon=False, target_sess=target_sess, reload_only=True)
+                            _RDP_CLOSER_DIAG["last_reconnect"] = f"reloaded_1mon_fs:{target_sess}@{time.strftime('%H:%M:%S')}"
                         finally:
                             _LAST_1MON_SYNC_AT = time.monotonic()
                             _RDP_RECONNECT_UNTIL = time.monotonic() + 5.0
