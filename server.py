@@ -6231,6 +6231,10 @@ def _ax_update_bookmark_display_mode(
         return 0
 
     try:
+        subprocess.Popen(["caffeinate", "-u", "-t", "6"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    try:
         with objc.autorelease_pool():
             rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
             if rapp is not None:
@@ -6243,6 +6247,12 @@ def _ax_update_bookmark_display_mode(
     app_ax = ax.AXUIElementCreateApplication(rdp_pid)
     if not app_ax:
         return rdp_pid
+    try:
+        ax.AXUIElementSetMessagingTimeout.argtypes = [ctypes.c_void_p, ctypes.c_float]
+        ax.AXUIElementSetMessagingTimeout.restype = ctypes.c_int32
+        ax.AXUIElementSetMessagingTimeout(app_ax, ctypes.c_float(0.75))
+    except Exception:
+        pass
 
     s_wins = _cfstr("AXWindows")
     s_role = _cfstr("AXRole")
@@ -6368,9 +6378,107 @@ def _ax_update_bookmark_display_mode(
         if oev is not None:
             orig_pt = q.CGEventGetLocation(oev)
 
+    def _ax_press_fast(target_el: Any, timeout_s: float = 0.65) -> int:
+        if not target_el:
+            return -1
+        try:
+            ax.AXUIElementSetMessagingTimeout(target_el, ctypes.c_float(timeout_s))
+        except Exception:
+            pass
+        return int(ax.AXUIElementPerformAction(target_el, s_press))
+
+    def _has_small_modal_dialog() -> Optional[Tuple[float, float, float, float]]:
+        if q is None:
+            return None
+        try:
+            with objc.autorelease_pool():
+                wl_m = q.CGWindowListCopyWindowInfo(
+                    q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements,
+                    q.kCGNullWindowID,
+                ) or []
+                for wm in wl_m:
+                    if int(wm.get("kCGWindowOwnerPID", 0) or 0) != rdp_pid:
+                        continue
+                    if int(wm.get("kCGWindowLayer", -1)) != 0:
+                        continue
+                    if not bool(wm.get("kCGWindowIsOnscreen", False)):
+                        continue
+                    wbm = wm.get("kCGWindowBounds") or {}
+                    mw_d = float(wbm.get("Width", 0.0))
+                    mh_d = float(wbm.get("Height", 0.0))
+                    mn_d = str(wm.get("kCGWindowName", "") or "").strip().lower()
+                    if 160.0 <= mw_d <= 500.0 and 100.0 <= mh_d <= 400.0 and mn_d not in ("preferences", "settings", "connection center"):
+                        return (float(wbm.get("X", 0.0)), float(wbm.get("Y", 0.0)), mw_d, mh_d)
+        except Exception:
+            pass
+        return None
+
+    def _dismiss_disconnect_modal() -> bool:
+        hit_m = [False]
+
+        def _walk_modal_btn(el: Any, depth: int) -> None:
+            if not el or depth > 14 or hit_m[0]:
+                return
+            try:
+                ax.AXUIElementSetMessagingTimeout(el, ctypes.c_float(0.50))
+            except Exception:
+                pass
+            if _gs(el, s_role).strip() == "AXButton" and _gb(el, s_enabled):
+                bt_m = _gs(el, s_title).strip().lower()
+                if bt_m in ("disconnect", "continue", "close", "ok", "yes", "ngắt kết nối", "tiếp tục", "đóng"):
+                    if _ax_press_fast(el, 0.55) == 0:
+                        hit_m[0] = True
+                        return
+            ch = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                try:
+                    for ci in range(min(cf.CFArrayGetCount(ch.value), 60)):
+                        _walk_modal_btn(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                        if hit_m[0]:
+                            break
+                finally:
+                    cf.CFRelease(ch.value)
+
+        wm_arr = ctypes.c_void_p()
+        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wm_arr)) == 0 and wm_arr.value:
+            try:
+                for wi in range(cf.CFArrayGetCount(wm_arr.value)):
+                    wel_m = cf.CFArrayGetValueAtIndex(wm_arr.value, wi)
+                    if not wel_m:
+                        continue
+                    rc_m = _grect(wel_m)
+                    if rc_m and rc_m[2] <= 520.0 and rc_m[3] <= 420.0:
+                        _walk_modal_btn(wel_m, 0)
+                    elif _gs(wel_m, s_subrole).strip() in ("AXDialog", "AXSystemDialog"):
+                        _walk_modal_btn(wel_m, 0)
+            finally:
+                cf.CFRelease(wm_arr.value)
+        if hit_m[0]:
+            time.sleep(0.25)
+            return True
+        dlg_rc = _has_small_modal_dialog()
+        if dlg_rc is not None and q is not None:
+            kd_r = q.CGEventCreateKeyboardEvent(None, 36, True)
+            ku_r = q.CGEventCreateKeyboardEvent(None, 36, False)
+            q.CGEventSetFlags(kd_r, 0)
+            q.CGEventSetFlags(ku_r, 0)
+            q.CGEventPost(q.kCGHIDEventTap, kd_r)
+            q.CGEventPost(q.kCGHIDEventTap, ku_r)
+            time.sleep(0.25)
+            dlg_rc2 = _has_small_modal_dialog()
+            if dlg_rc2 is not None:
+                dx_m, dy_m, dw_m, dh_m = dlg_rc2
+                _cg_click_once(dx_m + dw_m * 0.5, dy_m + dh_m - 62.0)
+                time.sleep(0.22)
+            return True
+        return False
+
     try:
         t_low = target_title.strip().lower()
-        # 1) Đóng cửa sổ phiên đang mở của target_title (KHÔNG thoát MRD để giữ nguyên phiên/Keychain!)
+        # 0) Dọn hộp thoại xác nhận Disconnect (260x272 NSAlert) nếu đang treo sẵn từ trước!
+        _dismiss_disconnect_modal()
+
+        # 1) Đóng cửa sổ phiên đang mở của target_title (timeout 0.65s chống treo runModal + tự bấm Disconnect!)
         closed_sess = False
         w_arr = ctypes.c_void_p()
         if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_arr)) == 0 and w_arr.value:
@@ -6390,19 +6498,24 @@ def _ax_update_bookmark_display_mode(
                         b_ref = ctypes.c_void_p()
                         if ax.AXUIElementCopyAttributeValue(wel, s_close, ctypes.byref(b_ref)) == 0 and b_ref.value:
                             try:
-                                if ax.AXUIElementPerformAction(b_ref.value, s_press) == 0:
-                                    closed_sess = True
+                                _ax_press_fast(b_ref.value, 0.65)
+                                closed_sess = True
                             finally:
                                 cf.CFRelease(b_ref.value)
             finally:
                 cf.CFRelease(w_arr.value)
-        if not closed_sess:
+        if closed_sess:
+            time.sleep(0.22)
+            _dismiss_disconnect_modal()
+            time.sleep(0.45)
+        else:
             if _click_menu_item(("window", "cửa sổ"), (t_low,)):
                 time.sleep(0.12)
                 if _click_menu_item(("window", "cửa sổ"), ("close", "đóng")):
                     closed_sess = True
-        if closed_sess:
-            time.sleep(0.55)
+                    time.sleep(0.22)
+                    _dismiss_disconnect_modal()
+                    time.sleep(0.45)
 
         # 2) Hiện Connection Center & chọn thẻ PC Hieu
         _click_menu_item(("window", "cửa sổ"), ("connection center",))
@@ -7361,8 +7474,14 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                             b_ref = ctypes.c_void_p()
                             if ax.AXUIElementCopyAttributeValue(wel, s_close, ctypes.byref(b_ref)) == 0 and b_ref.value:
                                 try:
-                                    if ax.AXUIElementPerformAction(b_ref.value, s_press) == 0:
-                                        closed_s = True
+                                    try:
+                                        ax.AXUIElementSetMessagingTimeout.argtypes = [ctypes.c_void_p, ctypes.c_float]
+                                        ax.AXUIElementSetMessagingTimeout.restype = ctypes.c_int32
+                                        ax.AXUIElementSetMessagingTimeout(b_ref.value, ctypes.c_float(0.65))
+                                    except Exception:
+                                        pass
+                                    ax.AXUIElementPerformAction(b_ref.value, s_press)
+                                    closed_s = True
                                 finally:
                                     cf.CFRelease(b_ref.value)
                 finally:
@@ -7371,6 +7490,24 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                 _click_menu_item(("window", "cửa sổ"), target_title.strip().lower())
                 time.sleep(0.12)
                 _click_menu_item(("window", "cửa sổ"), "close")
+                closed_s = True
+            if closed_s and q is not None:
+                time.sleep(0.22)
+                has_dlg_c = False
+                with objc.autorelease_pool():
+                    for wm_c in (q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements, q.kCGNullWindowID) or []):
+                        if int(wm_c.get("kCGWindowOwnerPID", 0) or 0) == rdp_pid and int(wm_c.get("kCGWindowLayer", -1)) == 0 and bool(wm_c.get("kCGWindowIsOnscreen", False)):
+                            wbc = wm_c.get("kCGWindowBounds") or {}
+                            if 160.0 <= float(wbc.get("Width", 0.0)) <= 500.0 and 100.0 <= float(wbc.get("Height", 0.0)) <= 400.0:
+                                has_dlg_c = True
+                                break
+                if has_dlg_c:
+                    kd_c = q.CGEventCreateKeyboardEvent(None, 36, True)
+                    ku_c = q.CGEventCreateKeyboardEvent(None, 36, False)
+                    q.CGEventSetFlags(kd_c, 0)
+                    q.CGEventSetFlags(ku_c, 0)
+                    q.CGEventPost(q.kCGHIDEventTap, kd_c)
+                    q.CGEventPost(q.kCGHIDEventTap, ku_c)
             time.sleep(0.45)
             _click_menu_item(("window", "cửa sổ"), "connection center")
             time.sleep(0.20)
