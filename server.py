@@ -6517,9 +6517,9 @@ def _ax_update_bookmark_display_mode(
                     _dismiss_disconnect_modal()
                     time.sleep(0.45)
 
-        # 2) Hiện Connection Center & chọn thẻ PC Hieu
-        _click_menu_item(("window", "cửa sổ"), ("connection center",))
-        time.sleep(0.18)
+        # 2) Hiện Connection Center & kéo về chính giữa màn chính MacBook (tránh kẹt tọa độ âm x=-1655 của màn phụ cũ!)
+        _click_menu_item(("window", "cửa sổ"), ("connection center", "pcs"))
+        time.sleep(0.20)
         w_cc = ctypes.c_void_p()
         exited_cc_fs = False
         if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_cc)) == 0 and w_cc.value:
@@ -6533,6 +6533,11 @@ def _ax_update_bookmark_display_mode(
                         if _gb(wel, s_fs):
                             ax.AXUIElementSetAttributeValue(wel, s_fs, kFalse)
                             exited_cc_fs = True
+                        pt_cc = _CGPoint(40.0, 60.0)
+                        vp_cc = ax.AXValueCreate(1, ctypes.byref(pt_cc))
+                        if vp_cc:
+                            ax.AXUIElementSetAttributeValue(wel, s_pos, vp_cc)
+                            cf.CFRelease(vp_cc)
                         ax.AXUIElementSetAttributeValue(wel, s_main, kTrue)
                         ax.AXUIElementSetAttributeValue(wel, s_focused, kTrue)
                         ax.AXUIElementPerformAction(wel, s_raise)
@@ -6748,75 +6753,111 @@ def _ax_update_bookmark_display_mode(
                 w_str, h_str = str(want_rw), str(want_rh)
 
                 def _try_pick_resolution_popup() -> Tuple[bool, List[str]]:
-                    pop_opened = [False]
+                    pop_rects: List[Tuple[float, float, float, float]] = []
                     already_has = [False]
                     seen_items: List[str] = []
+                    s_showmenu = _cfstr("AXShowMenu")
 
-                    def _find_res_popup(el: Any, depth: int) -> None:
-                        if not el or depth > 16 or pop_opened[0] or already_has[0]:
+                    def _pick_res_item(el: Any, depth: int, picked_f: List[bool]) -> None:
+                        if not el or depth > 18 or picked_f[0]:
+                            return
+                        rl_i = _gs(el, s_role).strip()
+                        if rl_i == "AXMenuBar":
+                            return
+                        if rl_i == "AXMenuItem":
+                            mt = _gs(el, s_title).strip()
+                            if mt and mt not in seen_items:
+                                seen_items.append(mt)
+                            if w_str in mt and h_str in mt:
+                                if _ax_press_fast(el, 0.45) == 0:
+                                    picked_f[0] = True
+                                    return
+                        ch = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                            try:
+                                nc = cf.CFArrayGetCount(ch.value)
+                                for ci in range(min(nc, 80)):
+                                    _pick_res_item(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1, picked_f)
+                                    if picked_f[0]:
+                                        break
+                            finally:
+                                cf.CFRelease(ch.value)
+
+                    picked = [False]
+
+                    def _find_and_open_res_popup(el: Any, depth: int, mode_click: bool) -> None:
+                        if not el or depth > 16 or picked[0] or already_has[0] or pop_rects:
                             return
                         if _gs(el, s_role).strip() == "AXPopUpButton" and _gb(el, s_enabled):
                             cur_txt = (_gs(el, s_val) + " " + _gs(el, s_title)).strip().lower()
-                            if "bit" not in cur_txt and "color" not in cur_txt and "gateway" not in cur_txt:
+                            if "bit" not in cur_txt and "color" not in cur_txt and "gateway" not in cur_txt and "%" not in cur_txt:
                                 if w_str in cur_txt and h_str in cur_txt:
                                     already_has[0] = True
                                     return
-                                if ax.AXUIElementPerformAction(el, s_press) == 0:
-                                    pop_opened[0] = True
-                                    return
+                                rc_p = _grect(el)
+                                if rc_p:
+                                    pop_rects.append(rc_p)
+                                if not mode_click:
+                                    try:
+                                        ax.AXUIElementSetMessagingTimeout(el, ctypes.c_float(0.35))
+                                    except Exception:
+                                        pass
+                                    if s_showmenu:
+                                        ax.AXUIElementPerformAction(el, s_showmenu)
+                                    ax.AXUIElementPerformAction(el, s_press)
+                                else:
+                                    if rc_p:
+                                        _cg_click_once(rc_p[0] + rc_p[2] * 0.5, rc_p[1] + rc_p[3] * 0.5)
+                                time.sleep(0.18)
+                                _pick_res_item(el, 0, picked)
+                                return
                         ch = ctypes.c_void_p()
                         if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
                             try:
                                 nc = cf.CFArrayGetCount(ch.value)
                                 for ci in range(min(nc, 80)):
-                                    _find_res_popup(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
-                                    if pop_opened[0] or already_has[0]:
+                                    _find_and_open_res_popup(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1, mode_click)
+                                    if picked[0] or already_has[0] or pop_rects:
                                         break
                             finally:
                                 cf.CFRelease(ch.value)
 
-                    wp_w = ctypes.c_void_p()
-                    if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_w)) == 0 and wp_w.value:
-                        try:
-                            for wi in range(cf.CFArrayGetCount(wp_w.value)):
-                                _find_res_popup(cf.CFArrayGetValueAtIndex(wp_w.value, wi), 0)
-                        finally:
-                            cf.CFRelease(wp_w.value)
-                    if already_has[0]:
-                        return True, ["already"]
-                    if not pop_opened[0]:
-                        return False, ["no_popup"]
-
-                    time.sleep(0.15)
-                    picked = [False]
-
-                    def _pick_res_item(el: Any, depth: int) -> None:
-                        if not el or depth > 18 or picked[0]:
-                            return
-                        if _gs(el, s_role).strip() == "AXMenuItem":
-                            mt = _gs(el, s_title).strip()
-                            if mt:
-                                seen_items.append(mt)
-                            if w_str in mt and h_str in mt:
-                                if ax.AXUIElementPerformAction(el, s_press) == 0:
-                                    picked[0] = True
-                                    return
-                        ch = ctypes.c_void_p()
-                        if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
-                            try:
-                                nc = cf.CFArrayGetCount(ch.value)
-                                for ci in range(min(nc, 80)):
-                                    _pick_res_item(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
-                                    if picked[0]:
-                                        break
-                            finally:
-                                cf.CFRelease(ch.value)
-
-                    _pick_res_item(app_ax, 0)
-                    if not picked[0]:
-                        injector.press_key("esc")
-                        time.sleep(0.08)
-                    return picked[0], seen_items[-12:]
+                    try:
+                        for try_click in (False, True):
+                            pop_rects.clear()
+                            wp_w = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_w)) == 0 and wp_w.value:
+                                try:
+                                    for wi in range(cf.CFArrayGetCount(wp_w.value)):
+                                        _find_and_open_res_popup(cf.CFArrayGetValueAtIndex(wp_w.value, wi), 0, try_click)
+                                finally:
+                                    cf.CFRelease(wp_w.value)
+                            if already_has[0]:
+                                return True, ["already"]
+                            if not pop_rects:
+                                return False, ["no_popup"]
+                            if not picked[0]:
+                                wp_m = ctypes.c_void_p()
+                                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_m)) == 0 and wp_m.value:
+                                    try:
+                                        for wi in range(cf.CFArrayGetCount(wp_m.value)):
+                                            _pick_res_item(cf.CFArrayGetValueAtIndex(wp_m.value, wi), 0, picked)
+                                    finally:
+                                        cf.CFRelease(wp_m.value)
+                            if picked[0]:
+                                return True, seen_items[-12:]
+                            if q is not None:
+                                esc_d = q.CGEventCreateKeyboardEvent(None, 53, True)
+                                esc_u = q.CGEventCreateKeyboardEvent(None, 53, False)
+                                q.CGEventPost(q.kCGHIDEventTap, esc_d)
+                                q.CGEventPost(q.kCGHIDEventTap, esc_u)
+                                time.sleep(0.10)
+                            if seen_items:
+                                break
+                        return False, seen_items[-12:]
+                    finally:
+                        if s_showmenu:
+                            cf.CFRelease(s_showmenu)
 
                 res_ok, res_items = _try_pick_resolution_popup()
                 if not res_ok:
@@ -6905,6 +6946,11 @@ def _ax_update_bookmark_display_mode(
                             for wi in range(cf.CFArrayGetCount(wp_p.value)):
                                 wel_p = cf.CFArrayGetValueAtIndex(wp_p.value, wi)
                                 if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
+                                    pt_pf = _CGPoint(200.0, 110.0)
+                                    vp_pf = ax.AXValueCreate(1, ctypes.byref(pt_pf))
+                                    if vp_pf:
+                                        ax.AXUIElementSetAttributeValue(wel_p, s_pos, vp_pf)
+                                        cf.CFRelease(vp_pf)
                                     ax.AXUIElementSetAttributeValue(wel_p, s_main, kTrue)
                                     ax.AXUIElementSetAttributeValue(wel_p, s_focused, kTrue)
                                     ax.AXUIElementPerformAction(wel_p, s_raise)
@@ -6993,6 +7039,7 @@ def _ax_update_bookmark_display_mode(
                             cf.CFRelease(wp_tf.value)
                     tf_rects.sort(key=lambda r: (round(r[1] / 24.0), r[0]))
                     confirmed_add = [False]
+                    pref_btns: List[str] = []
                     if len(tf_rects) >= 2:
                         r0, r1 = tf_rects[0], tf_rects[1]
                         _cg_click_once(r0[0] + r0[2] * 0.5, r0[1] + r0[3] * 0.5)
@@ -7001,6 +7048,9 @@ def _ax_update_bookmark_display_mode(
                         for ch_d in w_str:
                             if ch_d in _DIGIT_VK:
                                 _cg_tap_vk(_DIGIT_VK[ch_d])
+                        time.sleep(0.05)
+                        # Bấm Tab (vk=48) để NSNumberFormatter commit giá trị Width ngay lập tức!
+                        _cg_tap_vk(48)
                         time.sleep(0.06)
                         _cg_click_once(r1[0] + r1[2] * 0.5, r1[1] + r1[3] * 0.5)
                         time.sleep(0.06)
@@ -7008,15 +7058,22 @@ def _ax_update_bookmark_display_mode(
                         for ch_d in h_str:
                             if ch_d in _DIGIT_VK:
                                 _cg_tap_vk(_DIGIT_VK[ch_d])
-                        time.sleep(0.08)
+                        time.sleep(0.05)
+                        # Bấm Tab (vk=48) để NSNumberFormatter commit giá trị Height và mở khóa nút Add/Create!
+                        _cg_tap_vk(48)
+                        time.sleep(0.10)
 
                         def _click_confirm_add(el: Any, depth: int) -> None:
                             if not el or depth > 16 or confirmed_add[0]:
                                 return
-                            if _gs(el, s_role).strip() == "AXButton" and _gb(el, s_enabled):
-                                bt_c = _gs(el, s_title).strip().lower()
-                                if bt_c in ("add", "ok", "create", "save", "done", "thêm"):
-                                    if ax.AXUIElementPerformAction(el, s_press) == 0:
+                            if _gs(el, s_role).strip() == "AXButton":
+                                bt_raw = _gs(el, s_title).strip()
+                                bt_c = bt_raw.lower()
+                                en_c = _gb(el, s_enabled)
+                                if bt_raw:
+                                    pref_btns.append(f"{bt_raw}:{int(en_c)}")
+                                if en_c and bt_c in ("add", "ok", "create", "save", "done", "confirm", "apply", "thêm"):
+                                    if _ax_press_fast(el, 0.50) == 0:
                                         confirmed_add[0] = True
                                         return
                             ch = ctypes.c_void_p()
@@ -7041,6 +7098,7 @@ def _ax_update_bookmark_display_mode(
                         if not confirmed_add[0]:
                             _cg_tap_vk(36)
                         time.sleep(0.20)
+                    _RDP_CLOSER_DIAG["pref_btns_seen"] = pref_btns[-10:]
 
                     # Đóng cửa sổ Preferences
                     wp_cl = ctypes.c_void_p()
@@ -7881,12 +7939,17 @@ def trigger_smart_rdp_multimon_sync(
                 if not enable_multimon:
                     rpid, sess, _ = _rdp_probe_vdisp_state()
                     need_downgrade = bool(downgrade_running and sess)
-                    if not need_downgrade and repair_clamped and sess:
+                    reopen_repaired = False
+                    if not need_downgrade and repair_clamped:
                         if _bookmark_needs_retina_or_dyn_repair(bookmarks):
-                            need_downgrade = True
-                    _RDP_CLOSER_DIAG["worker_trace"] += f"|rpid={rpid},sess={len(sess)},nd={int(need_downgrade)}"
+                            if sess:
+                                need_downgrade = True
+                            elif _find_live_mrd_pids() and _USER_1MON_BOUNDS_PATH.exists():
+                                need_downgrade = True
+                                reopen_repaired = True
+                    _RDP_CLOSER_DIAG["worker_trace"] += f"|rpid={rpid},sess={len(sess)},nd={int(need_downgrade)},ro={int(reopen_repaired)}"
 
-                    if need_downgrade and sess:
+                    if need_downgrade and (sess or reopen_repaired):
                         now_d = time.monotonic()
                         if (now_d - _LAST_1MON_SYNC_AT) < 3.5:
                             return
