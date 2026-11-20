@@ -6870,12 +6870,17 @@ def _ax_update_bookmark_display_mode(
                             return
                         if _gs(el, s_role).strip() == "AXPopUpButton" and _gb(el, s_enabled):
                             cur_txt = (_gs(el, s_val) + " " + _gs(el, s_title)).strip().lower()
-                            is_res_pop = (
-                                "default" in cur_txt
-                                or "display" in cur_txt
-                                or bool(re.search(r"\d{3,4}\s*[x\u00d7]\s*\d{3,4}", cur_txt))
+                            bad_pop = (
+                                "bit" in cur_txt
+                                or "color" in cur_txt
+                                or "gateway" in cur_txt
+                                or "%" in cur_txt
+                                or "\\" in cur_txt
+                                or "ask when" in cur_txt
+                                or "add user" in cur_txt
+                                or "never" in cur_txt
                             )
-                            if is_res_pop and "bit" not in cur_txt and "color" not in cur_txt and "gateway" not in cur_txt and "%" not in cur_txt:
+                            if not bad_pop:
                                 if w_str in cur_txt and (h_str in cur_txt or alt_h_str in cur_txt):
                                     already_has[0] = True
                                     return
@@ -7212,6 +7217,12 @@ def _ax_update_bookmark_display_mode(
                                         rcu = _grect(wel_u)
                                         if wtu in _MODAL_RES_TITLES and rcu and rcu[2] <= 540.0 and rcu[3] <= 340.0:
                                             _click_confirm_add(wel_u, 0, True)
+                                    # AXSheet thêm độ phân giải nằm bên trong AXChildren của cửa sổ Preferences!
+                                    if not confirmed_add[0]:
+                                        for wi in range(cf.CFArrayGetCount(wp_cf.value)):
+                                            wel_p = cf.CFArrayGetValueAtIndex(wp_cf.value, wi)
+                                            if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
+                                                _click_confirm_add(wel_p, 0, False)
                                 finally:
                                     cf.CFRelease(wp_cf.value)
                             if confirmed_add[0] or try_h == alt_h_str:
