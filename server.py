@@ -9373,6 +9373,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
         jump_attempt_idx = 0
         prev_had_sessions = False
         pending_open_topo_sync = False
+        repaired_3024_once = False
         prev_sec_disp: Optional[bool] = None
         sec_disp_flip_at: float = 0.0
 
@@ -9554,6 +9555,11 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                         if has_sec_open and live_sess_o and not live_vd_o:
                             trigger_smart_rdp_multimon_sync(enable_multimon=True, upgrade_running=True)
                             continue
+                        elif not has_sec_open and live_sess_o and not repaired_3024_once:
+                            repaired_3024_once = True
+                            if _bookmark_needs_retina_or_dyn_repair(_list_mrd_bookmarks()):
+                                trigger_smart_rdp_multimon_sync(enable_multimon=False, repair_clamped=True)
+                                continue
 
                 want_check_close = (
                     (all_has_launcher or all_has_unnamed_big)
