@@ -6599,7 +6599,12 @@ def _ax_update_bookmark_display_mode(
                     _dismiss_disconnect_modal()
                     time.sleep(0.45)
 
-        # 2) Hiện Connection Center & kéo về chính giữa màn chính MacBook (tránh kẹt tọa độ âm x=-1655 của màn phụ cũ!)
+        # 2) Đưa MRD lên frontmost qua `open -a` (sau khi đóng phiên cũ) & kéo Connection Center về giữa màn chính!
+        try:
+            subprocess.run(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1.5)
+        except Exception:
+            pass
+        time.sleep(0.15)
         _click_menu_item(("window", "cửa sổ"), ("connection center", "pcs"))
         time.sleep(0.20)
         w_cc = ctypes.c_void_p()
@@ -6704,10 +6709,15 @@ def _ax_update_bookmark_display_mode(
             if cands:
                 bx, by, bw, bh = cands[0]
                 cx = bx + bw * 0.5
-                cy = (by - 36.0) if (bh < 32.0 and by > 120.0) else (by + min(32.0, bh * 0.4))
-                _cg_click_once(cx, cy)
-                time.sleep(0.22)
-                opened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc...", "edit"))
+                cy1 = (by - 36.0) if (bh < 32.0 and by > 120.0) else (by + min(32.0, bh * 0.4))
+                cy2 = by + bh * 0.5
+                for cy_try in (cy1, cy2):
+                    _cg_click_once(cx, cy_try)
+                    time.sleep(0.22)
+                    opened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc...", "edit"))
+                    if opened_edit:
+                        break
+                cy = cy1
                 # Dự phòng: Chuột phải trực tiếp lên thẻ PC Hieu -> bấm "Edit" trong menu ngữ cảnh
                 if not opened_edit and q is not None:
                     rd = q.CGEventCreateMouseEvent(None, q.kCGEventRightMouseDown, (cx, cy), q.kCGMouseButtonRight)
