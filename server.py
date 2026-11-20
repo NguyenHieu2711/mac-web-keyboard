@@ -6115,14 +6115,14 @@ def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bo
         has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
         has_fit = bool(re.search(r"smart sizing:i:1", ex_txt, re.IGNORECASE))
         has_bad_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
-        need_exact_res = False
         if _get_secondary_mac_display_bounds(None) is None:
+            # Ở chế độ 1 màn cửa sổ thường: MRD 10.9.10 bắt buộc tắt Optimize for Retina để mở khóa chọn độ phân giải Retina khít 3024x1834 + Fit session to window = ON!
             want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(None)
             alt_rh = want_rh + ((4 - (want_rh % 4)) % 4)
             has_w = bool(re.search(rf"desktopwidth:i:{want_rw}\b", ex_txt, re.IGNORECASE))
             has_h = bool(re.search(rf"desktopheight:i:({want_rh}|{alt_rh})\b", ex_txt, re.IGNORECASE))
-            need_exact_res = not (has_w and has_h)
-        return (not has_retina) or (not has_fit) or has_bad_dyn or need_exact_res
+            return (not has_fit) or has_bad_dyn or (not (has_w and has_h))
+        return (not has_retina) or (not has_fit) or has_bad_dyn
     except Exception:
         return False
 
@@ -6158,8 +6158,7 @@ def _bookmark_already_matches(bookmarks: List[Tuple[str, str]], want_multimon: b
             alt_rh = want_rh + ((4 - (want_rh % 4)) % 4)
             has_w = bool(re.search(rf"desktopwidth:i:{want_rw}\b", ex_txt, re.IGNORECASE))
             has_h = bool(re.search(rf"desktopheight:i:({want_rh}|{alt_rh})\b", ex_txt, re.IGNORECASE))
-            if not (has_w and has_h):
-                return False
+            return has_fit and (not has_bad_dyn) and has_mm and has_sm and has_w and has_h
         return has_retina and has_fit and (not has_bad_dyn) and has_mm and has_sm
     except Exception:
         return False
@@ -6620,6 +6619,23 @@ def _ax_update_bookmark_display_mode(
                         ax.AXUIElementSetAttributeValue(wel, s_main, kTrue)
                         ax.AXUIElementSetAttributeValue(wel, s_focused, kTrue)
                         ax.AXUIElementPerformAction(wel, s_raise)
+
+                        def _ensure_pcs_tab(el_t: Any, depth_t: int) -> None:
+                            if not el_t or depth_t > 12:
+                                return
+                            if _gs(el_t, s_role).strip() == "AXRadioButton" and _gs(el_t, s_title).strip().lower() == "pcs":
+                                if _gi(el_t, s_val) == 0 and _gb(el_t, s_enabled):
+                                    _ax_press_fast(el_t, 0.45)
+                                return
+                            ch_t = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(el_t, s_children, ctypes.byref(ch_t)) == 0 and ch_t.value:
+                                try:
+                                    for ci_t in range(min(cf.CFArrayGetCount(ch_t.value), 60)):
+                                        _ensure_pcs_tab(cf.CFArrayGetValueAtIndex(ch_t.value, ci_t), depth_t + 1)
+                                finally:
+                                    cf.CFRelease(ch_t.value)
+
+                        _ensure_pcs_tab(wel, 0)
             finally:
                 cf.CFRelease(w_cc.value)
         if exited_cc_fs:
@@ -6807,66 +6823,22 @@ def _ax_update_bookmark_display_mode(
                         cf.CFRelease(w_c.value)
                 return toggled[0]
 
-            def _unlock_custom_resolution_mode(want_custom: bool) -> None:
-                disp_ctrls: List[str] = []
-                tab_names = ("general", "display", "devices & audio", "devices and audio", "folders", "hiển thị", "chung")
-
-                def _walk_disp_ctrls(el: Any, depth: int) -> None:
-                    if not el or depth > 16:
-                        return
-                    rl_d = _gs(el, s_role).strip()
-                    if rl_d in ("AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXComboBox"):
-                        tl_d = (_gs(el, s_title) or _gs(el, s_desc)).strip()
-                        vl_d = _gs(el, s_val).strip()
-                        en_d = _gb(el, s_enabled)
-                        disp_ctrls.append(f"{rl_d}:{tl_d}|v={vl_d}|e={int(en_d)}")
-                        tl_low = tl_d.lower()
-                        if rl_d == "AXCheckBox" and "default for this display" in tl_low and en_d:
-                            cv_d = _gi(el, s_val)
-                            want_chk = not want_custom
-                            if bool(cv_d) != bool(want_chk):
-                                _ax_press_fast(el, 0.45)
-                        elif rl_d == "AXRadioButton" and tl_low not in tab_names and en_d:
-                            cv_r = _gi(el, s_val)
-                            is_def_radio = ("default" in tl_low)
-                            if want_custom and (not is_def_radio) and cv_r == 0:
-                                _ax_press_fast(el, 0.45)
-                            elif (not want_custom) and is_def_radio and cv_r == 0:
-                                _ax_press_fast(el, 0.45)
-                    ch = ctypes.c_void_p()
-                    if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
-                        try:
-                            for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
-                                _walk_disp_ctrls(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
-                        finally:
-                            cf.CFRelease(ch.value)
-
-                w_dc = ctypes.c_void_p()
-                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_dc)) == 0 and w_dc.value:
-                    try:
-                        for wi in range(cf.CFArrayGetCount(w_dc.value)):
-                            _walk_disp_ctrls(cf.CFArrayGetValueAtIndex(w_dc.value, wi), 0)
-                    finally:
-                        cf.CFRelease(w_dc.value)
-                _RDP_CLOSER_DIAG["disp_tab_controls"] = disp_ctrls[-18:]
-
-            # Lượt 1: Mở khóa Start session in full screen (khi tắt Use all monitors) & tắt Update session resolution on resize
+            # Lượt 1: Mở khóa Start session in full screen & tắt Update session resolution on resize
             _apply_checkbox_pass([
                 (("use all monitors",), bool(enable_multimon)),
                 (("update session resolution", "on resize"), False),
             ])
             time.sleep(0.10)
-            # Lượt 2: Đặt Start session in full screen & mở khóa Custom Resolution (khi về 1 màn)
+            # Lượt 2: Trên MRD 10.9.10, khi về 1 màn phải TẮT Optimize for Retina displays thì nút chọn Resolution (3024 x 1834) mới được mở khóa (e=1)!
             _apply_checkbox_pass([
                 (("start session in full screen", "in full screen"), bool(enable_multimon)),
+                (("optimize for retina", "retina"), bool(enable_multimon)),
                 (("update session resolution", "on resize"), False),
             ])
-            _unlock_custom_resolution_mode(want_custom=(not enable_multimon))
             time.sleep(0.10)
-            # Lượt 3: Luôn BẬT Fit session to window + Optimize for Retina displays (chống zoom 200% tuyệt đối!)
+            # Lượt 3: Luôn BẬT Fit session to window (scale chuẩn 3024x1834 khít 2x Retina vào khung 1512x917, chống zoom 200% tuyệt đối!)
             _apply_checkbox_pass([
                 (("fit session to window",), True),
-                (("optimize for retina", "retina"), True),
             ])
             _RDP_CLOSER_DIAG["edit_pc_checkboxes"] = cb_logs[-12:]
 
@@ -7351,12 +7323,13 @@ def _ax_update_bookmark_display_mode(
                             (("update session resolution", "on resize"), False),
                         ])
                         time.sleep(0.08)
-                        _unlock_custom_resolution_mode(want_custom=True)
-                        time.sleep(0.08)
                         _apply_checkbox_pass([
                             (("start session in full screen", "in full screen"), False),
+                            (("optimize for retina", "retina"), False),
+                        ])
+                        time.sleep(0.08)
+                        _apply_checkbox_pass([
                             (("fit session to window",), True),
-                            (("optimize for retina", "retina"), True),
                         ])
                         res_ok, res_items = _try_pick_resolution_popup()
                     _RDP_CLOSER_DIAG["pref_res_trace"] = f"pm={int(opened_pref_menu)},tab={int(res_tab_ok[0])},plus={int(plus_ok[0])},tf={tf_cnt},add={int(confirmed_add[0])}"
