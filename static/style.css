@@ -444,9 +444,9 @@ body[data-pad-view="text"] .simple-text-pad {
   position: absolute;
   top: 36px;
   bottom: 8px;
-  right: 5px;
-  width: 26px;
-  z-index: 4;
+  right: 3px;
+  width: 32px;
+  z-index: 6;
   border-radius: 8px;
   background: rgba(11, 16, 25, 0.56);
   border: 1px solid rgba(51, 65, 85, 0.58);

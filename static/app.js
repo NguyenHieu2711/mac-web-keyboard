@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.83";
+  const BUNDLED_BOOT_VER = "2.3.85";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -1674,18 +1674,27 @@
     }
   }
 
+  let unifiedScrollPhaseStarted = false;
+
   function resetUnifiedScrollState() {
     sharedScrollRemX = 0;
     sharedScrollRemY = 0;
+    unifiedScrollPhaseStarted = false;
+  }
+
+  function finishUnifiedScrollPhase() {
+    if (!unifiedScrollPhaseStarted) return;
+    unifiedScrollPhaseStarted = false;
+    sendPayload({ type: "mouse_scroll", dx: 0, dy: 0, phase: 4 });
   }
 
   function computeSmartScrollGain(velPxMs) {
     const absV = Math.abs(velPxMs);
     if (absV <= 0.28) {
-      return 0.22;
+      return 0.55;
     }
     const excess = absV - 0.28;
-    return Math.min(2.9, 0.22 + 1.68 * Math.pow(excess, 1.32));
+    return Math.min(3.2, 0.55 + 1.75 * Math.pow(excess, 1.28));
   }
 
   function emitUnifiedScroll(dx, dy, dtMs = 10) {
@@ -1695,16 +1704,19 @@
     const gainY = computeSmartScrollGain(dy / safeDt);
     sharedScrollRemX += -dx * gainX;
     sharedScrollRemY += -dy * gainY;
-    if (Math.abs(sharedScrollRemX) < 1.2 && Math.abs(sharedScrollRemY) < 1.2) return;
+    if (Math.abs(sharedScrollRemX) < 1.0 && Math.abs(sharedScrollRemY) < 1.0) return;
     const sendX = Math.trunc(sharedScrollRemX);
     const sendY = Math.trunc(sharedScrollRemY);
     if (sendX !== 0 || sendY !== 0) {
       sharedScrollRemX -= sendX;
       sharedScrollRemY -= sendY;
+      const ph = unifiedScrollPhaseStarted ? 2 : 1;
+      unifiedScrollPhaseStarted = true;
       sendPayload({
         type: "mouse_scroll",
         dx: sendX,
         dy: sendY,
+        phase: ph,
       });
     }
   }
@@ -1714,6 +1726,7 @@
     // Kéo chậm đọc từng dòng (<= 0.48 px/ms) -> dừng im tại chỗ, không trôi quán tính
     if (Math.abs(fingerVelPxMs) <= 0.48) {
       savedCoastingVelY = 0;
+      finishUnifiedScrollPhase();
       return;
     }
 
@@ -1752,6 +1765,7 @@
       if (Math.abs(activeCoastingVelY) < 0.055) {
         activeCoastingVelY = 0;
         sharedScrollInertiaRaf = null;
+        unifiedScrollPhaseStarted = false;
         return;
       }
 
@@ -1764,6 +1778,7 @@
             type: "mouse_scroll",
             dx: 0,
             dy: sendY,
+            phase: 8,
           });
         }
       }
@@ -1846,7 +1861,8 @@
             y: t.clientY,
           });
         }
-        tpMaxTouches = Math.max(tpMaxTouches, tpTouches.size);
+        // Reset số ngón tối đa mỗi khi bắt đầu nhịp chạm mới (tránh kẹt tpMaxTouches=2 biến mọi cú chạm 1 ngón thành chuột phải!)
+        tpMaxTouches = isFirstFingerDown ? tpTouches.size : Math.max(tpMaxTouches, tpTouches.size);
         surface.classList.add("is-touching");
 
         // Nếu đang trong nhịp nối kéo 320ms (hết mặt Trackpad nhấc tay đặt lại kéo tiếp như MacBook): giữ nguyên bôi đen!
@@ -2005,6 +2021,9 @@
       }
 
       if (tpTouches.size === 0) {
+        const gestureMaxTouches = tpMaxTouches;
+        const wasTwoFingerScroll = tpWasTwoFingerScrolling;
+        tpMaxTouches = 0;
         cancelLongPressTimer();
         surface.classList.remove("is-touching");
         if (tpWasTwoFingerScrolling) {
@@ -2012,6 +2031,7 @@
           setSharedScrollVisual(false);
           if (performance.now() - tpPrevMoveAt > 65) {
             savedCoastingVelY = 0;
+            finishUnifiedScrollPhase();
           } else {
             startUnifiedScrollInertia(tpTwoFingerScrollVelY);
           }
@@ -2048,9 +2068,9 @@
           return;
         }
         tpBrakedCoasting = false;
-        if (tpTotalMoved < 8 && duration < 260) {
+        if (!wasTwoFingerScroll && tpTotalMoved < 8 && duration < 260) {
           triggerHaptic(8);
-          if (tpMaxTouches >= 2) {
+          if (gestureMaxTouches >= 2) {
             sendPayload({ type: "mouse_click", button: "right", count: 1 });
           } else {
             sendPayload({ type: "mouse_click", button: "left", count: 1 });
@@ -2153,10 +2173,12 @@
             const relY = rect.height > 0 ? (t.clientY - rect.top) / rect.height : 0.5;
             if (relY < 0.3) {
               triggerHaptic(6);
-              sendPayload({ type: "mouse_scroll", dx: 0, dy: 11 });
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: 28, phase: 1 });
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: 0, phase: 4 });
             } else if (relY > 0.7) {
               triggerHaptic(6);
-              sendPayload({ type: "mouse_scroll", dx: 0, dy: -11 });
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: -28, phase: 1 });
+              sendPayload({ type: "mouse_scroll", dx: 0, dy: 0, phase: 4 });
             }
             return;
           }
@@ -2165,6 +2187,7 @@
           // Nếu ngón tay đã giữ dừng yên trước khi nhấc lên (> 65ms không rê tiếp) -> hủy trôi đà
           if (performance.now() - prevAt > 65) {
             savedCoastingVelY = 0;
+            finishUnifiedScrollPhase();
             return;
           }
           startUnifiedScrollInertia(velocityPxMs);
@@ -5853,7 +5876,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.83";
+  const BUNDLED_WEB_VERSION = "2.3.85";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();

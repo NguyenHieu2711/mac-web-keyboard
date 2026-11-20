@@ -1440,19 +1440,31 @@ class KeyboardInjector:
         q.CGEventSetIntegerValueField(ev_u, q.kCGMouseEventClickState, click_state)
         q.CGEventPost(q.kCGHIDEventTap, ev_u)
 
-    def mouse_scroll(self, dx: float, dy: float) -> None:
-        self.last_activity_at = time.monotonic()
+    def mouse_scroll(self, dx: float, dy: float, phase: int = 2) -> None:
+        now_s = time.monotonic()
+        self.last_activity_at = now_s
         if not self._use_quartz:
             try:
-                self._pynput_mouse.scroll(dx / 36.0, dy / 36.0)
+                rem_x = getattr(self, "_win_scroll_rem_x", 0.0) + float(dx) / 14.0
+                rem_y = getattr(self, "_win_scroll_rem_y", 0.0) + float(dy) / 14.0
+                sx = int(rem_x)
+                sy = int(rem_y)
+                self._win_scroll_rem_x = rem_x - sx
+                self._win_scroll_rem_y = rem_y - sy
+                if sx != 0 or sy != 0:
+                    self._pynput_mouse.scroll(sx, sy)
             except Exception:
                 pass
             return
         q = self._quartz
         iy = int(round(dy))
         ix = int(round(dx))
-        if iy == 0 and ix == 0:
+        if iy == 0 and ix == 0 and phase != 4:
             return
+        last_s = float(getattr(self, "_last_scroll_at", 0.0))
+        if phase == 2 and (now_s - last_s) > 0.18:
+            phase = 1
+        self._last_scroll_at = now_s
         ev = q.CGEventCreateScrollWheelEvent(
             self._event_source,
             q.kCGScrollEventUnitPixel,
@@ -1460,15 +1472,21 @@ class KeyboardInjector:
             iy,
             ix,
         )
-        # kCGScrollWheelEventIsContinuous = 88, PointDelta = 96/97, ScrollPhase = 99 (2=Changed):
-        # Giả lập đúng 100% Apple Magic Trackpad gốc để Mos không chặn/nuốt xung cuộn nhỏ và Microsoft Remote Desktop nhận mượt từng pixel!
+        # Đầy đủ chữ ký Apple Magic Trackpad (IsContinuous=88, PointDelta=96/97, ScrollPhase=99, MomentumPhase=123)
+        # + Post qua kCGAnnotatedSessionEventTap để đi sau CGEventTap của Mos (tránh bị Mos nuốt xung cuộn trên Trackpad & thanh cuộn dọc!).
         q.CGEventSetIntegerValueField(ev, 88, 1)
         q.CGEventSetIntegerValueField(ev, 96, iy)
         q.CGEventSetIntegerValueField(ev, 97, ix)
-        q.CGEventSetIntegerValueField(ev, 99, 2)
+        if phase == 8:
+            q.CGEventSetIntegerValueField(ev, 99, 0)
+            q.CGEventSetIntegerValueField(ev, 123, 2)
+        else:
+            q.CGEventSetIntegerValueField(ev, 99, phase if phase in (1, 2, 4) else 2)
+            q.CGEventSetIntegerValueField(ev, 123, 0)
+        q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
         if self.held_modifiers:
             q.CGEventSetFlags(ev, self._compute_quartz_flags())
-        q.CGEventPost(q.kCGHIDEventTap, ev)
+        q.CGEventPost(getattr(q, "kCGAnnotatedSessionEventTap", q.kCGSessionEventTap), ev)
 
 
 class LiveLensCapturer:
@@ -5877,7 +5895,8 @@ async def keyboard_ws(ws: WebSocket) -> None:
             elif msg_type == "mouse_scroll":
                 dx = float(data.get("dx", 0.0))
                 dy = float(data.get("dy", 0.0))
-                injector.mouse_scroll(dx, dy)
+                phase = int(data.get("phase", 2))
+                injector.mouse_scroll(dx, dy, phase=phase)
             elif msg_type == "config":
                 if "vn" in data:
                     injector._commit_telex_word_to_preview()
