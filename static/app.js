@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.64";
+  const BUNDLED_BOOT_VER = "2.3.75";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -3656,6 +3656,52 @@
     return "http://192.168.52.103:5050";
   }
 
+  function resolveTrueMacHttpBases() {
+    const out = [];
+    const pushIf5050 = (rawHost) => {
+      if (!rawHost) return;
+      const clean = String(rawHost).replace(/^https?:\/\/|^wss?:\/\//, "").split("/")[0].trim();
+      if (!clean || clean.endsWith(":5051")) return;
+      const withPort = clean.includes(":") ? clean : `${clean}:5050`;
+      const full = `http://${withPort}`;
+      if (!out.includes(full)) out.push(full);
+    };
+    if (ws && ws.url) {
+      try {
+        const u = new URL(ws.url);
+        pushIf5050(u.host);
+      } catch {
+        // ignore
+      }
+    }
+    for (const c of resolveCandidateHosts()) {
+      pushIf5050(c);
+    }
+    pushIf5050("192.168.52.103:5050");
+    return out;
+  }
+
+  async function triggerOpenMacRdpWindowed() {
+    const bases = resolveTrueMacHttpBases();
+    for (const b of bases) {
+      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), 14000) : null;
+      try {
+        const r = await fetch(`${b}/mac-virtual-display/open-rdp?windowed=1&t=${Date.now()}`, {
+          method: "GET",
+          cache: "no-store",
+          signal: ctrl ? ctrl.signal : undefined,
+        });
+        if (r.ok) return true;
+      } catch {
+        // thử địa chỉ Mac kế tiếp
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    return false;
+  }
+
   function resolvePcHttpBase() {
     const raw = (rdpHostInput ? rdpHostInput.value : "192.168.52.230")
       .trim()
@@ -4107,8 +4153,12 @@
     });
   }
 
-  async function connectRdpSession() {
+  let rdpConnectSeq = 0;
+
+  async function connectRdpSession(opts = {}) {
     if (rdpConnecting || !remoteCanvas) return;
+    const autoOpenMacRdp = Boolean(opts && opts.autoOpenMacRdp);
+    const mySeq = ++rdpConnectSeq;
     rdpManualDisconnect = false;
     ensureRdpAudioContext();
 
@@ -4119,14 +4169,53 @@
     //    Nếu có -> vào thẳng chế độ Song song (⚡ Song song) trong ~0.1s, cả 2 máy cùng chạy không bao giờ đá nhau!
     if (!rdpPreferExclusive) {
       setRdpStatus("Đang kiểm tra kết nối Song song...", true);
-      const parCheck = await checkMacParallelAvailable();
+      let parCheck = await checkMacParallelAvailable();
+      if (mySeq !== rdpConnectSeq || rdpManualDisconnect) return;
       if (parCheck.available) {
         try {
           await startParallelRdpSession(parCheck.macBase);
           return;
         } catch {
-          // Nếu lỗi bất ngờ thì rơi xuống kết nối Native RDP trực tiếp
+          // Nếu lỗi bất ngờ thì xử lý tiếp bên dưới
         }
+      }
+
+      // Khi người dùng bấm chuyển từ "Chỉ Điện thoại" -> "Song song" mà Remote trên MacBook đang tắt:
+      // Tự động mở lại Remote trên MacBook ở chế độ CỬA SỔ BÌNH THƯỜNG (ngầm 100%, không bật Full-Screen) rồi nối vào Song song!
+      if (autoOpenMacRdp) {
+        setRdpStatus("Đang tự mở Remote trên MacBook (cửa sổ thường)...", true);
+        await new Promise((r) => setTimeout(r, 180));
+        if (mySeq !== rdpConnectSeq || rdpManualDisconnect) return;
+        let launchDone = false;
+        let launchOk = false;
+        void triggerOpenMacRdpWindowed().then((ok) => {
+          launchOk = Boolean(ok);
+          launchDone = true;
+        });
+
+        for (let i = 0; i < 42; i += 1) {
+          await new Promise((r) => setTimeout(r, 340));
+          if (mySeq !== rdpConnectSeq || rdpManualDisconnect || rdpPreferExclusive) {
+            return;
+          }
+          parCheck = await checkMacParallelAvailable();
+          if (parCheck.available) {
+            try {
+              await startParallelRdpSession(parCheck.macBase);
+              return;
+            } catch {
+              // chờ nhịp kế tiếp
+            }
+          }
+          if (launchDone && !launchOk && i >= 6) {
+            break;
+          }
+        }
+
+        rdpConnecting = false;
+        syncRdpConnectionUI();
+        setRdpStatus("Chưa mở được Remote trên MacBook (kiểm tra MacBook đang bật).", false);
+        return;
       }
     }
 
@@ -5400,6 +5489,8 @@
     } else {
       rdpPreferExclusive = !rdpPreferExclusive;
     }
+    const wantAutoOpenMacRdp = !rdpPreferExclusive;
+    rdpConnectSeq += 1;
     syncCoexistButtonUI();
     syncSmartKvmButtonsUI();
     closeParallelRdpWs();
@@ -5415,7 +5506,7 @@
     rdpActiveEngine = "none";
     rdpConnecting = false;
     syncRdpConnectionUI();
-    void connectRdpSession();
+    void connectRdpSession({ autoOpenMacRdp: wantAutoOpenMacRdp });
   }
 
   if (btnRemoteCoexist) {
@@ -5738,7 +5829,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.64";
+  const BUNDLED_WEB_VERSION = "2.3.75";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();

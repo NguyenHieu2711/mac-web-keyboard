@@ -5162,20 +5162,30 @@ async def mac_virtual_display_rescue() -> dict:
 
 
 @app.post("/mac-virtual-display/open-rdp")
-async def mac_virtual_display_open_rdp() -> dict:
+@app.get("/mac-virtual-display/open-rdp")
+async def mac_virtual_display_open_rdp(windowed: int = 0) -> dict:
     if not IS_MACOS:
         return {"ok": False}
 
     def _do_open() -> dict:
         global _RDP_RECONNECT_UNTIL
         with _SMART_MULTIMON_LOCK:
-            want_mm = bool((mac_vdisp is not None and mac_vdisp.is_active()) or (_get_secondary_mac_display_bounds(injector._quartz) is not None))
+            # Khi chuyển từ "Chỉ Điện thoại" -> "Song song" (windowed=1): BẮT BUỘC mở cửa sổ bình thường (KHÔNG bật Full-Screen / All Monitors)!
+            if windowed:
+                want_mm = False
+            else:
+                want_mm = bool((mac_vdisp is not None and mac_vdisp.is_active()) or (_get_secondary_mac_display_bounds(injector._quartz) is not None))
             bmks = _list_mrd_bookmarks()
             tsess = bmks[0][0] if bmks else "PC Hieu"
+            if not want_mm:
+                rpid_cur, sess_cur, has_vd_cur = _rdp_probe_vdisp_state()
+                if rpid_cur > 0 and sess_cur and not has_vd_cur:
+                    _apply_full_mac_window_bounds(rpid_cur, sess_cur[0])
+                    return {"ok": True, "session": sess_cur[0], "multimon": False, "already_open": True}
             _RDP_RECONNECT_UNTIL = time.monotonic() + 14.0
             try:
                 _restart_mrd_and_connect(enable_multimon=want_mm, target_sess=tsess)
-                _RDP_CLOSER_DIAG["last_reconnect"] = f"manual_open:{tsess}@{time.strftime('%H:%M:%S')}"
+                _RDP_CLOSER_DIAG["last_reconnect"] = f"manual_open:{tsess}:win={int(bool(windowed))}@{time.strftime('%H:%M:%S')}"
             finally:
                 _RDP_RECONNECT_UNTIL = time.monotonic() + 2.5
             return {"ok": True, "session": tsess, "multimon": want_mm}
@@ -6958,6 +6968,17 @@ def _ax_update_bookmark_display_mode(
                         _walk_modal_btn(wel_m, 0)
                     elif _gs(wel_m, s_subrole).strip() in ("AXDialog", "AXSystemDialog"):
                         _walk_modal_btn(wel_m, 0)
+                    else:
+                        # Bắt luôn hộp thoại AXSheet ("Your session ended" / "Disconnected") gắn bên trong cửa sổ PC Hieu!
+                        ch_sh = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(wel_m, s_children, ctypes.byref(ch_sh)) == 0 and ch_sh.value:
+                            try:
+                                for si in range(min(cf.CFArrayGetCount(ch_sh.value), 30)):
+                                    sel_m = cf.CFArrayGetValueAtIndex(ch_sh.value, si)
+                                    if sel_m and _gs(sel_m, s_role).strip() == "AXSheet":
+                                        _walk_modal_btn(sel_m, 0)
+                            finally:
+                                cf.CFRelease(ch_sh.value)
             finally:
                 cf.CFRelease(wm_arr.value)
         if hit_m[0]:
