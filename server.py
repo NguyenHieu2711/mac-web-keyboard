@@ -5847,10 +5847,17 @@ def start_git_auto_updater(check_every_sec: float = 45.0) -> None:
                         check=False,
                     )
                     if pull_res.returncode == 0:
-                        if _is_live_session_busy():
-                            pending_respawn = True
-                        else:
-                            _trigger_clean_respawn()
+                        chk_u = subprocess.run(
+                            [sys.executable, "-m", "py_compile", str(BASE_DIR / "server.py")],
+                            cwd=str(BASE_DIR),
+                            timeout=8,
+                            check=False,
+                        )
+                        if chk_u.returncode == 0:
+                            if _is_live_session_busy():
+                                pending_respawn = True
+                            else:
+                                _trigger_clean_respawn()
             except Exception:
                 pass
 
