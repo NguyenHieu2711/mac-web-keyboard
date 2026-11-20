@@ -8205,7 +8205,7 @@ def _mrd_has_active_rdp_tcp(rpid: int) -> Optional[bool]:
     lsof_bin = "/usr/sbin/lsof" if Path("/usr/sbin/lsof").exists() else "lsof"
     try:
         rc = subprocess.run(
-            [lsof_bin, "-nP", "-a", "-p", str(int(rpid)), "-iTCP", "-sTCP:ESTABLISHED"],
+            [lsof_bin, "-nP", "-a", "-p", str(int(rpid)), "-iTCP"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -8217,7 +8217,7 @@ def _mrd_has_active_rdp_tcp(rpid: int) -> Optional[bool]:
             _RDP_CLOSER_DIAG["rdp_tcp_active"] = f"err:{rc.returncode}:{err[:40]}"
             return None
         for line in out.splitlines():
-            if "ESTABLISHED" not in line or "->" not in line:
+            if ("ESTABLISHED" not in line and "SYN_SENT" not in line) or "->" not in line:
                 continue
             remote = line.split("->", 1)[1].split(" ", 1)[0].strip()
             if ":3389" in remote or re.search(r"^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|100\.)", remote):
@@ -8311,13 +8311,8 @@ def _rdp_probe_vdisp_state(require_live_open: bool = True) -> Tuple[int, List[st
                 rpid = live_pids_fb[0]
 
         if require_live_open and rpid > 0:
-            try:
-                rapp_p = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rpid)
-                if rapp_p is None or bool(rapp_p.isHidden()):
-                    return rpid, [], False
-            except Exception:
-                pass
-
+            # TUYỆT ĐỐI không đọc NSRunningApplication.isHidden() vì tiến trình Python không chạy NSRunLoop sẽ bị kẹt cache True sau lần hide() đầu tiên!
+            # Xác thực trực tiếp qua bảng socket TCP kernel (:3389) — luôn chuẩn 100% ở mọi lần bật/tắt liên tục!
             tcp_live = _mrd_has_active_rdp_tcp(rpid)
             if tcp_live is False:
                 return rpid, [], False
@@ -8330,12 +8325,6 @@ def _rdp_probe_vdisp_state(require_live_open: bool = True) -> Tuple[int, List[st
                 return rpid, sessions, has_vdisp
 
         if require_live_open and sessions and rpid > 0:
-            try:
-                rapp_p = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rpid)
-                if rapp_p is None or bool(rapp_p.isHidden()):
-                    return rpid, [], False
-            except Exception:
-                pass
             if mac_vdisp is not None and mac_vdisp._init_ax_libs():
                 ax_l = mac_vdisp._ax_lib
                 cf_l = mac_vdisp._cf_lib
@@ -8504,8 +8493,7 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
         with objc.autorelease_pool():
             rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
             if rapp is not None:
-                if bool(rapp.isHidden()):
-                    rapp.unhide()
+                rapp.unhide()
                 rapp.activateWithOptions_(3)
     except Exception:
         pass
@@ -9183,7 +9171,7 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str, reload_onl
             try:
                 with objc.autorelease_pool():
                     rapp_chk = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(new_pid)
-                    if rapp_chk is not None and not bool(rapp_chk.isHidden()):
+                    if rapp_chk is not None:
                         rapp_chk.hide()
             except Exception:
                 pass
@@ -9244,6 +9232,10 @@ def trigger_smart_rdp_multimon_sync(
                 _RDP_CLOSER_DIAG["worker_trace"] = f"start:mm={int(enable_multimon)},up={int(upgrade_running)},dn={int(downgrade_running)},rep={int(repair_clamped)},bmk={len(bookmarks)}"
 
                 if not enable_multimon:
+                    # Nếu người dùng thao tác tắt/bật nhanh liên tục và màn phụ ĐÃ bật trở lại -> bỏ qua lượt ngắt cũ!
+                    if _get_secondary_mac_display_bounds(None) is not None:
+                        _RDP_CLOSER_DIAG["worker_trace"] += "|stale_1mon_sec_back_on"
+                        return
                     rpid, sess, was_2mon_now = _rdp_probe_vdisp_state()
                     # NGUYÊN TẮC BẮT BUỘC: Nếu Remote Mac KHÔNG đang mở (not sess) -> MẶC KỆ 100%, tuyệt đối không tự bật hay đụng vào Microsoft Remote Desktop!
                     if not sess:
@@ -9256,7 +9248,7 @@ def trigger_smart_rdp_multimon_sync(
 
                     if need_downgrade:
                         now_d = time.monotonic()
-                        if _LAST_1MON_SYNC_AT > 0.0 and (now_d - _LAST_1MON_SYNC_AT) < 12.0:
+                        if _LAST_1MON_SYNC_AT > 0.0 and (now_d - _LAST_1MON_SYNC_AT) < 4.0:
                             _RDP_CLOSER_DIAG["ax_stage"] = f"debounced:{now_d:.2f}"
                             return
                         _LAST_1MON_SYNC_AT = now_d
@@ -9266,6 +9258,9 @@ def trigger_smart_rdp_multimon_sync(
                         _RDP_CLOSER_DIAG["ax_stage"] = f"calling_reload_1mon:{target_sess}"
                         try:
                             time.sleep(0.25)
+                            if _get_secondary_mac_display_bounds(None) is not None:
+                                _RDP_CLOSER_DIAG["worker_trace"] += "|abort_1mon_sec_back_on"
+                                return
                             _restart_mrd_and_connect(enable_multimon=False, target_sess=target_sess, reload_only=True)
                             _RDP_CLOSER_DIAG["last_reconnect"] = f"reloaded_1mon_fs:{target_sess}@{time.strftime('%H:%M:%S')}"
                         finally:
@@ -9282,7 +9277,7 @@ def trigger_smart_rdp_multimon_sync(
                     return
 
                 now_m = time.monotonic()
-                if _LAST_2MON_SYNC_AT > 0.0 and (now_m - _LAST_2MON_SYNC_AT) < 12.0:
+                if _LAST_2MON_SYNC_AT > 0.0 and (now_m - _LAST_2MON_SYNC_AT) < 4.0:
                     _RDP_CLOSER_DIAG["worker_trace"] += f"|debounced_2mon:{now_m - _LAST_2MON_SYNC_AT:.1f}s"
                     return
 
