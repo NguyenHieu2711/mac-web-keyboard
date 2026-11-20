@@ -6274,7 +6274,15 @@ def _ax_update_bookmark_display_mode(
     kTrue = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
     kFalse = ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value
 
+    def _set_tmo(el: Any, sec: float = 0.50) -> None:
+        if el:
+            try:
+                ax.AXUIElementSetMessagingTimeout(el, ctypes.c_float(sec))
+            except Exception:
+                pass
+
     def _gs(el: Any, attr: Any) -> str:
+        _set_tmo(el, 0.50)
         r = ctypes.c_void_p()
         if ax.AXUIElementCopyAttributeValue(el, attr, ctypes.byref(r)) == 0 and r.value:
             try:
@@ -6285,6 +6293,7 @@ def _ax_update_bookmark_display_mode(
         return ""
 
     def _gb(el: Any, attr: Any) -> bool:
+        _set_tmo(el, 0.50)
         r = ctypes.c_void_p()
         if ax.AXUIElementCopyAttributeValue(el, attr, ctypes.byref(r)) == 0 and r.value:
             try:
@@ -6294,6 +6303,7 @@ def _ax_update_bookmark_display_mode(
         return False
 
     def _gi(el: Any, attr: Any) -> int:
+        _set_tmo(el, 0.50)
         r = ctypes.c_void_p()
         if ax.AXUIElementCopyAttributeValue(el, attr, ctypes.byref(r)) == 0 and r.value:
             try:
@@ -6305,6 +6315,7 @@ def _ax_update_bookmark_display_mode(
         return 0
 
     def _grect(el: Any) -> Optional[Tuple[float, float, float, float]]:
+        _set_tmo(el, 0.50)
         rp = ctypes.c_void_p()
         rs = ctypes.c_void_p()
         ok = False
@@ -6475,7 +6486,36 @@ def _ax_update_bookmark_display_mode(
 
     try:
         t_low = target_title.strip().lower()
-        # 0) Dọn hộp thoại xác nhận Disconnect (260x272 NSAlert) nếu đang treo sẵn từ trước!
+        # 0) Dọn hộp thoại Untitled (380x148) / Preferences cũ & hộp thoại xác nhận Disconnect (260x272 NSAlert) nếu đang treo sẵn!
+        w_pre_clean = ctypes.c_void_p()
+        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_pre_clean)) == 0 and w_pre_clean.value:
+            try:
+                for wi in range(cf.CFArrayGetCount(w_pre_clean.value)):
+                    wel_cl = cf.CFArrayGetValueAtIndex(w_pre_clean.value, wi)
+                    if not wel_cl:
+                        continue
+                    wt_cl = _gs(wel_cl, s_title).strip().lower()
+                    if wt_cl in ("untitled", "add resolution", "custom resolution"):
+                        if q is not None:
+                            ed_u = q.CGEventCreateKeyboardEvent(None, 53, True)
+                            eu_u = q.CGEventCreateKeyboardEvent(None, 53, False)
+                            q.CGEventPost(q.kCGHIDEventTap, ed_u)
+                            q.CGEventPost(q.kCGHIDEventTap, eu_u)
+                            time.sleep(0.15)
+                for wi in range(cf.CFArrayGetCount(w_pre_clean.value)):
+                    wel_cl = cf.CFArrayGetValueAtIndex(w_pre_clean.value, wi)
+                    if not wel_cl:
+                        continue
+                    wt_cl = _gs(wel_cl, s_title).strip().lower()
+                    if wt_cl in ("preferences", "settings", "resolutions", "general"):
+                        br_cl = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(wel_cl, s_close, ctypes.byref(br_cl)) == 0 and br_cl.value:
+                            try:
+                                _ax_press_fast(br_cl.value, 0.45)
+                            finally:
+                                cf.CFRelease(br_cl.value)
+            finally:
+                cf.CFRelease(w_pre_clean)
         _dismiss_disconnect_modal()
 
         # 1) Đóng cửa sổ phiên đang mở của target_title (timeout 0.65s chống treo runModal + tự bấm Disconnect!)
@@ -6979,7 +7019,8 @@ def _ax_update_bookmark_display_mode(
                             bd = _gs(el, s_desc).strip().lower()
                             rb = _grect(el)
                             if bt == "+" or bt.lower() == "add" or "add" in bd:
-                                if ax.AXUIElementPerformAction(el, s_press) == 0:
+                                # BẮT BUỘC dùng _ax_press_fast vì nút "+" mở cửa sổ modal "Untitled" (380x148) qua runModalForWindow:!
+                                if _ax_press_fast(el, 0.45) in (0, -25204):
                                     plus_ok[0] = True
                                     return
                             if bt == "" and rb and 14.0 <= rb[2] <= 42.0 and 14.0 <= rb[3] <= 36.0 and rb[1] >= py_min:
@@ -7009,8 +7050,17 @@ def _ax_update_bookmark_display_mode(
                         _cg_click_once(bx_p + bw_p * 0.5, by_p + bh_p * 0.5)
                         plus_ok[0] = True
                     time.sleep(0.24)
+                    try:
+                        with objc.autorelease_pool():
+                            rapp_u = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
+                            if rapp_u is not None:
+                                rapp_u.activateWithOptions_(3)
+                    except Exception:
+                        pass
+                    time.sleep(0.08)
 
-                    # Tìm 2 ô AXTextField (Width, Height) -> nhập 3024 và 1834 -> bấm Add/OK (dự phòng Enter)
+                    # Cửa sổ nhập độ phân giải mới của MRD 10.9.10 là cửa sổ modal riêng tên "Untitled" (380x148)!
+                    _MODAL_RES_TITLES = ("untitled", "add resolution", "custom resolution", "")
                     tf_rects: List[Tuple[float, float, float, float]] = []
 
                     def _collect_tfs(el: Any, depth: int) -> None:
@@ -7031,10 +7081,24 @@ def _ax_update_bookmark_display_mode(
                     wp_tf = ctypes.c_void_p()
                     if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_tf)) == 0 and wp_tf.value:
                         try:
+                            # Ưu tiên quét đúng hộp thoại modal "Untitled" (380x148) trước
                             for wi in range(cf.CFArrayGetCount(wp_tf.value)):
-                                wel_p = cf.CFArrayGetValueAtIndex(wp_tf.value, wi)
-                                if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
-                                    _collect_tfs(wel_p, 0)
+                                wel_u = cf.CFArrayGetValueAtIndex(wp_tf.value, wi)
+                                if not wel_u:
+                                    continue
+                                wtu = _gs(wel_u, s_title).strip().lower()
+                                rcu = _grect(wel_u)
+                                if wtu in _MODAL_RES_TITLES and rcu and rcu[2] <= 540.0 and rcu[3] <= 340.0:
+                                    ax.AXUIElementSetAttributeValue(wel_u, s_main, kTrue)
+                                    ax.AXUIElementSetAttributeValue(wel_u, s_focused, kTrue)
+                                    ax.AXUIElementPerformAction(wel_u, s_raise)
+                                    _collect_tfs(wel_u, 0)
+                            if len(tf_rects) < 2:
+                                tf_rects.clear()
+                                for wi in range(cf.CFArrayGetCount(wp_tf.value)):
+                                    wel_p = cf.CFArrayGetValueAtIndex(wp_tf.value, wi)
+                                    if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
+                                        _collect_tfs(wel_p, 0)
                         finally:
                             cf.CFRelease(wp_tf.value)
                     tf_rects.sort(key=lambda r: (round(r[1] / 24.0), r[0]))
@@ -7049,7 +7113,6 @@ def _ax_update_bookmark_display_mode(
                             if ch_d in _DIGIT_VK:
                                 _cg_tap_vk(_DIGIT_VK[ch_d])
                         time.sleep(0.05)
-                        # Bấm Tab (vk=48) để NSNumberFormatter commit giá trị Width ngay lập tức!
                         _cg_tap_vk(48)
                         time.sleep(0.06)
                         _cg_click_once(r1[0] + r1[2] * 0.5, r1[1] + r1[3] * 0.5)
@@ -7059,28 +7122,33 @@ def _ax_update_bookmark_display_mode(
                             if ch_d in _DIGIT_VK:
                                 _cg_tap_vk(_DIGIT_VK[ch_d])
                         time.sleep(0.05)
-                        # Bấm Tab (vk=48) để NSNumberFormatter commit giá trị Height và mở khóa nút Add/Create!
                         _cg_tap_vk(48)
                         time.sleep(0.10)
 
-                        def _click_confirm_add(el: Any, depth: int) -> None:
+                        def _click_confirm_add(el: Any, depth: int, allow_any_non_cancel: bool) -> None:
                             if not el or depth > 16 or confirmed_add[0]:
                                 return
                             if _gs(el, s_role).strip() == "AXButton":
                                 bt_raw = _gs(el, s_title).strip()
                                 bt_c = bt_raw.lower()
                                 en_c = _gb(el, s_enabled)
+                                rb_c = _grect(el)
                                 if bt_raw:
                                     pref_btns.append(f"{bt_raw}:{int(en_c)}")
-                                if en_c and bt_c in ("add", "ok", "create", "save", "done", "confirm", "apply", "thêm"):
-                                    if _ax_press_fast(el, 0.50) == 0:
-                                        confirmed_add[0] = True
-                                        return
+                                if en_c:
+                                    if bt_c in ("add", "ok", "create", "save", "done", "confirm", "apply", "thêm"):
+                                        if _ax_press_fast(el, 0.50) in (0, -25204):
+                                            confirmed_add[0] = True
+                                            return
+                                    elif allow_any_non_cancel and bt_raw and bt_c not in ("cancel", "hủy", "close") and rb_c and rb_c[2] >= 45.0:
+                                        if _ax_press_fast(el, 0.50) in (0, -25204):
+                                            confirmed_add[0] = True
+                                            return
                             ch = ctypes.c_void_p()
                             if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
                                 try:
                                     for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
-                                        _click_confirm_add(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                                        _click_confirm_add(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1, allow_any_non_cancel)
                                         if confirmed_add[0]:
                                             break
                                 finally:
@@ -7090,14 +7158,23 @@ def _ax_update_bookmark_display_mode(
                         if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_cf)) == 0 and wp_cf.value:
                             try:
                                 for wi in range(cf.CFArrayGetCount(wp_cf.value)):
-                                    wel_p = cf.CFArrayGetValueAtIndex(wp_cf.value, wi)
-                                    if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
-                                        _click_confirm_add(wel_p, 0)
+                                    wel_u = cf.CFArrayGetValueAtIndex(wp_cf.value, wi)
+                                    if not wel_u:
+                                        continue
+                                    wtu = _gs(wel_u, s_title).strip().lower()
+                                    rcu = _grect(wel_u)
+                                    if wtu in _MODAL_RES_TITLES and rcu and rcu[2] <= 540.0 and rcu[3] <= 340.0:
+                                        _click_confirm_add(wel_u, 0, True)
+                                if not confirmed_add[0]:
+                                    for wi in range(cf.CFArrayGetCount(wp_cf.value)):
+                                        wel_p = cf.CFArrayGetValueAtIndex(wp_cf.value, wi)
+                                        if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
+                                            _click_confirm_add(wel_p, 0, False)
                             finally:
                                 cf.CFRelease(wp_cf.value)
                         if not confirmed_add[0]:
                             _cg_tap_vk(36)
-                        time.sleep(0.20)
+                        time.sleep(0.22)
                     _RDP_CLOSER_DIAG["pref_btns_seen"] = pref_btns[-10:]
 
                     # Đóng cửa sổ Preferences
