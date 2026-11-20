@@ -6347,21 +6347,22 @@ def _get_mac_menubar_height(quartz: Any = None) -> float:
 
 
 def _compute_exact_1mon_retina_res(quartz: Any = None) -> Tuple[int, int, float, float, float, float]:
-    """Tính độ phân giải Retina khít 100% khung cửa sổ MacBook (trừ đúng visibleFrame Menubar 38px + Titlebar 28px = 1512x916 @ 2x = 3024x1832 chia hết cho 8, xóa sạch khe hở 45px!)."""
+    """Tính độ phân giải chuẩn 1:1 kích thước thật của Windows cho khung cửa sổ MacBook (trừ đúng Menubar 38px + Titlebar 28px = 1512x916 tỷ lệ thật 100%, không bị bé 50% cũng không bị zoom 200%, khít 0px khe hở!)."""
     q = quartz if quartz is not None else injector._quartz
     if q is None:
         try:
             import Quartz as q  # type: ignore
         except Exception:
-            return 3024, 1832, 0.0, 38.0, 1512.0, 944.0
+            return 1512, 916, 0.0, 38.0, 1512.0, 944.0
     mb = q.CGDisplayBounds(q.CGMainDisplayID())
     mx, my, mw, mh = float(mb.origin.x), float(mb.origin.y), float(mb.size.width), float(mb.size.height)
     mbar_h = max(38.0, _get_mac_menubar_height(q))
     win_h = max(600.0, mh - mbar_h)
     content_h = max(500.0, win_h - 28.0)
-    rw = int(round(mw * 2.0))
-    rh = int(round(content_h * 2.0))
-    # Căn chẵn bội số của 4 cho chuẩn H.264 RDP (1832 = 458 * 4)
+    rw = int(round(mw))
+    rh = int(round(content_h))
+    # Căn chẵn bội số của 4 cho chuẩn H.264 RDP (1512 = 378 * 4, 916 = 229 * 4)
+    rw = rw - (rw % 4)
     rh = rh - (rh % 4)
     return rw, rh, mx, my + mbar_h, mw, win_h
 
@@ -6469,7 +6470,7 @@ def _find_live_mrd_pids() -> List[int]:
     if not IS_MACOS:
         return []
     pids: set = set()
-    rpid_w, _, _ = _rdp_probe_vdisp_state()
+    rpid_w, _, _ = _rdp_probe_vdisp_state(require_live_open=False)
     if rpid_w > 0:
         pids.add(rpid_w)
     try:
@@ -6555,9 +6556,8 @@ def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bo
         has_fit = bool(re.search(r"smart sizing:i:1", ex_txt, re.IGNORECASE))
         has_bad_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
         if _get_secondary_mac_display_bounds(None) is None:
-            # Ở chế độ 1 màn cửa sổ thường: MRD 10.9.10 bắt buộc tắt Optimize for Retina để mở khóa chọn độ phân giải Retina khít 3024x1834 + Fit session to window = ON!
             want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(None)
-            alt_rh = want_rh + ((4 - (want_rh % 4)) % 4)
+            alt_rh = want_rh - (want_rh % 8)
             has_w = bool(re.search(rf"desktopwidth:i:{want_rw}\b", ex_txt, re.IGNORECASE))
             has_h = bool(re.search(rf"desktopheight:i:({want_rh}|{alt_rh})\b", ex_txt, re.IGNORECASE))
             return (not has_fit) or has_bad_dyn or (not (has_w and has_h))
@@ -6594,7 +6594,7 @@ def _bookmark_already_matches(bookmarks: List[Tuple[str, str]], want_multimon: b
         has_sm = bool(re.search(rf"screen mode id:i:{sm_val}\b", ex_txt, re.IGNORECASE))
         if not want_multimon:
             want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(None)
-            alt_rh = want_rh + ((4 - (want_rh % 4)) % 4)
+            alt_rh = want_rh - (want_rh % 8)
             has_w = bool(re.search(rf"desktopwidth:i:{want_rw}\b", ex_txt, re.IGNORECASE))
             has_h = bool(re.search(rf"desktopheight:i:({want_rh}|{alt_rh})\b", ex_txt, re.IGNORECASE))
             return has_fit and (not has_bad_dyn) and has_mm and has_sm and has_w and has_h
@@ -6773,6 +6773,8 @@ def _ax_update_bookmark_display_mode(
     s_main = _cfstr("AXMain")
     s_focused = _cfstr("AXFocused")
     s_raise = _cfstr("AXRaise")
+    s_parent_d = _cfstr("AXParent")
+    s_sel_d = _cfstr("AXSelected")
     kTrue = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
     kFalse = ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value
 
@@ -7312,7 +7314,7 @@ def _ax_update_bookmark_display_mode(
         if opened_edit:
             time.sleep(0.25)
 
-            # 3) Bấm sang tab "Display" trong bảng Edit PC
+            # 3) Bấm sang tab "Display" trong bảng Edit PC (hỗ trợ cả khi đang giấu ngầm ngoài màn hình qua AXParent + kiểm chứng thật!)
             disp_tab_rects: List[Tuple[float, float, float, float]] = []
             pressed_disp = [False]
 
@@ -7326,9 +7328,30 @@ def _ax_update_bookmark_display_mode(
                     if rb and rb[2] >= 24.0 and rb[3] >= 14.0:
                         disp_tab_rects.append(rb)
                     if rl in ("AXRadioButton", "AXButton", "AXTab"):
-                        if ax.AXUIElementPerformAction(el, s_press) == 0:
+                        ax.AXUIElementSetAttributeValue(el, s_sel_d, kTrue)
+                        if _ax_press_fast(el, 0.40) == 0:
                             pressed_disp[0] = True
                             return
+                    # Nếu chữ "Display" nằm trên AXStaticText con -> leo ngược lên AXParent (AXRadioButton/AXTab) để bấm AXPress ngầm!
+                    cur_p = el
+                    to_rel: List[int] = []
+                    try:
+                        for _ in range(2):
+                            pr_ref = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(cur_p, s_parent_d, ctypes.byref(pr_ref)) == 0 and pr_ref.value:
+                                to_rel.append(pr_ref.value)
+                                cur_p = pr_ref.value
+                                pr_rl = _gs(cur_p, s_role).strip()
+                                if pr_rl in ("AXRadioButton", "AXButton", "AXTab"):
+                                    ax.AXUIElementSetAttributeValue(cur_p, s_sel_d, kTrue)
+                                    if _ax_press_fast(cur_p, 0.40) == 0:
+                                        pressed_disp[0] = True
+                                        return
+                            else:
+                                break
+                    finally:
+                        for rv in to_rel:
+                            cf.CFRelease(rv)
                 ch = ctypes.c_void_p()
                 if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
                     try:
@@ -7340,17 +7363,69 @@ def _ax_update_bookmark_display_mode(
                     finally:
                         cf.CFRelease(ch.value)
 
-            w_t = ctypes.c_void_p()
-            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_t)) == 0 and w_t.value:
-                try:
-                    for wi in range(cf.CFArrayGetCount(w_t.value)):
-                        _click_display_tab(cf.CFArrayGetValueAtIndex(w_t.value, wi), 0)
-                finally:
-                    cf.CFRelease(w_t.value)
-            if not pressed_disp[0] and disp_tab_rects:
-                rx, ry, rw, rh = disp_tab_rects[0]
-                _cg_click_once(rx + rw * 0.5, ry + rh * 0.5)
-            time.sleep(0.16)
+            def _has_display_checkboxes() -> bool:
+                found_cb = [False]
+
+                def _chk_cb(el_c: Any, d_c: int) -> None:
+                    if not el_c or d_c > 16 or found_cb[0]:
+                        return
+                    if _gs(el_c, s_role).strip() == "AXCheckBox":
+                        ctl_c = (_gs(el_c, s_title) or _gs(el_c, s_desc)).strip().lower()
+                        if "use all monitors" in ctl_c or "full screen" in ctl_c or "fit session" in ctl_c:
+                            found_cb[0] = True
+                            return
+                    ch_c = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(el_c, s_children, ctypes.byref(ch_c)) == 0 and ch_c.value:
+                        try:
+                            for ci_c in range(min(cf.CFArrayGetCount(ch_c.value), 80)):
+                                _chk_cb(cf.CFArrayGetValueAtIndex(ch_c.value, ci_c), d_c + 1)
+                                if found_cb[0]:
+                                    break
+                        finally:
+                            cf.CFRelease(ch_c.value)
+
+                w_ck = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_ck)) == 0 and w_ck.value:
+                    try:
+                        for wi_k in range(cf.CFArrayGetCount(w_ck.value)):
+                            _chk_cb(cf.CFArrayGetValueAtIndex(w_ck.value, wi_k), 0)
+                    finally:
+                        cf.CFRelease(w_ck.value)
+                return found_cb[0]
+
+            def _ensure_display_tab_switched() -> None:
+                pressed_disp[0] = False
+                disp_tab_rects.clear()
+                w_t = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_t)) == 0 and w_t.value:
+                    try:
+                        for wi in range(cf.CFArrayGetCount(w_t.value)):
+                            _click_display_tab(cf.CFArrayGetValueAtIndex(w_t.value, wi), 0)
+                    finally:
+                        cf.CFRelease(w_t.value)
+                time.sleep(0.14)
+                if not _has_display_checkboxes():
+                    # Dự phòng chắc chắn 100%: nhích vào click trúng tab Display trong 0.14s rồi lập tức giấu lại về (1510, 980)!
+                    _move_cc_pos(40.0, 60.0)
+                    time.sleep(0.16)
+                    disp_tab_rects.clear()
+                    w_t2 = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_t2)) == 0 and w_t2.value:
+                        try:
+                            for wi in range(cf.CFArrayGetCount(w_t2.value)):
+                                _click_display_tab(cf.CFArrayGetValueAtIndex(w_t2.value, wi), 0)
+                        finally:
+                            cf.CFRelease(w_t2.value)
+                    if disp_tab_rects:
+                        rx, ry, rw, rh = disp_tab_rects[0]
+                        _cg_click_once(rx + rw * 0.5, ry + rh * 0.5)
+                        time.sleep(0.14)
+                    _park_cc_offscreen()
+
+            try:
+                _ensure_display_tab_switched()
+            finally:
+                pass
 
             # 4) Chỉnh các ô tích trong tab Display theo đúng thứ tự mở khóa phụ thuộc
             cb_logs: List[str] = []
@@ -7412,10 +7487,10 @@ def _ax_update_bookmark_display_mode(
             ])
             _RDP_CLOSER_DIAG["edit_pc_checkboxes"] = cb_logs[-12:]
 
-            # 4B) Khi ở chế độ 1 màn cửa sổ thường: chọn độ phân giải Retina khít 100% (3024 x 1834) để xóa sạch khe hở 45px bên phải!
+            # 4B) Khi ở chế độ 1 màn cửa sổ thường: chọn độ phân giải chuẩn 1:1 tỷ lệ thật Windows (1512 x 916) để vừa đúng cỡ chữ Windows thật vừa xóa sạch khe hở!
             if not enable_multimon:
                 want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(q)
-                alt_rh = want_rh + ((4 - (want_rh % 4)) % 4)
+                alt_rh = want_rh - (want_rh % 8)
                 w_str, h_str, alt_h_str = str(want_rw), str(want_rh), str(alt_rh)
 
                 def _try_pick_resolution_popup() -> Tuple[bool, List[str]]:
@@ -8035,19 +8110,7 @@ def _ax_update_bookmark_display_mode(
                             reopened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc...", "edit"))
                     if reopened_edit:
                         time.sleep(0.22)
-                        pressed_disp[0] = False
-                        disp_tab_rects.clear()
-                        wt_re = ctypes.c_void_p()
-                        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wt_re)) == 0 and wt_re.value:
-                            try:
-                                for wi in range(cf.CFArrayGetCount(wt_re.value)):
-                                    _click_display_tab(cf.CFArrayGetValueAtIndex(wt_re.value, wi), 0)
-                            finally:
-                                cf.CFRelease(wt_re.value)
-                        if not pressed_disp[0] and disp_tab_rects:
-                            rx, ry, rw_b, rh_b = disp_tab_rects[0]
-                            _cg_click_once(rx + rw_b * 0.5, ry + rh_b * 0.5)
-                        time.sleep(0.16)
+                        _ensure_display_tab_switched()
                         _apply_checkbox_pass([
                             (("use all monitors",), False),
                             (("update session resolution", "on resize"), False),
@@ -8191,14 +8254,18 @@ def _ax_update_bookmark_display_mode(
         for sr in (
             s_wins, s_role, s_subrole, s_title, s_desc, s_val, s_pos, s_size,
             s_close, s_press, s_menubar, s_children, s_enabled, s_fs, s_main, s_focused, s_raise,
+            s_parent_d, s_sel_d,
         ):
             if sr:
                 cf.CFRelease(sr)
     return rdp_pid
 
 
-def _rdp_probe_vdisp_state() -> Tuple[int, List[str], bool]:
-    """Trả về (rdp_pid, session_titles, has_session_on_vdisp)."""
+def _rdp_probe_vdisp_state(require_live_open: bool = True) -> Tuple[int, List[str], bool]:
+    """Trả về (rdp_pid, session_titles, has_session_on_vdisp).
+    Khi require_live_open=True (mặc định): CHỈ tính là đang mở nếu app KHÔNG bị ẩn (isHidden=False),
+    cửa sổ phiên KHÔNG bị thu nhỏ (AXMinimized=False), và đang hiển thị thật trên màn hình (onscreen=True hoặc AXFullScreen=True)!
+    Tuyệt đối bỏ qua các cửa sổ cache ngầm (onscreen=False) sau khi người dùng đã tắt Remote Mac!"""
     if not IS_MACOS:
         return 0, [], False
     q = injector._quartz
@@ -8207,6 +8274,8 @@ def _rdp_probe_vdisp_state() -> Tuple[int, List[str], bool]:
             import Quartz as q  # type: ignore
         except Exception:
             return 0, [], False
+    import AppKit  # type: ignore
+    import ctypes
     import objc  # type: ignore
 
     vb = _get_secondary_mac_display_bounds(q)
@@ -8218,6 +8287,7 @@ def _rdp_probe_vdisp_state() -> Tuple[int, List[str], bool]:
     rpid = 0
     sessions: List[str] = []
     sess_low: set = set()
+    onscreen_low: set = set()
     has_vdisp = False
     with objc.autorelease_pool():
         wlist = q.CGWindowListCopyWindowInfo(
@@ -8242,12 +8312,13 @@ def _rdp_probe_vdisp_state() -> Tuple[int, List[str], bool]:
             wh = float(wb.get("Height", 0))
             wname = str(w.get("kCGWindowName", "") or "").strip()
             wl = wname.lower()
-            # Ngưỡng ww >= 620, wh >= 200 để loại hộp Connecting/Password (rộng 550px) nhưng bắt trúng cửa sổ 2 màn bị bẹp (1008x315)!
             if not wname or ww < 620.0 or wh < 200.0:
                 continue
             if wl in launcher_set or any(k in wl for k in dialog_kw):
                 continue
             rpid = pw_pid
+            if bool(w.get("kCGWindowIsOnscreen", False)):
+                onscreen_low.add(wl)
             if wl not in sess_low:
                 sess_low.add(wl)
                 sessions.append(wname)
@@ -8256,6 +8327,71 @@ def _rdp_probe_vdisp_state() -> Tuple[int, List[str], bool]:
                 cy = wy + wh * 0.5
                 if (vb["x"] <= cx < vb["x"] + vb["w"]) and (vb["y"] <= cy < vb["y"] + vb["h"]):
                     has_vdisp = True
+
+        if require_live_open and sessions and rpid > 0:
+            try:
+                rapp_p = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rpid)
+                if rapp_p is None or bool(rapp_p.isHidden()):
+                    return rpid, [], False
+            except Exception:
+                pass
+            if mac_vdisp is not None and mac_vdisp._init_ax_libs():
+                ax_l = mac_vdisp._ax_lib
+                cf_l = mac_vdisp._cf_lib
+                a_el = ax_l.AXUIElementCreateApplication(rpid)
+                if a_el:
+                    sw_s = cf_l.CFStringCreateWithCString(None, b"AXWindows", 0x08000100)
+                    st_s = cf_l.CFStringCreateWithCString(None, b"AXTitle", 0x08000100)
+                    sm_s = cf_l.CFStringCreateWithCString(None, b"AXMinimized", 0x08000100)
+                    sf_s = cf_l.CFStringCreateWithCString(None, b"AXFullScreen", 0x08000100)
+                    valid_ax_low: set = set()
+                    try:
+                        try:
+                            ax_l.AXUIElementSetMessagingTimeout(a_el, ctypes.c_float(0.35))
+                        except Exception:
+                            pass
+                        wr_p = ctypes.c_void_p()
+                        if ax_l.AXUIElementCopyAttributeValue(a_el, sw_s, ctypes.byref(wr_p)) == 0 and wr_p.value:
+                            try:
+                                for wi_p in range(cf_l.CFArrayGetCount(wr_p.value)):
+                                    wel_p = cf_l.CFArrayGetValueAtIndex(wr_p.value, wi_p)
+                                    if not wel_p:
+                                        continue
+                                    t_p = ""
+                                    tr_p = ctypes.c_void_p()
+                                    if ax_l.AXUIElementCopyAttributeValue(wel_p, st_s, ctypes.byref(tr_p)) == 0 and tr_p.value:
+                                        t_p = str(objc.objc_object(c_void_p=tr_p.value) or "").strip().lower()
+                                        cf_l.CFRelease(tr_p.value)
+                                    if not t_p:
+                                        continue
+                                    is_min_p = False
+                                    mr_p = ctypes.c_void_p()
+                                    if ax_l.AXUIElementCopyAttributeValue(wel_p, sm_s, ctypes.byref(mr_p)) == 0 and mr_p.value:
+                                        is_min_p = bool(cf_l.CFBooleanGetValue(mr_p.value))
+                                        cf_l.CFRelease(mr_p.value)
+                                    if is_min_p:
+                                        continue
+                                    is_fs_p = False
+                                    fr_p = ctypes.c_void_p()
+                                    if ax_l.AXUIElementCopyAttributeValue(wel_p, sf_s, ctypes.byref(fr_p)) == 0 and fr_p.value:
+                                        is_fs_p = bool(cf_l.CFBooleanGetValue(fr_p.value))
+                                        cf_l.CFRelease(fr_p.value)
+                                    if (t_p in onscreen_low) or is_fs_p:
+                                        valid_ax_low.add(t_p)
+                            finally:
+                                cf_l.CFRelease(wr_p.value)
+                        sessions = [sn for sn in sessions if sn.lower() in valid_ax_low]
+                        if not sessions:
+                            has_vdisp = False
+                    finally:
+                        cf_l.CFRelease(a_el)
+                        for kr_p in (sw_s, st_s, sm_s, sf_s):
+                            if kr_p:
+                                cf_l.CFRelease(kr_p)
+            else:
+                sessions = [sn for sn in sessions if sn.lower() in onscreen_low]
+                if not sessions:
+                    has_vdisp = False
     return rpid, sessions, has_vdisp
 
 
