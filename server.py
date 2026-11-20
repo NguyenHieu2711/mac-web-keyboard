@@ -5885,19 +5885,70 @@ def _is_mrd_tiny_default_box(w: float, h: float) -> bool:
     return (740.0 <= w <= 772.0) and (485.0 <= h <= 515.0)
 
 
+def _is_clamped_1467_box(w: float, h: float) -> bool:
+    """Khung 1467x944 bị hụt 45px bên phải do tỷ lệ 3024:1888 cũ."""
+    return (1455.0 <= w <= 1482.0) and (h >= 925.0)
+
+
+def _get_mac_menubar_height(quartz: Any = None) -> float:
+    q = quartz if quartz is not None else injector._quartz
+    if q is None:
+        return 37.0
+    try:
+        import objc  # type: ignore
+        with objc.autorelease_pool():
+            wlist = q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionOnScreenOnly, q.kCGNullWindowID) or []
+            for w in wlist:
+                if int(w.get("kCGWindowLayer", 0)) == 24 and str(w.get("kCGWindowName", "")) == "Menubar":
+                    wb = w.get("kCGWindowBounds") or {}
+                    mh_b = float(wb.get("Height", 0.0))
+                    if 20.0 <= mh_b <= 52.0:
+                        return mh_b
+    except Exception:
+        pass
+    return 37.0
+
+
+def _compute_exact_1mon_retina_res(quartz: Any = None) -> Tuple[int, int, float, float, float, float]:
+    """Tính độ phân giải Retina khít 100% khung cửa sổ MacBook (trừ đúng Menubar 37px + Titlebar 28px = 3024x1834, xóa sạch khe hở 45px!)."""
+    q = quartz if quartz is not None else injector._quartz
+    if q is None:
+        try:
+            import Quartz as q  # type: ignore
+        except Exception:
+            return 3024, 1834, 0.0, 37.0, 1512.0, 945.0
+    mb = q.CGDisplayBounds(q.CGMainDisplayID())
+    mx, my, mw, mh = float(mb.origin.x), float(mb.origin.y), float(mb.size.width), float(mb.size.height)
+    mbar_h = _get_mac_menubar_height(q)
+    win_h = max(600.0, mh - mbar_h)
+    content_h = max(500.0, win_h - 28.0)
+    rw = int(round(mw * 2.0))
+    rh = int(round(content_h * 2.0))
+    return rw, rh, mx, my + mbar_h, mw, win_h
+
+
 def _load_saved_1mon_bounds() -> Optional[Dict[str, float]]:
     global _SAVED_USER_1MON_BOUNDS
     if _SAVED_USER_1MON_BOUNDS is not None:
-        return _SAVED_USER_1MON_BOUNDS
+        if _is_clamped_1467_box(_SAVED_USER_1MON_BOUNDS["w"], _SAVED_USER_1MON_BOUNDS["h"]):
+            _SAVED_USER_1MON_BOUNDS = None
+        else:
+            return _SAVED_USER_1MON_BOUNDS
     try:
         if _USER_1MON_BOUNDS_PATH.exists():
             raw = json.loads(_USER_1MON_BOUNDS_PATH.read_text(encoding="utf-8"))
             bw = float(raw.get("w", 0.0))
             bh = float(raw.get("h", 0.0))
-            if bw >= 650.0 and bh >= 420.0 and not _is_mrd_tiny_default_box(bw, bh) and bw < bh * 2.15:
+            if (
+                bw >= 650.0
+                and bh >= 420.0
+                and not _is_mrd_tiny_default_box(bw, bh)
+                and not _is_clamped_1467_box(bw, bh)
+                and bw < bh * 2.15
+            ):
                 _SAVED_USER_1MON_BOUNDS = {
                     "x": float(raw.get("x", 0.0)),
-                    "y": float(raw.get("y", 38.0)),
+                    "y": float(raw.get("y", 37.0)),
                     "w": bw,
                     "h": bh,
                 }
@@ -5910,7 +5961,7 @@ def _load_saved_1mon_bounds() -> Optional[Dict[str, float]]:
 def _save_user_1mon_bounds(bx: float, by: float, bw: float, bh: float) -> None:
     """Lưu lại đúng vị trí & kích thước cửa sổ thường mà người dùng tự đặt trên MacBook trước khi vào Full-Screen."""
     global _SAVED_USER_1MON_BOUNDS
-    if bw < 650.0 or bh < 420.0 or _is_mrd_tiny_default_box(bw, bh) or bw >= bh * 2.15:
+    if bw < 650.0 or bh < 420.0 or _is_mrd_tiny_default_box(bw, bh) or _is_clamped_1467_box(bw, bh) or bw >= bh * 2.15:
         return
     prev = _SAVED_USER_1MON_BOUNDS
     if (
@@ -6064,13 +6115,19 @@ def _bookmark_needs_retina_or_dyn_repair(bookmarks: List[Tuple[str, str]]) -> bo
         has_retina = bool(re.search(r"forcehidpioptimizations:i:1", ex_txt, re.IGNORECASE))
         has_fit = bool(re.search(r"smart sizing:i:1", ex_txt, re.IGNORECASE))
         has_bad_dyn = bool(re.search(r"dynamic resolution:i:1", ex_txt, re.IGNORECASE))
-        return (not has_retina) or (not has_fit) or has_bad_dyn
+        need_exact_res = False
+        if _get_secondary_mac_display_bounds(None) is None:
+            want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(None)
+            has_w = bool(re.search(rf"desktopwidth:i:{want_rw}\b", ex_txt, re.IGNORECASE))
+            has_h = bool(re.search(rf"desktopheight:i:{want_rh}\b", ex_txt, re.IGNORECASE))
+            need_exact_res = not (has_w and has_h)
+        return (not has_retina) or (not has_fit) or has_bad_dyn or need_exact_res
     except Exception:
         return False
 
 
 def _bookmark_already_matches(bookmarks: List[Tuple[str, str]], want_multimon: bool) -> bool:
-    """Kiểm tra bookmark đã khớp đúng chế độ 1 màn / 2 màn + Retina ON + Fit to Window ON + Dynamic Resolution OFF chưa."""
+    """Kiểm tra bookmark đã khớp đúng chế độ 1 màn / 2 màn + Retina ON + Fit to Window ON + Dynamic Resolution OFF + độ phân giải khít 3024x1834 chưa."""
     if not IS_MACOS or not bookmarks:
         return False
     if _LAST_APPLIED_BOOKMARK_MODE is not None and _LAST_APPLIED_BOOKMARK_MODE == bool(want_multimon):
@@ -6095,6 +6152,12 @@ def _bookmark_already_matches(bookmarks: List[Tuple[str, str]], want_multimon: b
         sm_val = 2 if want_multimon else 1
         has_mm = bool(re.search(rf"use multimon:i:{mm_val}\b", ex_txt, re.IGNORECASE))
         has_sm = bool(re.search(rf"screen mode id:i:{sm_val}\b", ex_txt, re.IGNORECASE))
+        if not want_multimon:
+            want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(None)
+            has_w = bool(re.search(rf"desktopwidth:i:{want_rw}\b", ex_txt, re.IGNORECASE))
+            has_h = bool(re.search(rf"desktopheight:i:{want_rh}\b", ex_txt, re.IGNORECASE))
+            if not (has_w and has_h):
+                return False
         return has_retina and has_fit and (not has_bad_dyn) and has_mm and has_sm
     except Exception:
         return False
@@ -6565,6 +6628,390 @@ def _ax_update_bookmark_display_mode(
                 (("optimize for retina", "retina"), True),
             ])
             _RDP_CLOSER_DIAG["edit_pc_checkboxes"] = cb_logs[-12:]
+
+            # 4B) Khi ở chế độ 1 màn cửa sổ thường: chọn độ phân giải Retina khít 100% (3024 x 1834) để xóa sạch khe hở 45px bên phải!
+            if not enable_multimon:
+                want_rw, want_rh, _, _, _, _ = _compute_exact_1mon_retina_res(q)
+                w_str, h_str = str(want_rw), str(want_rh)
+
+                def _try_pick_resolution_popup() -> Tuple[bool, List[str]]:
+                    pop_opened = [False]
+                    already_has = [False]
+                    seen_items: List[str] = []
+
+                    def _find_res_popup(el: Any, depth: int) -> None:
+                        if not el or depth > 16 or pop_opened[0] or already_has[0]:
+                            return
+                        if _gs(el, s_role).strip() == "AXPopUpButton" and _gb(el, s_enabled):
+                            cur_txt = (_gs(el, s_val) + " " + _gs(el, s_title)).strip().lower()
+                            if "bit" not in cur_txt and "color" not in cur_txt and "gateway" not in cur_txt:
+                                if w_str in cur_txt and h_str in cur_txt:
+                                    already_has[0] = True
+                                    return
+                                if ax.AXUIElementPerformAction(el, s_press) == 0:
+                                    pop_opened[0] = True
+                                    return
+                        ch = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                            try:
+                                nc = cf.CFArrayGetCount(ch.value)
+                                for ci in range(min(nc, 80)):
+                                    _find_res_popup(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                                    if pop_opened[0] or already_has[0]:
+                                        break
+                            finally:
+                                cf.CFRelease(ch.value)
+
+                    wp_w = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_w)) == 0 and wp_w.value:
+                        try:
+                            for wi in range(cf.CFArrayGetCount(wp_w.value)):
+                                _find_res_popup(cf.CFArrayGetValueAtIndex(wp_w.value, wi), 0)
+                        finally:
+                            cf.CFRelease(wp_w.value)
+                    if already_has[0]:
+                        return True, ["already"]
+                    if not pop_opened[0]:
+                        return False, ["no_popup"]
+
+                    time.sleep(0.15)
+                    picked = [False]
+
+                    def _pick_res_item(el: Any, depth: int) -> None:
+                        if not el or depth > 18 or picked[0]:
+                            return
+                        if _gs(el, s_role).strip() == "AXMenuItem":
+                            mt = _gs(el, s_title).strip()
+                            if mt:
+                                seen_items.append(mt)
+                            if w_str in mt and h_str in mt:
+                                if ax.AXUIElementPerformAction(el, s_press) == 0:
+                                    picked[0] = True
+                                    return
+                        ch = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                            try:
+                                nc = cf.CFArrayGetCount(ch.value)
+                                for ci in range(min(nc, 80)):
+                                    _pick_res_item(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                                    if picked[0]:
+                                        break
+                            finally:
+                                cf.CFRelease(ch.value)
+
+                    _pick_res_item(app_ax, 0)
+                    if not picked[0]:
+                        injector.press_key("esc")
+                        time.sleep(0.08)
+                    return picked[0], seen_items[-12:]
+
+                res_ok, res_items = _try_pick_resolution_popup()
+                if not res_ok:
+                    # Chưa có 3024 x 1834 trong danh sách -> mở Preferences -> Resolutions thêm tự động 1 lần duy nhất!
+                    def _cancel_cur_sheet(el: Any, depth: int, done_f: List[bool]) -> None:
+                        if not el or depth > 14 or done_f[0]:
+                            return
+                        if _gs(el, s_role).strip() == "AXButton" and _gs(el, s_title).strip().lower() in ("cancel", "hủy"):
+                            if ax.AXUIElementPerformAction(el, s_press) == 0:
+                                done_f[0] = True
+                                return
+                        ch = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                            try:
+                                for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
+                                    _cancel_cur_sheet(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1, done_f)
+                                    if done_f[0]:
+                                        break
+                            finally:
+                                cf.CFRelease(ch.value)
+
+                    c_done = [False]
+                    wc_tmp = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wc_tmp)) == 0 and wc_tmp.value:
+                        try:
+                            for wi in range(cf.CFArrayGetCount(wc_tmp.value)):
+                                _cancel_cur_sheet(cf.CFArrayGetValueAtIndex(wc_tmp.value, wi), 0, c_done)
+                        finally:
+                            cf.CFRelease(wc_tmp.value)
+                    time.sleep(0.18)
+
+                    # Mở Preferences qua Menu Bar (dự phòng Cmd + ,) — độc lập hoàn toàn với bộ gõ Telex
+                    _DIGIT_VK = {"0": 29, "1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22, "7": 26, "8": 28, "9": 25}
+                    _PREF_WIN_TITLES = ("preferences", "settings", "general", "resolutions", "user accounts", "gateways")
+
+                    def _cg_tap_vk(vk_code: int, cmd_flag: bool = False) -> None:
+                        if q is None:
+                            return
+                        kd = q.CGEventCreateKeyboardEvent(None, vk_code, True)
+                        ku = q.CGEventCreateKeyboardEvent(None, vk_code, False)
+                        fl = (q.kCGEventFlagMaskCommand | 0x00000008) if cmd_flag else 0
+                        q.CGEventSetFlags(kd, fl)
+                        q.CGEventSetFlags(ku, fl)
+                        q.CGEventPost(q.kCGHIDEventTap, kd)
+                        q.CGEventPost(q.kCGHIDEventTap, ku)
+
+                    opened_pref_menu = _click_menu_item(
+                        ("microsoft remote desktop", "windows app"),
+                        ("preferences...", "preferences\u2026", "settings...", "settings\u2026", "preferences", "settings"),
+                    )
+                    if not opened_pref_menu:
+                        _cg_tap_vk(43, cmd_flag=True)
+                    time.sleep(0.30)
+
+                    # Bấm tab "Resolutions" trong cửa sổ Preferences/Settings
+                    res_tab_ok = [False]
+                    res_tab_rc: List[Tuple[float, float, float, float]] = []
+                    pref_win_rc: List[Tuple[float, float, float, float]] = []
+
+                    def _find_resolutions_tab(el: Any, depth: int) -> None:
+                        if not el or depth > 12 or res_tab_ok[0]:
+                            return
+                        rl = _gs(el, s_role).strip()
+                        tl = (_gs(el, s_title) or _gs(el, s_desc) or _gs(el, s_val)).strip().lower()
+                        if "resolution" in tl:
+                            rb = _grect(el)
+                            if rb and rb[2] >= 20.0 and rb[3] >= 14.0:
+                                res_tab_rc.append(rb)
+                            if rl in ("AXButton", "AXRadioButton", "AXTab"):
+                                if ax.AXUIElementPerformAction(el, s_press) == 0:
+                                    res_tab_ok[0] = True
+                                    return
+                        ch = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                            try:
+                                for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
+                                    _find_resolutions_tab(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                                    if res_tab_ok[0]:
+                                        break
+                            finally:
+                                cf.CFRelease(ch.value)
+
+                    wp_p = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_p)) == 0 and wp_p.value:
+                        try:
+                            for wi in range(cf.CFArrayGetCount(wp_p.value)):
+                                wel_p = cf.CFArrayGetValueAtIndex(wp_p.value, wi)
+                                if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
+                                    ax.AXUIElementSetAttributeValue(wel_p, s_main, kTrue)
+                                    ax.AXUIElementSetAttributeValue(wel_p, s_focused, kTrue)
+                                    ax.AXUIElementPerformAction(wel_p, s_raise)
+                                    prc = _grect(wel_p)
+                                    if prc:
+                                        pref_win_rc.append(prc)
+                                    _find_resolutions_tab(wel_p, 0)
+                        finally:
+                            cf.CFRelease(wp_p.value)
+                    if not res_tab_ok[0] and res_tab_rc:
+                        rx, ry, rw_b, rh_b = res_tab_rc[0]
+                        _cg_click_once(rx + rw_b * 0.5, ry + rh_b * 0.5)
+                        res_tab_ok[0] = True
+                    time.sleep(0.22)
+
+                    # Bấm nút "+" thêm độ phân giải mới (ưu tiên khớp tên "+"/"add", dự phòng nút nhỏ bên trái nhất ở chân bảng)
+                    plus_ok = [False]
+                    footer_small_btns: List[Tuple[float, float, float, float]] = []
+                    py_min = (pref_win_rc[0][1] + pref_win_rc[0][3] * 0.55) if pref_win_rc else 420.0
+
+                    def _click_plus_btn(el: Any, depth: int) -> None:
+                        if not el or depth > 14 or plus_ok[0]:
+                            return
+                        if _gs(el, s_role).strip() == "AXButton" and _gb(el, s_enabled):
+                            bt = _gs(el, s_title).strip()
+                            bd = _gs(el, s_desc).strip().lower()
+                            rb = _grect(el)
+                            if bt == "+" or bt.lower() == "add" or "add" in bd:
+                                if ax.AXUIElementPerformAction(el, s_press) == 0:
+                                    plus_ok[0] = True
+                                    return
+                            if bt == "" and rb and 14.0 <= rb[2] <= 42.0 and 14.0 <= rb[3] <= 36.0 and rb[1] >= py_min:
+                                footer_small_btns.append(rb)
+                        ch = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                            try:
+                                for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
+                                    _click_plus_btn(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                                    if plus_ok[0]:
+                                        break
+                            finally:
+                                cf.CFRelease(ch.value)
+
+                    wp_pl = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_pl)) == 0 and wp_pl.value:
+                        try:
+                            for wi in range(cf.CFArrayGetCount(wp_pl.value)):
+                                wel_p = cf.CFArrayGetValueAtIndex(wp_pl.value, wi)
+                                if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
+                                    _click_plus_btn(wel_p, 0)
+                        finally:
+                            cf.CFRelease(wp_pl.value)
+                    if not plus_ok[0] and footer_small_btns:
+                        footer_small_btns.sort(key=lambda r: (round(r[1] / 20.0), r[0]))
+                        bx_p, by_p, bw_p, bh_p = footer_small_btns[0]
+                        _cg_click_once(bx_p + bw_p * 0.5, by_p + bh_p * 0.5)
+                        plus_ok[0] = True
+                    time.sleep(0.24)
+
+                    # Tìm 2 ô AXTextField (Width, Height) -> nhập 3024 và 1834 -> bấm Add/OK (dự phòng Enter)
+                    tf_rects: List[Tuple[float, float, float, float]] = []
+
+                    def _collect_tfs(el: Any, depth: int) -> None:
+                        if not el or depth > 16:
+                            return
+                        if _gs(el, s_role).strip() == "AXTextField":
+                            rb = _grect(el)
+                            if rb and rb[2] >= 30.0 and rb[3] >= 14.0:
+                                tf_rects.append(rb)
+                        ch = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                            try:
+                                for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
+                                    _collect_tfs(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                            finally:
+                                cf.CFRelease(ch.value)
+
+                    wp_tf = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_tf)) == 0 and wp_tf.value:
+                        try:
+                            for wi in range(cf.CFArrayGetCount(wp_tf.value)):
+                                wel_p = cf.CFArrayGetValueAtIndex(wp_tf.value, wi)
+                                if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
+                                    _collect_tfs(wel_p, 0)
+                        finally:
+                            cf.CFRelease(wp_tf.value)
+                    tf_rects.sort(key=lambda r: (round(r[1] / 24.0), r[0]))
+                    confirmed_add = [False]
+                    if len(tf_rects) >= 2:
+                        r0, r1 = tf_rects[0], tf_rects[1]
+                        _cg_click_once(r0[0] + r0[2] * 0.5, r0[1] + r0[3] * 0.5)
+                        time.sleep(0.06)
+                        _cg_tap_vk(0, cmd_flag=True)
+                        for ch_d in w_str:
+                            if ch_d in _DIGIT_VK:
+                                _cg_tap_vk(_DIGIT_VK[ch_d])
+                        time.sleep(0.06)
+                        _cg_click_once(r1[0] + r1[2] * 0.5, r1[1] + r1[3] * 0.5)
+                        time.sleep(0.06)
+                        _cg_tap_vk(0, cmd_flag=True)
+                        for ch_d in h_str:
+                            if ch_d in _DIGIT_VK:
+                                _cg_tap_vk(_DIGIT_VK[ch_d])
+                        time.sleep(0.08)
+
+                        def _click_confirm_add(el: Any, depth: int) -> None:
+                            if not el or depth > 16 or confirmed_add[0]:
+                                return
+                            if _gs(el, s_role).strip() == "AXButton" and _gb(el, s_enabled):
+                                bt_c = _gs(el, s_title).strip().lower()
+                                if bt_c in ("add", "ok", "create", "save", "done", "thêm"):
+                                    if ax.AXUIElementPerformAction(el, s_press) == 0:
+                                        confirmed_add[0] = True
+                                        return
+                            ch = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                                try:
+                                    for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
+                                        _click_confirm_add(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                                        if confirmed_add[0]:
+                                            break
+                                finally:
+                                    cf.CFRelease(ch.value)
+
+                        wp_cf = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_cf)) == 0 and wp_cf.value:
+                            try:
+                                for wi in range(cf.CFArrayGetCount(wp_cf.value)):
+                                    wel_p = cf.CFArrayGetValueAtIndex(wp_cf.value, wi)
+                                    if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
+                                        _click_confirm_add(wel_p, 0)
+                            finally:
+                                cf.CFRelease(wp_cf.value)
+                        if not confirmed_add[0]:
+                            _cg_tap_vk(36)
+                        time.sleep(0.20)
+
+                    # Đóng cửa sổ Preferences
+                    wp_cl = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_cl)) == 0 and wp_cl.value:
+                        try:
+                            for wi in range(cf.CFArrayGetCount(wp_cl.value)):
+                                wel_p = cf.CFArrayGetValueAtIndex(wp_cl.value, wi)
+                                if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
+                                    br_p = ctypes.c_void_p()
+                                    if ax.AXUIElementCopyAttributeValue(wel_p, s_close, ctypes.byref(br_p)) == 0 and br_p.value:
+                                        try:
+                                            ax.AXUIElementPerformAction(br_p.value, s_press)
+                                        finally:
+                                            cf.CFRelease(br_p.value)
+                        finally:
+                            cf.CFRelease(wp_cl.value)
+                    time.sleep(0.18)
+
+                    # Mở lại Edit PC -> Display -> chọn 3024 x 1834
+                    _click_menu_item(("window", "cửa sổ"), ("connection center", "pcs"))
+                    time.sleep(0.15)
+                    reopened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc...", "edit"))
+                    if not reopened_edit:
+                        re_cands: List[Tuple[float, float, float, float]] = list(cands)
+                        if not re_cands:
+                            def _find_card_re(el: Any, depth: int) -> None:
+                                if not el or depth > 18 or len(re_cands) >= 2:
+                                    return
+                                tx = (_gs(el, s_title) + " " + _gs(el, s_val) + " " + _gs(el, s_desc)).strip().lower()
+                                if (t_low and t_low in tx) or "192.168.52.230" in tx:
+                                    rc_b = _grect(el)
+                                    if rc_b and rc_b[2] >= 20.0 and rc_b[3] >= 12.0:
+                                        re_cands.append(rc_b)
+                                ch = ctypes.c_void_p()
+                                if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                                    try:
+                                        for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
+                                            _find_card_re(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                                    finally:
+                                        cf.CFRelease(ch.value)
+
+                            ws_re = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(ws_re)) == 0 and ws_re.value:
+                                try:
+                                    for wi in range(cf.CFArrayGetCount(ws_re.value)):
+                                        _find_card_re(cf.CFArrayGetValueAtIndex(ws_re.value, wi), 0)
+                                finally:
+                                    cf.CFRelease(ws_re.value)
+                        if re_cands:
+                            bx_r, by_r, bw_r, bh_r = re_cands[0]
+                            cx_r = bx_r + bw_r * 0.5
+                            cy_r = (by_r - 36.0) if (bh_r < 32.0 and by_r > 120.0) else (by_r + min(32.0, bh_r * 0.4))
+                            _cg_click_once(cx_r, cy_r)
+                            time.sleep(0.18)
+                            reopened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc...", "edit"))
+                    if reopened_edit:
+                        time.sleep(0.22)
+                        pressed_disp[0] = False
+                        disp_tab_rects.clear()
+                        wt_re = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wt_re)) == 0 and wt_re.value:
+                            try:
+                                for wi in range(cf.CFArrayGetCount(wt_re.value)):
+                                    _click_display_tab(cf.CFArrayGetValueAtIndex(wt_re.value, wi), 0)
+                            finally:
+                                cf.CFRelease(wt_re.value)
+                        if not pressed_disp[0] and disp_tab_rects:
+                            rx, ry, rw_b, rh_b = disp_tab_rects[0]
+                            _cg_click_once(rx + rw_b * 0.5, ry + rh_b * 0.5)
+                        time.sleep(0.16)
+                        _apply_checkbox_pass([
+                            (("use all monitors",), False),
+                            (("update session resolution", "on resize"), False),
+                        ])
+                        time.sleep(0.08)
+                        _apply_checkbox_pass([
+                            (("start session in full screen", "in full screen"), False),
+                            (("fit session to window",), True),
+                            (("optimize for retina", "retina"), True),
+                        ])
+                        res_ok, res_items = _try_pick_resolution_popup()
+                    _RDP_CLOSER_DIAG["pref_res_trace"] = f"pm={int(opened_pref_menu)},tab={int(res_tab_ok[0])},plus={int(plus_ok[0])},tf={len(tf_rects)},add={int(confirmed_add[0])}"
+
+                _RDP_CLOSER_DIAG["res_sync_trace"] = f"want={w_str}x{h_str},ok={int(res_ok)},items={res_items[:6]}"
 
             # 5) Bấm nút Save (hoặc Cancel nếu Save không tồn tại để không bao giờ treo hộp thoại)
             saved_ok = [False]
@@ -7096,6 +7543,7 @@ def _apply_full_mac_window_bounds(target_pid: int, target_sess: str) -> Tuple[bo
             import Quartz as q  # type: ignore
         except Exception:
             return False, 0.0, 0.0
+    _, _, def_x, def_y, def_w, def_h = _compute_exact_1mon_retina_res(q)
     mb = q.CGDisplayBounds(q.CGMainDisplayID())
     mx, my, mw, mh = float(mb.origin.x), float(mb.origin.y), float(mb.size.width), float(mb.size.height)
     saved_b = _load_saved_1mon_bounds()
@@ -7105,7 +7553,7 @@ def _apply_full_mac_window_bounds(target_pid: int, target_sess: str) -> Tuple[bo
         tx = max(mx, min(mx + mw - tw, float(saved_b["x"])))
         ty = max(my + 24.0, min(my + mh - th, float(saved_b["y"])))
     else:
-        tx, ty, tw, th = mx, my + 38.0, mw, max(600.0, mh - 38.0)
+        tx, ty, tw, th = def_x, def_y, def_w, def_h
 
     ax = mac_vdisp._ax_lib
     cf = mac_vdisp._cf_lib
