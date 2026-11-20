@@ -6207,11 +6207,13 @@ def _ax_update_bookmark_display_mode(
             with objc.autorelease_pool():
                 for wu_chk in (q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements, q.kCGNullWindowID) or []):
                     if int(wu_chk.get("kCGWindowLayer", -1)) == 0 and str(wu_chk.get("kCGWindowName", "") or "").strip().lower() == "untitled":
-                        ol_u = str(wu_chk.get("kCGWindowOwnerName", "") or "").strip().lower()
-                        if "microsoft remote desktop" in ol_u or "windows app" in ol_u:
-                            spid = int(wu_chk.get("kCGWindowOwnerPID", 0) or 0)
-                            if spid > 0 and spid not in stuck_pids:
-                                stuck_pids.append(spid)
+                        wbu = wu_chk.get("kCGWindowBounds") or {}
+                        if 320.0 <= float(wbu.get("Width", 0.0)) <= 430.0 and 110.0 <= float(wbu.get("Height", 0.0)) <= 200.0:
+                            ol_u = str(wu_chk.get("kCGWindowOwnerName", "") or "").strip().lower()
+                            if "microsoft remote desktop" in ol_u or "windows app" in ol_u:
+                                spid = int(wu_chk.get("kCGWindowOwnerPID", 0) or 0)
+                                if spid > 0 and spid not in stuck_pids:
+                                    stuck_pids.append(spid)
             if stuck_pids and not _rdp_probe_vdisp_state()[1]:
                 for spid in stuck_pids:
                     try:
@@ -6531,7 +6533,8 @@ def _ax_update_bookmark_display_mode(
                     if not wel_cl:
                         continue
                     wt_cl = _gs(wel_cl, s_title).strip().lower()
-                    if wt_cl in ("untitled", "add resolution", "custom resolution"):
+                    rc_cl = _grect(wel_cl)
+                    if wt_cl in ("untitled", "add resolution", "custom resolution") and rc_cl and rc_cl[2] <= 430.0 and rc_cl[3] <= 220.0:
                         if q is not None:
                             ed_u = q.CGEventCreateKeyboardEvent(None, 53, True)
                             eu_u = q.CGEventCreateKeyboardEvent(None, 53, False)
