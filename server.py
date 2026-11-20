@@ -6197,28 +6197,8 @@ def _ax_update_bookmark_display_mode(
     def _cfstr(s: str) -> ctypes.c_void_p:
         return cf.CFStringCreateWithCString(None, s.encode("utf-8"), kCFStringEncodingUTF8)
 
-    # Ghi nhận ứng dụng đang active trước khi chỉnh ngầm (nếu connect_after=False sẽ trả lại focus)
-    orig_front_pid = 0
-    sys_ax = ax.AXUIElementCreateSystemWide()
-    if sys_ax:
-        sf_app = _cfstr("AXFocusedApplication")
-        try:
-            fr = ctypes.c_void_p()
-            if ax.AXUIElementCopyAttributeValue(sys_ax, sf_app, ctypes.byref(fr)) == 0 and fr.value:
-                try:
-                    pv = ctypes.c_int32(0)
-                    if ax.AXUIElementGetPid(fr.value, ctypes.byref(pv)) == 0:
-                        orig_front_pid = int(pv.value)
-                finally:
-                    cf.CFRelease(fr.value)
-        finally:
-            cf.CFRelease(sys_ax)
-            if sf_app:
-                cf.CFRelease(sf_app)
-
-    live_pids = _find_live_mrd_pids()
-    rdp_pid = live_pids[0] if live_pids else 0
-    # Nếu tiến trình MRD cũ đang kẹt hộp thoại modal "Untitled" (380x148) khi chưa mở phiên nào -> SIGKILL dứt điểm ngay lập tức!
+    _RDP_CLOSER_DIAG["ax_stage"] = "enter"
+    # 0A) Nếu tiến trình MRD cũ đang kẹt hộp thoại modal "Untitled" (380x148) khi chưa mở phiên nào -> SIGKILL NGAY LẬP TỨC trước mọi lệnh AX!
     if q is not None:
         try:
             stuck_pids: List[int] = []
@@ -6241,10 +6221,22 @@ def _ax_update_bookmark_display_mode(
                     cur_live = _find_live_mrd_pids()
                     if all(sp not in cur_live for sp in stuck_pids):
                         break
-                live_pids = _find_live_mrd_pids()
-                rdp_pid = live_pids[0] if live_pids else 0
+                _RDP_CLOSER_DIAG["ax_stage"] = f"killed_stuck:{stuck_pids}"
         except Exception as exc_k:
             _RDP_CLOSER_DIAG["kill_stuck_err"] = str(exc_k)[:120]
+
+    # Ghi nhận ứng dụng đang active qua NSWorkspace (0% phụ thuộc cổng Mach Accessibility!)
+    orig_front_pid = 0
+    try:
+        with objc.autorelease_pool():
+            fa = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            if fa is not None:
+                orig_front_pid = int(fa.processIdentifier())
+    except Exception:
+        pass
+
+    live_pids = _find_live_mrd_pids()
+    rdp_pid = live_pids[0] if live_pids else 0
     if rdp_pid <= 0:
         subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(20):
