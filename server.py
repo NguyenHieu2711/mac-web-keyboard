@@ -1682,6 +1682,257 @@ class LiveLensCapturer:
         return header + jpeg_bytes
 
 
+_CURSOR_SHIELD_OBJC = r"""
+#import <Cocoa/Cocoa.h>
+#import <CoreGraphics/CoreGraphics.h>
+#include <dlfcn.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+typedef uint32_t CGSConnectionID;
+typedef CGSConnectionID (*CGSDefaultConnFn)(void);
+typedef CGError (*CGSSetConnPropFn)(CGSConnectionID, CGSConnectionID, CFStringRef, CFTypeRef);
+
+static NSCursor *g_blankCursor = nil;
+static BOOL g_hidden = NO;
+static int g_pin = 1;
+static double g_qx = 756.0;
+static double g_qy = 978.0;
+
+static void EnableBgCursorProp(void) {
+    CGSDefaultConnFn defFn = (CGSDefaultConnFn)dlsym(RTLD_DEFAULT, "_CGSDefaultConnection");
+    if (!defFn) defFn = (CGSDefaultConnFn)dlsym(RTLD_DEFAULT, "CGSDefaultConnectionForThread");
+    CGSSetConnPropFn setFn = (CGSSetConnPropFn)dlsym(RTLD_DEFAULT, "CGSSetConnectionProperty");
+    if (defFn && setFn) {
+        CGSConnectionID cid = defFn();
+        if (cid) {
+            setFn(cid, cid, CFSTR("SetsCursorInBackground"), kCFBooleanTrue);
+        }
+    }
+}
+
+static NSCursor *GetBlankCursor(void) {
+    if (!g_blankCursor) {
+        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
+            initWithBitmapDataPlanes:NULL
+                          pixelsWide:16
+                          pixelsHigh:16
+                       bitsPerSample:8
+                     samplesPerPixel:4
+                            hasAlpha:YES
+                            isPlanar:NO
+                      colorSpaceName:NSCalibratedRGBColorSpace
+                         bytesPerRow:64
+                        bitsPerPixel:32];
+        unsigned char *bmp = [rep bitmapData];
+        if (bmp) memset(bmp, 0, 16 * 64);
+        NSImage *img = [[NSImage alloc] initWithSize:NSMakeSize(16, 16)];
+        [img addRepresentation:rep];
+        g_blankCursor = [[NSCursor alloc] initWithImage:img hotSpot:NSMakePoint(8, 8)];
+    }
+    return g_blankCursor;
+}
+
+static void PostSilentMoveAt(double qx, double qy) {
+    CGEventRef ev = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, CGPointMake(qx, qy), kCGMouseButtonLeft);
+    if (ev) {
+        CGEventSetIntegerValueField(ev, kCGEventSourceUserData, 0x4D4B4231);
+        CGEventPost(kCGHIDEventTap, ev);
+        CFRelease(ev);
+    }
+}
+
+static void ForceHideMacCursorNow(void) {
+    [GetBlankCursor() set];
+    for (int i = 0; i < 10 && CGCursorIsVisible(); i++) {
+        CGDisplayHideCursor(kCGNullDirectDisplay);
+        CGDisplayHideCursor(CGMainDisplayID());
+    }
+}
+
+static void ForceShowMacCursorNow(void) {
+    [[NSCursor arrowCursor] set];
+    for (int i = 0; i < 16 && !CGCursorIsVisible(); i++) {
+        CGDisplayShowCursor(kCGNullDirectDisplay);
+        CGDisplayShowCursor(CGMainDisplayID());
+    }
+}
+
+@interface CursorShieldPanel : NSPanel
+@end
+@implementation CursorShieldPanel
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
+@interface CursorShieldView : NSView
+@end
+@implementation CursorShieldView
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea *ta in [self.trackingAreas copy]) {
+        [self removeTrackingArea:ta];
+    }
+    NSTrackingAreaOptions opts = (NSTrackingCursorUpdate |
+                                  NSTrackingMouseEnteredAndExited |
+                                  NSTrackingMouseMoved |
+                                  NSTrackingActiveAlways |
+                                  NSTrackingInVisibleRect);
+    NSTrackingArea *ta = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                                      options:opts
+                                                        owner:self
+                                                     userInfo:nil];
+    [self addTrackingArea:ta];
+}
+- (void)resetCursorRects {
+    [super resetCursorRects];
+    [self addCursorRect:self.bounds cursor:GetBlankCursor()];
+}
+- (void)cursorUpdate:(NSEvent *)event { [GetBlankCursor() set]; }
+- (void)mouseEntered:(NSEvent *)event { [GetBlankCursor() set]; }
+- (void)mouseMoved:(NSEvent *)event { [GetBlankCursor() set]; }
+@end
+
+int main(int argc, const char *argv[]) {
+    @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        [app finishLaunching];
+        EnableBgCursorProp();
+        CGSetLocalEventsSuppressionInterval(0.0);
+
+        NSRect initRect = NSMakeRect(-200.0, -200.0, 36.0, 36.0);
+        CursorShieldPanel *panel = [[CursorShieldPanel alloc]
+            initWithContentRect:initRect
+                      styleMask:(NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel)
+                        backing:NSBackingStoreBuffered
+                          defer:NO];
+        panel.opaque = NO;
+        panel.hasShadow = NO;
+        panel.backgroundColor = [NSColor colorWithWhite:0.0 alpha:0.004];
+        panel.ignoresMouseEvents = NO;
+        panel.level = (NSWindowLevel)(CGShieldingWindowLevel() + 1);
+        panel.collectionBehavior = (NSWindowCollectionBehaviorCanJoinAllSpaces |
+                                    NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                    NSWindowCollectionBehaviorStationary |
+                                    NSWindowCollectionBehaviorIgnoresCycle);
+        CursorShieldView *sview = [[CursorShieldView alloc] initWithFrame:NSMakeRect(0, 0, 36.0, 36.0)];
+        panel.contentView = sview;
+
+        void (^applyHide)(double, double, int) = ^(double qx, double qy, int pin) {
+            g_hidden = YES;
+            g_qx = qx;
+            g_qy = qy;
+            g_pin = pin;
+            CGRect mb = CGDisplayBounds(CGMainDisplayID());
+            double cocoaY = mb.size.height - qy;
+            [panel setFrame:NSMakeRect(qx - 18.0, cocoaY - 18.0, 36.0, 36.0) display:YES];
+            [panel orderFrontRegardless];
+            [panel invalidateCursorRectsForView:sview];
+            if (pin) {
+                CGSetLocalEventsSuppressionInterval(0.0);
+                CGWarpMouseCursorPosition(CGPointMake(qx, qy));
+                CGAssociateMouseAndMouseCursorPosition(false);
+                PostSilentMoveAt(qx, qy);
+            }
+            ForceHideMacCursorNow();
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+                if (g_hidden) ForceHideMacCursorNow();
+            });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(90 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+                if (g_hidden) ForceHideMacCursorNow();
+            });
+        };
+
+        void (^applyShow)(void) = ^{
+            g_hidden = NO;
+            g_pin = 0;
+            [panel orderOut:nil];
+            ForceShowMacCursorNow();
+        };
+
+        [NSTimer scheduledTimerWithTimeInterval:0.016
+                                        repeats:YES
+                                          block:^(NSTimer *t) {
+            (void)t;
+            if (!g_hidden) return;
+            if (CGCursorIsVisible()) {
+                ForceHideMacCursorNow();
+            }
+            if (g_pin) {
+                CGEventRef ev = CGEventCreate(NULL);
+                if (ev) {
+                    CGPoint p = CGEventGetLocation(ev);
+                    CFRelease(ev);
+                    if (fabs(p.x - g_qx) > 3.0 || fabs(p.y - g_qy) > 3.0) {
+                        CGSetLocalEventsSuppressionInterval(0.0);
+                        CGWarpMouseCursorPosition(CGPointMake(g_qx, g_qy));
+                        CGAssociateMouseAndMouseCursorPosition(false);
+                        PostSilentMoveAt(g_qx, g_qy);
+                        ForceHideMacCursorNow();
+                    }
+                }
+            }
+        }];
+
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+            char line[256];
+            while (fgets(line, sizeof(line), stdin) != NULL) {
+                if (line[0] == 'H') {
+                    double qx = 756.0, qy = 978.0;
+                    int pin = 1;
+                    sscanf(line + 1, "%lf %lf %d", &qx, &qy, &pin);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        applyHide(qx, qy, pin);
+                    });
+                } else if (line[0] == 'P') {
+                    int pin = 1;
+                    sscanf(line + 1, "%d", &pin);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        g_pin = pin;
+                        if (g_hidden) ForceHideMacCursorNow();
+                    });
+                } else if (line[0] == 'R') {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (g_hidden) ForceHideMacCursorNow();
+                    });
+                } else if (line[0] == 'S') {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        applyShow();
+                    });
+                } else if (line[0] == 'Q') {
+                    break;
+                }
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                applyShow();
+                [NSApp stop:nil];
+                NSEvent *w = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                                location:NSZeroPoint
+                                           modifierFlags:0
+                                               timestamp:0
+                                            windowNumber:0
+                                                 context:nil
+                                                 subtype:0
+                                                   data1:0
+                                                   data2:0];
+                if (w) [NSApp postEvent:w atStart:YES];
+            });
+            usleep(120000);
+            ForceShowMacCursorNow();
+            _exit(0);
+        });
+
+        [NSApp run];
+    }
+    return 0;
+}
+"""
+
+
 class MacKvmBridge:
     """
     Quản lý 3 chế độ Con chuột vật lý độc lập, rõ ràng (không bao giờ chạy trùng trên cả 2 màn hình):
@@ -1701,48 +1952,114 @@ class MacKvmBridge:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._send_queue: Optional[asyncio.Queue] = None
         self._saved_pos: Tuple[float, float] = (600.0, 400.0)
+        self._park_pos: Tuple[float, float] = (756.0, 978.0)
         self._left_edge_push: float = 0.0
         self._right_edge_push: float = 0.0
         self._last_cross_at: float = 0.0
+        self._last_rehide_at: float = 0.0
         self._bounds_cache: Tuple[float, float, float, float] = (0.0, 0.0, 1440.0, 900.0)
         self._bounds_at: float = 0.0
         self._quartz: Any = None
         self._tap: Any = None
         self._cursor_hidden: bool = False
         self._bg_cursor_ready: bool = False
+        self._shield_proc: Optional[subprocess.Popen] = None
+        self._shield_lock = threading.Lock()
         self._lock = threading.Lock()
 
         if IS_MACOS:
             self._enable_background_cursor_control()
+            threading.Thread(target=self._ensure_shield_helper, daemon=True).start()
             self._start_tap_thread()
             atexit.register(self._restore_cursor_on_exit)
+
+    def _ensure_shield_helper(self) -> Optional[subprocess.Popen]:
+        if not IS_MACOS:
+            return None
+        with self._shield_lock:
+            if self._shield_proc is not None and self._shield_proc.poll() is None:
+                return self._shield_proc
+            try:
+                cache_dir = Path.home() / ".cache" / "mac-web-keyboard"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                src_p = cache_dir / "mac_cursor_shield_v1.m"
+                bin_p = cache_dir / "mac_cursor_shield_v1"
+                need_build = not bin_p.exists()
+                if not src_p.exists() or src_p.read_text(encoding="utf-8", errors="ignore") != _CURSOR_SHIELD_OBJC:
+                    src_p.write_text(_CURSOR_SHIELD_OBJC, encoding="utf-8")
+                    need_build = True
+                if need_build:
+                    subprocess.run(
+                        [
+                            "clang", "-fobjc-arc", "-O2",
+                            "-framework", "Cocoa",
+                            "-framework", "CoreGraphics",
+                            "-framework", "ApplicationServices",
+                            str(src_p), "-o", str(bin_p),
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=20,
+                        check=True,
+                    )
+                self._shield_proc = subprocess.Popen(
+                    [str(bin_p)],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                )
+                return self._shield_proc
+            except Exception as exc:
+                logger.debug("CursorShield helper init error: %s", exc)
+                self._shield_proc = None
+                return None
+
+    def _send_shield_cmd(self, cmd: str) -> None:
+        if not IS_MACOS:
+            return
+        proc = self._ensure_shield_helper()
+        if proc is None or proc.stdin is None:
+            return
+        with self._shield_lock:
+            try:
+                proc.stdin.write(cmd + "\n")
+                proc.stdin.flush()
+            except Exception:
+                self._shield_proc = None
+
+    def _get_main_park_point(self) -> Tuple[float, float]:
+        q = self._quartz
+        if q is not None:
+            try:
+                mb = q.CGDisplayBounds(q.CGMainDisplayID())
+                # Đỗ tại tâm cạnh đáy (cách xa SmartRightDock bên phải, cạnh trái, Menu Bar trên và 4 góc Hot Corners!)
+                px = float(mb.origin.x) + float(mb.size.width) * 0.5
+                py = float(mb.origin.y) + max(40.0, float(mb.size.height) - 4.0)
+                self._park_pos = (px, py)
+                return self._park_pos
+            except Exception:
+                pass
+        return self._park_pos
 
     def _enable_background_cursor_control(self) -> None:
         if not IS_MACOS:
             return
         try:
-            import Foundation  # type: ignore
-            import objc  # type: ignore
-
             app_svc_path = ctypes.util.find_library("ApplicationServices")
             cf_path = ctypes.util.find_library("CoreFoundation")
             if not app_svc_path or not cf_path:
                 return
             app_svc = ctypes.cdll.LoadLibrary(app_svc_path)
             cf = ctypes.cdll.LoadLibrary(cf_path)
-            cgs_fn = getattr(app_svc, "_CGSDefaultConnection", None) or getattr(
-                app_svc, "CGSDefaultConnectionForThread", None
-            )
+            cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+            cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+            cf.CFRelease.argtypes = [ctypes.c_void_p]
+            cf.CFRelease.restype = None
             set_prop = getattr(app_svc, "CGSSetConnectionProperty", None)
-            if cgs_fn is None or set_prop is None:
+            if set_prop is None:
                 return
-            cgs_fn.argtypes = []
-            cgs_fn.restype = ctypes.c_uint32
-            cid = cgs_fn()
-            if not cid:
-                return
-            ns_key = Foundation.NSString.stringWithString_("SetsCursorInBackground")
-            k_true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
             set_prop.argtypes = [
                 ctypes.c_uint32,
                 ctypes.c_uint32,
@@ -1750,8 +2067,22 @@ class MacKvmBridge:
                 ctypes.c_void_p,
             ]
             set_prop.restype = ctypes.c_int32
-            set_prop(cid, cid, objc.pyobjc_id(ns_key), k_true)
-            self._bg_cursor_ready = True
+            k_true_val = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
+            cf_key = cf.CFStringCreateWithCString(None, b"SetsCursorInBackground", 0x08000100)
+            if not cf_key or not k_true_val:
+                return
+            try:
+                for fn_name in ("_CGSDefaultConnection", "CGSDefaultConnectionForThread"):
+                    cgs_fn = getattr(app_svc, fn_name, None)
+                    if cgs_fn is not None:
+                        cgs_fn.argtypes = []
+                        cgs_fn.restype = ctypes.c_uint32
+                        cid = cgs_fn()
+                        if cid:
+                            set_prop(cid, cid, cf_key, k_true_val)
+                self._bg_cursor_ready = True
+            finally:
+                cf.CFRelease(cf_key)
         except Exception as exc:
             logger.debug("SetsCursorInBackground init skipped: %s", exc)
 
@@ -1762,23 +2093,78 @@ class MacKvmBridge:
         try:
             self._enable_background_cursor_control()
             disp_id = q.CGMainDisplayID()
-            if hide and not self._cursor_hidden:
-                q.CGDisplayHideCursor(disp_id)
+            null_id = getattr(q, "kCGNullDirectDisplay", 0)
+            is_vis_fn = getattr(q, "CGCursorIsVisible", None)
+            if hide:
+                px, py = self._get_main_park_point()
+                pin_flag = 0 if int(globals().get("_ACTIVE_RDP_WS_COUNT", 0) or 0) > 0 else 1
+                self._send_shield_cmd(f"H {px:.1f} {py:.1f} {pin_flag}")
+                if callable(is_vis_fn):
+                    for _ in range(8):
+                        if not is_vis_fn():
+                            break
+                        q.CGDisplayHideCursor(null_id)
+                        q.CGDisplayHideCursor(disp_id)
+                elif not self._cursor_hidden:
+                    q.CGDisplayHideCursor(null_id)
+                    q.CGDisplayHideCursor(disp_id)
                 self._cursor_hidden = True
-            elif not hide and self._cursor_hidden:
-                q.CGDisplayShowCursor(disp_id)
+            else:
+                self._send_shield_cmd("S")
+                if callable(is_vis_fn):
+                    for _ in range(16):
+                        if is_vis_fn():
+                            break
+                        q.CGDisplayShowCursor(null_id)
+                        q.CGDisplayShowCursor(disp_id)
+                elif self._cursor_hidden:
+                    q.CGDisplayShowCursor(null_id)
+                    q.CGDisplayShowCursor(disp_id)
                 self._cursor_hidden = False
         except Exception as exc:
             logger.debug("Cursor visibility toggle error: %s", exc)
 
+    def reassert_cursor_hidden(self, pin: Optional[bool] = None, force: bool = False) -> None:
+        if not self.captured or not IS_MACOS:
+            return
+        now = time.monotonic()
+        if pin is not None:
+            self._send_shield_cmd(f"P {1 if pin else 0}")
+        elif force:
+            self._send_shield_cmd("R")
+        if not force and (now - self._last_rehide_at) < 0.08 and pin is None:
+            return
+        self._last_rehide_at = now
+        q = self._quartz
+        if q is not None:
+            try:
+                is_vis_fn = getattr(q, "CGCursorIsVisible", None)
+                if callable(is_vis_fn) and is_vis_fn():
+                    q.CGDisplayHideCursor(getattr(q, "kCGNullDirectDisplay", 0))
+                    q.CGDisplayHideCursor(q.CGMainDisplayID())
+            except Exception:
+                pass
+
     def _restore_cursor_on_exit(self) -> None:
+        try:
+            self._send_shield_cmd("S")
+            self._send_shield_cmd("Q")
+        except Exception:
+            pass
         try:
             q = self._quartz
             if q is not None:
                 q.CGAssociateMouseAndMouseCursorPosition(True)
-                if self._cursor_hidden:
+                is_vis_fn = getattr(q, "CGCursorIsVisible", None)
+                if callable(is_vis_fn):
+                    for _ in range(16):
+                        if is_vis_fn():
+                            break
+                        q.CGDisplayShowCursor(getattr(q, "kCGNullDirectDisplay", 0))
+                        q.CGDisplayShowCursor(q.CGMainDisplayID())
+                elif self._cursor_hidden:
                     q.CGDisplayShowCursor(q.CGMainDisplayID())
-                    self._cursor_hidden = False
+                self._cursor_hidden = False
         except Exception:
             pass
 
@@ -1927,9 +2313,8 @@ class MacKvmBridge:
                             self._saved_pos = (float(loc.x), float(loc.y))
                         except Exception:
                             pass
-                    q.CGWarpMouseCursorPosition(
-                        (max_x - 1.0, max(min_y + 40.0, max_y - 28.0))
-                    )
+                    pk_x, pk_y = self._get_main_park_point()
+                    q.CGWarpMouseCursorPosition((pk_x, pk_y))
                     q.CGAssociateMouseAndMouseCursorPosition(False)
                     self._set_mac_cursor_hidden(True)
                 else:
@@ -2099,6 +2484,7 @@ class MacKvmBridge:
                             q.kCGEventRightMouseDragged,
                             q.kCGEventOtherMouseDragged,
                         ):
+                            self.reassert_cursor_hidden()
                             if dx != 0.0 or dy != 0.0:
                                 self._enqueue_payload(
                                     {
@@ -4285,12 +4671,16 @@ def _dispatch_parallel_rdp_input(
         injector._mouse_x = sx
         injector._mouse_y = sy
 
+        kvm_on_phone = bool(kvm_bridge.captured)
         if mtype == "ptr_down":
+            if kvm_on_phone:
+                kvm_bridge.reassert_cursor_hidden(pin=False, force=True)
             _activate_mac_pid_if_needed(pid)
             btn_idx = int(data.get("btn", 0))
             cnt = max(1, int(data.get("count", 1)))
             state["held_btn"] = btn_idx
-            q.CGWarpMouseCursorPosition((sx, sy))
+            if not kvm_on_phone:
+                q.CGWarpMouseCursorPosition((sx, sy))
             if btn_idx == 2:
                 ev_t, cg_b = q.kCGEventRightMouseDown, q.kCGMouseButtonRight
             elif btn_idx == 1:
@@ -4301,6 +4691,8 @@ def _dispatch_parallel_rdp_input(
             q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, cnt)
             q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
             q.CGEventPost(q.kCGHIDEventTap, ev)
+            if kvm_on_phone:
+                kvm_bridge.reassert_cursor_hidden(force=True)
         elif mtype == "ptr_up":
             btn_idx = int(data.get("btn", 0))
             cnt = max(1, int(data.get("count", 1)))
@@ -4316,9 +4708,14 @@ def _dispatch_parallel_rdp_input(
             q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, cnt)
             q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
             q.CGEventPost(q.kCGHIDEventTap, ev)
+            if kvm_on_phone:
+                kvm_bridge.reassert_cursor_hidden(pin=(int(state.get("held_btn", -1)) < 0), force=True)
         elif mtype == "ptr_move":
             held = int(state.get("held_btn", -1))
-            q.CGWarpMouseCursorPosition((sx, sy))
+            # Khi chuột đã di sang màn hình Điện thoại (kvm_on_phone=True): KHÔNG gọi CGWarpMouseCursorPosition trên MacBook
+            # để con trỏ MacBook tuyệt đối không bị kéo hiện lại trên màn hình MacBook!
+            if not kvm_on_phone:
+                q.CGWarpMouseCursorPosition((sx, sy))
             if held == 0:
                 ev_t, cg_b = q.kCGEventLeftMouseDragged, q.kCGMouseButtonLeft
             elif held == 2:
@@ -4334,9 +4731,14 @@ def _dispatch_parallel_rdp_input(
             q.CGEventSetIntegerValueField(ev, q.kCGMouseEventDeltaY, int(round(dy)))
             q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
             q.CGEventPost(q.kCGHIDEventTap, ev)
+            if kvm_on_phone:
+                kvm_bridge.reassert_cursor_hidden(force=True)
         elif mtype == "ptr_wheel":
+            if kvm_on_phone:
+                kvm_bridge.reassert_cursor_hidden(pin=False, force=True)
             _activate_mac_pid_if_needed(pid)
-            q.CGWarpMouseCursorPosition((sx, sy))
+            if not kvm_on_phone:
+                q.CGWarpMouseCursorPosition((sx, sy))
             phase = int(data.get("phase", 2) or 2)
             now_w = time.monotonic()
             last_wx = float(state.get("last_wheel_sx", -9999.0))
@@ -4359,6 +4761,8 @@ def _dispatch_parallel_rdp_input(
             state["wheel_rem_x"] = acc_x - wx_d
             state["wheel_rem_y"] = acc_y - wy_d
             if wx_d == 0 and wy_d == 0 and phase != 4:
+                if kvm_on_phone:
+                    kvm_bridge.reassert_cursor_hidden(pin=(int(state.get("held_btn", -1)) < 0), force=True)
                 return
 
             ev = q.CGEventCreateScrollWheelEvent(
@@ -4382,6 +4786,8 @@ def _dispatch_parallel_rdp_input(
             q.CGEventSetIntegerValueField(ev, q.kCGEventSourceUserData, 0x4D4B4231)
             # Post qua kCGAnnotatedSessionEventTap để đi sau CGEventTap của Mos (PID 775), tránh bị Mos đảo ngược chiều cuộn hoặc nuốt xung nhỏ!
             q.CGEventPost(getattr(q, "kCGAnnotatedSessionEventTap", q.kCGSessionEventTap), ev)
+            if kvm_on_phone:
+                kvm_bridge.reassert_cursor_hidden(pin=(int(state.get("held_btn", -1)) < 0), force=True)
         return
 
     if mtype == "key_tap":
