@@ -5886,8 +5886,12 @@ def _is_mrd_tiny_default_box(w: float, h: float) -> bool:
 
 
 def _is_clamped_1467_box(w: float, h: float) -> bool:
-    """Khung 1467x944 bị hụt 45px bên phải do tỷ lệ 3024:1888 cũ."""
-    return (1455.0 <= w <= 1482.0) and (h >= 925.0)
+    """Khung 1467x944 bị hụt 45px bên phải do tỷ lệ 3024:1888 cũ, hoặc khung 1024x796 lỗi tạm."""
+    if (1455.0 <= w <= 1482.0) and (h >= 925.0):
+        return True
+    if (1012.0 <= w <= 1036.0) and (780.0 <= h <= 812.0):
+        return True
+    return False
 
 
 def _get_mac_menubar_height(quartz: Any = None) -> float:
@@ -6980,31 +6984,47 @@ def _ax_update_bookmark_display_mode(
                             q.CGEventPost(q.kCGHIDEventTap, esc_d)
                             q.CGEventPost(q.kCGHIDEventTap, esc_u)
                             time.sleep(0.10)
-                        return False, seen_items[-8:]
+                        return False, ["missing_item"] + seen_items[-6:]
 
-                    # Cách 1 (Chuẩn nhất cho NSMenu dài của macOS): Gõ trực tiếp "3024" (Type-Select) + Enter ngay khi menu đang mở!
-                    injector._quartz_post_unicode(w_str)
-                    time.sleep(0.10)
-                    if q is not None:
+                    after_v = ""
+                    # Cách 1: Click trực tiếp tâm dòng "3024 x 1834" ngay khi menu đang mở (không đóng mở lại tránh lệch neo Y!)
+                    if item_rects:
+                        ir0 = item_rects[0]
+                        _cg_click_once(ir0[0] + ir0[2] * 0.5, ir0[1] + ir0[3] * 0.5)
+                        time.sleep(0.22)
+                        after_v = _read_res_pop_val()
+
+                    # Cách 2 (Dự phòng chuẩn xác 100% bất kể cuộn dài): Option+Up về dòng đầu -> bấm Down đúng số dòng -> Enter!
+                    if (w_str not in after_v or (h_str not in after_v and alt_h_str not in after_v)) and q is not None:
+                        _cg_click_once(pr0[0] + pr0[2] * 0.5, pr0[1] + pr0[3] * 0.5)
+                        time.sleep(0.18)
+                        up_d = q.CGEventCreateKeyboardEvent(None, 126, True)
+                        up_u = q.CGEventCreateKeyboardEvent(None, 126, False)
+                        q.CGEventSetFlags(up_d, q.kCGEventFlagMaskAlternate | 0x00000020)
+                        q.CGEventSetFlags(up_u, q.kCGEventFlagMaskAlternate | 0x00000020)
+                        q.CGEventPost(q.kCGHIDEventTap, up_d)
+                        q.CGEventPost(q.kCGHIDEventTap, up_u)
+                        time.sleep(0.06)
+                        steps_down = max(0, len(seen_items) - 1)
+                        for _ in range(steps_down):
+                            dn_d = q.CGEventCreateKeyboardEvent(None, 125, True)
+                            dn_u = q.CGEventCreateKeyboardEvent(None, 125, False)
+                            q.CGEventSetFlags(dn_d, 0)
+                            q.CGEventSetFlags(dn_u, 0)
+                            q.CGEventPost(q.kCGHIDEventTap, dn_d)
+                            q.CGEventPost(q.kCGHIDEventTap, dn_u)
+                            time.sleep(0.012)
+                        time.sleep(0.06)
                         ret_d = q.CGEventCreateKeyboardEvent(None, 36, True)
                         ret_u = q.CGEventCreateKeyboardEvent(None, 36, False)
                         q.CGEventSetFlags(ret_d, 0)
                         q.CGEventSetFlags(ret_u, 0)
                         q.CGEventPost(q.kCGHIDEventTap, ret_d)
                         q.CGEventPost(q.kCGHIDEventTap, ret_u)
-                    time.sleep(0.20)
-
-                    after_v = _read_res_pop_val()
-                    if w_str not in after_v and item_rects:
-                        # Dự phòng Cách 2: Click chuột trực tiếp vào tọa độ của dòng "3024 x 1834"
-                        _cg_click_once(pr0[0] + pr0[2] * 0.5, pr0[1] + pr0[3] * 0.5)
-                        time.sleep(0.16)
-                        ir0 = item_rects[0]
-                        _cg_click_once(ir0[0] + ir0[2] * 0.5, ir0[1] + ir0[3] * 0.5)
-                        time.sleep(0.20)
+                        time.sleep(0.22)
                         after_v = _read_res_pop_val()
 
-                    ok_sel = (w_str in after_v)
+                    ok_sel = (w_str in after_v and (h_str in after_v or alt_h_str in after_v))
                     if not ok_sel and q is not None:
                         esc_d2 = q.CGEventCreateKeyboardEvent(None, 53, True)
                         esc_u2 = q.CGEventCreateKeyboardEvent(None, 53, False)
@@ -7014,7 +7034,7 @@ def _ax_update_bookmark_display_mode(
                     return ok_sel, seen_items[-5:] + [f"val={after_v}"]
 
                 res_ok, res_items = _try_pick_resolution_popup()
-                if not res_ok:
+                if not res_ok and ("missing_item" in res_items):
                     # Chưa có 3024 x 1834 trong danh sách -> mở Preferences -> Resolutions thêm tự động 1 lần duy nhất!
                     def _cancel_cur_sheet(el: Any, depth: int, done_f: List[bool]) -> None:
                         if not el or depth > 14 or done_f[0]:
