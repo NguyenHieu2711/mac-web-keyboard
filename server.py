@@ -5180,26 +5180,21 @@ async def mac_virtual_display_open_rdp(windowed: int = 0) -> dict:
     def _do_open() -> dict:
         global _RDP_RECONNECT_UNTIL, _MANUAL_WINDOWED_OPEN_UNTIL
         with _SMART_MULTIMON_LOCK:
-            # Khi chuyển từ "Chỉ Điện thoại" -> "Song song" (windowed=1): BẮT BUỘC mở cửa sổ bình thường (KHÔNG bật Full-Screen / All Monitors)!
-            if windowed:
-                want_mm = False
-                _MANUAL_WINDOWED_OPEN_UNTIL = time.monotonic() + 18.0
-            else:
-                want_mm = bool((mac_vdisp is not None and mac_vdisp.is_active()) or (_get_secondary_mac_display_bounds(injector._quartz) is not None))
+            # Nguyên tắc bắt buộc: CHỈ mở Remote Mac lên đúng nguyên trạng cài đặt sẵn có của người dùng
+            # (Full-Screen hay cửa sổ thường, tỉ lệ, độ phân giải giữ nguyên 100% — TUYỆT ĐỐI không mở Edit PC hay tự chỉnh bất kỳ thứ gì!).
+            rpid_cur, sess_cur, _ = _rdp_probe_vdisp_state()
+            if rpid_cur > 0 and sess_cur:
+                return {"ok": True, "session": sess_cur[0], "already_open": True}
             bmks = _list_mrd_bookmarks()
             tsess = bmks[0][0] if bmks else "PC Hieu"
-            if not want_mm:
-                rpid_cur, sess_cur, has_vd_cur = _rdp_probe_vdisp_state()
-                if rpid_cur > 0 and sess_cur and not has_vd_cur:
-                    _apply_full_mac_window_bounds(rpid_cur, sess_cur[0])
-                    return {"ok": True, "session": sess_cur[0], "multimon": False, "already_open": True}
+            _MANUAL_WINDOWED_OPEN_UNTIL = time.monotonic() + 10.0
             _RDP_RECONNECT_UNTIL = time.monotonic() + 14.0
             try:
-                _restart_mrd_and_connect(enable_multimon=want_mm, target_sess=tsess)
-                _RDP_CLOSER_DIAG["last_reconnect"] = f"manual_open:{tsess}:win={int(bool(windowed))}@{time.strftime('%H:%M:%S')}"
+                _restart_mrd_and_connect(enable_multimon=False, target_sess=tsess, reload_only=True)
+                _RDP_CLOSER_DIAG["last_reconnect"] = f"manual_open_as_is:{tsess}@{time.strftime('%H:%M:%S')}"
             finally:
-                _RDP_RECONNECT_UNTIL = time.monotonic() + 2.5
-            return {"ok": True, "session": tsess, "multimon": want_mm}
+                _RDP_RECONNECT_UNTIL = time.monotonic() + 4.0
+            return {"ok": True, "session": tsess, "reload_only": True}
 
     return await asyncio.to_thread(_do_open)
 
