@@ -5874,7 +5874,59 @@ _LAST_2MON_SYNC_AT: float = 0.0
 _LAST_1MON_SYNC_AT: float = 0.0
 _LAST_DOWNGRADED_1MON_PID: int = 0
 _LAST_APPLIED_BOOKMARK_MODE: Optional[bool] = None
+_RESTORE_1MON_BOUNDS_UNTIL: float = 0.0
+_USER_1MON_BOUNDS_PATH = BASE_DIR / ".user_rdp_1mon_bounds.json"
+_SAVED_USER_1MON_BOUNDS: Optional[Dict[str, float]] = None
 _SMART_MULTIMON_LOCK = threading.Lock()
+
+
+def _is_mrd_tiny_default_box(w: float, h: float) -> bool:
+    """MRD 10.9.10 tự ép cửa sổ mới về ô 756x500 (50% màn MacBook) ngay sau khi bắt tay RDP."""
+    return (740.0 <= w <= 772.0) and (485.0 <= h <= 515.0)
+
+
+def _load_saved_1mon_bounds() -> Optional[Dict[str, float]]:
+    global _SAVED_USER_1MON_BOUNDS
+    if _SAVED_USER_1MON_BOUNDS is not None:
+        return _SAVED_USER_1MON_BOUNDS
+    try:
+        if _USER_1MON_BOUNDS_PATH.exists():
+            raw = json.loads(_USER_1MON_BOUNDS_PATH.read_text(encoding="utf-8"))
+            bw = float(raw.get("w", 0.0))
+            bh = float(raw.get("h", 0.0))
+            if bw >= 650.0 and bh >= 420.0 and not _is_mrd_tiny_default_box(bw, bh) and bw < bh * 2.15:
+                _SAVED_USER_1MON_BOUNDS = {
+                    "x": float(raw.get("x", 0.0)),
+                    "y": float(raw.get("y", 38.0)),
+                    "w": bw,
+                    "h": bh,
+                }
+                return _SAVED_USER_1MON_BOUNDS
+    except Exception:
+        pass
+    return None
+
+
+def _save_user_1mon_bounds(bx: float, by: float, bw: float, bh: float) -> None:
+    """Lưu lại đúng vị trí & kích thước cửa sổ thường mà người dùng tự đặt trên MacBook trước khi vào Full-Screen."""
+    global _SAVED_USER_1MON_BOUNDS
+    if bw < 650.0 or bh < 420.0 or _is_mrd_tiny_default_box(bw, bh) or bw >= bh * 2.15:
+        return
+    prev = _SAVED_USER_1MON_BOUNDS
+    if (
+        prev is not None
+        and abs(prev["x"] - bx) < 4.0
+        and abs(prev["y"] - by) < 4.0
+        and abs(prev["w"] - bw) < 4.0
+        and abs(prev["h"] - bh) < 4.0
+    ):
+        return
+    _SAVED_USER_1MON_BOUNDS = {"x": round(bx, 1), "y": round(by, 1), "w": round(bw, 1), "h": round(bh, 1)}
+    _RDP_CLOSER_DIAG["saved_1mon_bounds"] = dict(_SAVED_USER_1MON_BOUNDS)
+    try:
+        _USER_1MON_BOUNDS_PATH.write_text(json.dumps(_SAVED_USER_1MON_BOUNDS), encoding="utf-8")
+    except Exception:
+        pass
 _RDP_CLOSER_DIAG: Dict[str, Any] = {
     "sessions": [],
     "on_screen_main": False,
@@ -6266,7 +6318,11 @@ def _ax_update_bookmark_display_mode(
                         continue
                     wt = _gs(wel, s_title).strip().lower()
                     if wt == t_low or (t_low and t_low in wt and wt not in ("microsoft remote desktop", "windows app", "connection center")):
-                        if _gb(wel, s_fs):
+                        if not _gb(wel, s_fs):
+                            rc_prev = _grect(wel)
+                            if rc_prev is not None:
+                                _save_user_1mon_bounds(rc_prev[0], rc_prev[1], rc_prev[2], rc_prev[3])
+                        else:
                             ax.AXUIElementSetAttributeValue(wel, s_fs, kFalse)
                         b_ref = ctypes.c_void_p()
                         if ax.AXUIElementCopyAttributeValue(wel, s_close, ctypes.byref(b_ref)) == 0 and b_ref.value:
@@ -7027,7 +7083,7 @@ def _quit_mrd_cleanly() -> None:
 
 
 def _apply_full_mac_window_bounds(target_pid: int, target_sess: str) -> Tuple[bool, float, float]:
-    """Đặt cửa sổ phiên 1 màn khít trọn màn MacBook (1512x944, không hở lề phải 45px). Trả về (matched, cur_w, cur_h)."""
+    """Khôi phục cửa sổ phiên 1 màn về đúng kích thước & vị trí ban đầu của người dùng (hoặc bung trọn màn MacBook nếu chưa lưu). Bỏ qua hộp Connecting 540x340."""
     import ctypes
     import objc  # type: ignore
     from mac_virtual_display import _CGPoint, _CGSize
@@ -7042,6 +7098,15 @@ def _apply_full_mac_window_bounds(target_pid: int, target_sess: str) -> Tuple[bo
             return False, 0.0, 0.0
     mb = q.CGDisplayBounds(q.CGMainDisplayID())
     mx, my, mw, mh = float(mb.origin.x), float(mb.origin.y), float(mb.size.width), float(mb.size.height)
+    saved_b = _load_saved_1mon_bounds()
+    if saved_b is not None:
+        tw = max(650.0, min(mw, float(saved_b["w"])))
+        th = max(420.0, min(mh - 24.0, float(saved_b["h"])))
+        tx = max(mx, min(mx + mw - tw, float(saved_b["x"])))
+        ty = max(my + 24.0, min(my + mh - th, float(saved_b["y"])))
+    else:
+        tx, ty, tw, th = mx, my + 38.0, mw, max(600.0, mh - 38.0)
+
     ax = mac_vdisp._ax_lib
     cf = mac_vdisp._cf_lib
     t_low = target_sess.strip().lower()
@@ -7077,8 +7142,18 @@ def _apply_full_mac_window_bounds(target_pid: int, target_sess: str) -> Tuple[bo
                             cf.CFRelease(fr.value)
                         if is_fs:
                             break
-                        npt = _CGPoint(mx, my + 38.0)
-                        nsz = _CGSize(mw, max(600.0, mh - 38.0))
+                        # Bỏ qua hộp thoại đang kết nối (540x340 / 550x184) -> chờ cửa sổ phiên thật (756x500+) xuất hiện!
+                        sr_pre = ctypes.c_void_p()
+                        pre_w, pre_h = 0.0, 0.0
+                        if ax.AXUIElementCopyAttributeValue(wel, ss_k, ctypes.byref(sr_pre)) == 0 and sr_pre.value:
+                            sz_pre = _CGSize()
+                            if ax.AXValueGetValue(sr_pre.value, 2, ctypes.byref(sz_pre)):
+                                pre_w, pre_h = float(sz_pre.w), float(sz_pre.h)
+                            cf.CFRelease(sr_pre.value)
+                        if pre_w < 680.0 and pre_h < 420.0:
+                            continue
+                        npt = _CGPoint(tx, ty)
+                        nsz = _CGSize(tw, th)
                         v_pt = ax.AXValueCreate(1, ctypes.byref(npt))
                         v_sz = ax.AXValueCreate(2, ctypes.byref(nsz))
                         if v_pt:
@@ -7087,7 +7162,10 @@ def _apply_full_mac_window_bounds(target_pid: int, target_sess: str) -> Tuple[bo
                         if v_sz:
                             ax.AXUIElementSetAttributeValue(wel, ss_k, v_sz)
                             cf.CFRelease(v_sz)
-                        time.sleep(0.12)
+                        time.sleep(0.10)
+                        if v_pt := ax.AXValueCreate(1, ctypes.byref(npt)):
+                            ax.AXUIElementSetAttributeValue(wel, sp_k, v_pt)
+                            cf.CFRelease(v_pt)
                         sr_after = ctypes.c_void_p()
                         if ax.AXUIElementCopyAttributeValue(wel, ss_k, ctypes.byref(sr_after)) == 0 and sr_after.value:
                             sz_out = _CGSize()
@@ -7176,13 +7254,21 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
     except Exception:
         pass
 
-    # Khi về 1 màn cửa sổ thường: bung cửa sổ gọn trên màn chính MacBook
+    # Khi về 1 màn cửa sổ thường: chờ hộp Connecting (540x340) xong hẳn rồi trả về đúng kích thước cửa sổ ban đầu của người dùng!
     if not enable_multimon:
-        for _ in range(16):
-            time.sleep(0.22)
+        global _RESTORE_1MON_BOUNDS_UNTIL
+        _RESTORE_1MON_BOUNDS_UNTIL = time.monotonic() + 14.0
+        first_matched = False
+        for _ in range(28):
+            time.sleep(0.25)
             ok_m, _, _ = _apply_full_mac_window_bounds(new_pid, target_sess)
             if ok_m:
+                first_matched = True
                 break
+        if first_matched:
+            for extra_wait in (0.55, 0.90):
+                time.sleep(extra_wait)
+                _apply_full_mac_window_bounds(new_pid, target_sess)
 
 
 def trigger_smart_rdp_multimon_sync(
@@ -7324,7 +7410,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
         import ctypes
         import AppKit  # type: ignore
         import objc  # type: ignore
-        from mac_virtual_display import _CGSize
+        from mac_virtual_display import _CGPoint, _CGSize
 
         launcher_titles = {
             "microsoft remote desktop",
@@ -7593,6 +7679,17 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                             cf.CFRelease(r.value)
                     return False
 
+                def _get_pos(el_ref: Any, attr_ref: Any) -> Tuple[float, float]:
+                    r = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(el_ref, attr_ref, ctypes.byref(r)) == 0 and r.value:
+                        try:
+                            pt = _CGPoint()
+                            if ax.AXValueGetValue(r.value, 1, ctypes.byref(pt)):
+                                return float(pt.x), float(pt.y)
+                        finally:
+                            cf.CFRelease(r.value)
+                    return 0.0, 38.0
+
                 def _get_size(el_ref: Any, attr_ref: Any) -> Tuple[float, float]:
                     r = ctypes.c_void_p()
                     if ax.AXUIElementCopyAttributeValue(el_ref, attr_ref, ctypes.byref(r)) == 0 and r.value:
@@ -7611,6 +7708,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                 s_title = _cfstr("AXTitle")
                 s_subrole = _cfstr("AXSubrole")
                 s_fullscreen = _cfstr("AXFullScreen")
+                s_pos = _cfstr("AXPosition")
                 s_size = _cfstr("AXSize")
                 s_close_btn = _cfstr("AXCloseButton")
                 s_press = _cfstr("AXPress")
@@ -7761,6 +7859,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                     has_windowed_session = False
                     has_squished_2mon_window = False
                     has_fs_session = False
+                    need_expand_tiny_title = ""
                     wins_ref = ctypes.c_void_p()
                     if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wins_ref)) == 0 and wins_ref.value:
                         try:
@@ -7790,6 +7889,11 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                         # Phát hiện cửa sổ bị ép ngang 2 màn hình chia đôi (VD: 1511x459, tỷ lệ ~3.3:1) sau khi thoát Full-Screen!
                                         if sw >= 800.0 and sh > 120.0 and sw >= sh * 2.15:
                                             has_squished_2mon_window = True
+                                        elif _is_mrd_tiny_default_box(sw, sh):
+                                            need_expand_tiny_title = title_raw
+                                        elif not _RDP_CLOSER_DIAG.get("sec_display_active") and now_m > _RESTORE_1MON_BOUNDS_UNTIL:
+                                            wx_p, wy_p = _get_pos(w_ax, s_pos)
+                                            _save_user_1mon_bounds(wx_p, wy_p, sw, sh)
                                 parsed_wins.append((w_ax, title_raw, title_l, sub_s, is_fs, sw, sh))
 
                             launcher_wins = []
@@ -7829,6 +7933,10 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
 
                     if has_fs_session:
                         _LAST_DOWNGRADED_1MON_PID = 0
+                    if need_expand_tiny_title and not ax_has_dialog and not has_squished_2mon_window:
+                        ok_exp, ew, eh = _apply_full_mac_window_bounds(rdp_pid, need_expand_tiny_title)
+                        if ok_exp:
+                            _RDP_CLOSER_DIAG["last_action"] = f"restored_bounds:{int(ew)}x{int(eh)}@{time.strftime('%H:%M:%S')}"
                     if has_squished_2mon_window and not ax_has_dialog and rdp_pid != _LAST_DOWNGRADED_1MON_PID:
                         trigger_smart_rdp_multimon_sync(
                             enable_multimon=False,
@@ -7879,7 +7987,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                 finally:
                     cf.CFRelease(app_ax)
                     for s_ref in (
-                        s_wins, s_title, s_subrole, s_fullscreen, s_size,
+                        s_wins, s_title, s_subrole, s_fullscreen, s_pos, s_size,
                         s_close_btn, s_press, s_menubar, s_children, s_mark, s_enabled,
                     ):
                         if s_ref:
