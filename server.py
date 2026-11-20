@@ -5279,6 +5279,10 @@ async def respawn_worker(pull: int = 0) -> dict:
             subprocess.run(["git", "fetch", "origin", "main", "--quiet"], cwd=str(BASE_DIR), timeout=10, check=False)
             pr = subprocess.run(["git", "pull", "--ff-only", "origin", "main"], cwd=str(BASE_DIR), timeout=15, check=False)
             pulled = (pr.returncode == 0)
+            if pulled:
+                chk = subprocess.run([sys.executable, "-m", "py_compile", str(BASE_DIR / "server.py")], cwd=str(BASE_DIR), timeout=8, check=False)
+                if chk.returncode != 0:
+                    return {"ok": False, "restarting": False, "pulled": True, "error": "py_compile_failed"}
         except Exception:
             pulled = False
     threading.Timer(0.2, _trigger_clean_respawn).start()
@@ -6823,7 +6827,6 @@ def _ax_update_bookmark_display_mode(
                     if opened_edit:
                         break
                 cy = cy1
-            _park_cc_offscreen()
                 # Dự phòng: Chuột phải trực tiếp lên thẻ PC Hieu -> bấm "Edit" trong menu ngữ cảnh
                 if not opened_edit and q is not None:
                     rd = q.CGEventCreateMouseEvent(None, q.kCGEventRightMouseDown, (cx, cy), q.kCGMouseButtonRight)
@@ -6862,6 +6865,7 @@ def _ax_update_bookmark_display_mode(
                         esc_u = q.CGEventCreateKeyboardEvent(None, 53, False)
                         q.CGEventPost(q.kCGHIDEventTap, esc_d)
                         q.CGEventPost(q.kCGHIDEventTap, esc_u)
+            _park_cc_offscreen()
 
         _RDP_CLOSER_DIAG["ax_edit_trace"] = f"cands={len(cands)},vis={vis_c[0]},open={int(opened_edit)}"
 
