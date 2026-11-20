@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const BUNDLED_BOOT_VER = "2.3.79";
+  const BUNDLED_BOOT_VER = "2.3.83";
   if (!window.__MAC_KB_HOT_BOOTED__) {
     try {
       const rawHot = localStorage.getItem("mac_kb_hot_bundle_v1");
@@ -2517,8 +2517,12 @@
     if (!remoteStage) return;
     const sw = w > 0 ? w : remoteCanvas ? remoteCanvas.width || RDP_TARGET_W : RDP_TARGET_W;
     const sh = h > 0 ? h : remoteCanvas ? remoteCanvas.height || RDP_TARGET_H : RDP_TARGET_H;
-    const ratio = sw / Math.max(1, sh);
-    // Phủ kín 100% màn hình điện thoại (không viền đen 2 bên) NHƯNG giữ nguyên tỉ lệ gốc 1:1 của nguồn ảnh để chữ tuyệt đối KHÔNG bị bè ngang!
+    let ratio = sw / Math.max(1, sh);
+    // Ở chế độ Song song (nguồn chụp cửa sổ MacBook tỉ lệ ~1.54–1.60), đồng bộ khung sang đúng tỉ lệ 16:9 của PC (1920x1080)
+    // để thu hẹp khoảng đen 2 bên trên điện thoại mà vẫn thấy đủ 100% Taskbar/thanh tiêu đề và giữ tọa độ chạm chính xác!
+    if (kbLayout !== "mac_ext" && rdpActiveEngine === "parallel" && ratio > 1.2 && ratio < 16 / 9) {
+      ratio = 16 / 9;
+    }
     remoteStage.style.setProperty("--rdp-aspect", ratio.toFixed(5));
     remoteStage.style.aspectRatio = "";
     applyRdpStageTransform();
@@ -5849,7 +5853,7 @@
   //    Sửa bất kỳ dòng HTML / CSS / JS nào trên PC hoặc GitHub -> tự tải ngầm gói mới
   //    và áp dụng trực tiếp sau ~2-3s nghỉ tay (kể cả khi đang mở Remote PC), không cần tắt mở lại app!
   // ============================================================================
-  const BUNDLED_WEB_VERSION = "2.3.79";
+  const BUNDLED_WEB_VERSION = "2.3.83";
   const HOT_BUNDLE_STORAGE_KEY = "mac_kb_hot_bundle_v1";
   const GITHUB_REPO_SLUG = "NguyenHieu2711/mac-web-keyboard";
   let lastUserTouchAt = performance.now();
