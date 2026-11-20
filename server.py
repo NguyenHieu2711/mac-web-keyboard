@@ -4599,40 +4599,6 @@ async def mac_virtual_display_diag() -> dict:
                             out["mrd_cli_list"] = (list_txt + "\n---\n" + ex_s)[:1800]
                         else:
                             out["mrd_cli_list"] = list_txt[:800]
-                        import sqlite3
-                        search_roots = [
-                            Path.home() / "Library/Group Containers",
-                            Path.home() / "Library/Application Support",
-                            Path.home() / "Library/Containers/com.microsoft.rdc.macos/Data/Library",
-                        ]
-                        sq_files: List[str] = []
-                        for sr_p in search_roots:
-                            if sr_p.exists():
-                                try:
-                                    for p in sr_p.rglob("*rdc*"):
-                                        if p.is_dir():
-                                            sq_files.extend(str(x) for x in p.rglob("*.sqlite*"))
-                                        elif ".sqlite" in p.name:
-                                            sq_files.append(str(p))
-                                except Exception:
-                                    pass
-                        sq_main = [p for p in sq_files if p.endswith(".sqlite")]
-                        sq_dump: Dict[str, Any] = {"files": sq_files[:12]}
-                        if sq_main:
-                            con = sqlite3.connect(f"file:{sq_main[0]}?mode=ro", uri=True, timeout=1.5)
-                            con.row_factory = sqlite3.Row
-                            try:
-                                tbls = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-                                sq_dump["tables"] = tbls
-                                for tb in tbls:
-                                    cols = [r[1] for r in con.execute(f"PRAGMA table_info('{tb}')").fetchall()]
-                                    if any(k in c.upper() for c in cols + [tb] for k in ("WIDTH", "MULTIMON", "SCREEN", "BOOKMARK", "RESOLUTION")):
-                                        rows = [dict(r) for r in con.execute(f"SELECT * FROM '{tb}' LIMIT 5").fetchall()]
-                                        clean_rows = [{k: (v if not isinstance(v, bytes) else f"<bytes:{len(v)}>") for k, v in rw.items()} for rw in rows]
-                                        sq_dump[tb] = {"cols": cols, "rows": clean_rows}
-                            finally:
-                                con.close()
-                        out["mrd_sqlite"] = sq_dump
                 except Exception as me:
                     out["mrd_bookmarks_err"] = str(me)[:120]
                 out["displays"] = disps
@@ -4797,7 +4763,7 @@ async def mac_virtual_display_open_rdp() -> dict:
     def _do_open() -> dict:
         global _RDP_RECONNECT_UNTIL
         with _SMART_MULTIMON_LOCK:
-            want_mm = bool(mac_vdisp is not None and mac_vdisp.is_active())
+            want_mm = bool((mac_vdisp is not None and mac_vdisp.is_active()) or (_get_secondary_mac_display_bounds(injector._quartz) is not None))
             bmks = _list_mrd_bookmarks()
             tsess = bmks[0][0] if bmks else "PC Hieu"
             _RDP_RECONNECT_UNTIL = time.monotonic() + 14.0
@@ -6281,7 +6247,8 @@ def _ax_update_bookmark_display_mode(
     live_pids = _find_live_mrd_pids()
     rdp_pid = live_pids[0] if live_pids else 0
     if rdp_pid <= 0:
-        subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Khởi chạy ngầm ẩn hoàn toàn (-g background, -j hidden) để không bao giờ chớp cửa sổ trắng Connection Center!
+        subprocess.Popen(["open", "-g", "-j", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(20):
             time.sleep(0.16)
             live_pids = _find_live_mrd_pids()
@@ -6296,20 +6263,6 @@ def _ax_update_bookmark_display_mode(
         subprocess.Popen(["caffeinate", "-u", "-t", "8"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
-    # Dùng `open -a` qua LaunchServices để đưa MRD lên frontmost 100% trên macOS Sonoma/Sequoia!
-    try:
-        subprocess.run(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
-    except Exception:
-        pass
-    try:
-        with objc.autorelease_pool():
-            rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
-            if rapp is not None:
-                rapp.unhide()
-                rapp.activateWithOptions_(3)
-    except Exception:
-        pass
-    time.sleep(0.25)
 
     app_ax = ax.AXUIElementCreateApplication(rdp_pid)
     if not app_ax:
@@ -6320,6 +6273,55 @@ def _ax_update_bookmark_display_mode(
         ax.AXUIElementSetMessagingTimeout(app_ax, ctypes.c_float(0.75))
     except Exception:
         pass
+
+    # Đẩy sẵn mọi cửa sổ Connection Center ra góc giấu ngầm (1510, 980) TRƯỚC KHI unhide/activate MRD (0.00s chớp hình!)
+    _pk_x0, _pk_y0 = 1510.0, 980.0
+    if q is not None:
+        try:
+            _mb0 = q.CGDisplayBounds(q.CGMainDisplayID())
+            _pk_x0 = float(_mb0.origin.x) + float(_mb0.size.width) - 2.0
+            _pk_y0 = float(_mb0.origin.y) + float(_mb0.size.height) - 2.0
+        except Exception:
+            pass
+    _sw0 = _cfstr("AXWindows")
+    _st0 = _cfstr("AXTitle")
+    _sp0 = _cfstr("AXPosition")
+    try:
+        _w0 = ctypes.c_void_p()
+        if ax.AXUIElementCopyAttributeValue(app_ax, _sw0, ctypes.byref(_w0)) == 0 and _w0.value:
+            try:
+                for _wi0 in range(cf.CFArrayGetCount(_w0.value)):
+                    _wel0 = cf.CFArrayGetValueAtIndex(_w0.value, _wi0)
+                    if not _wel0:
+                        continue
+                    _wt0 = ""
+                    _tr0 = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(_wel0, _st0, ctypes.byref(_tr0)) == 0 and _tr0.value:
+                        with objc.autorelease_pool():
+                            _wt0 = str(objc.objc_object(c_void_p=_tr0.value) or "").strip().lower()
+                        cf.CFRelease(_tr0.value)
+                    if not _wt0 or _wt0 in ("microsoft remote desktop", "windows app", "connection center", "pcs", "devices"):
+                        _pt0 = _CGPoint(_pk_x0, _pk_y0)
+                        _vp0 = ax.AXValueCreate(1, ctypes.byref(_pt0))
+                        if _vp0:
+                            ax.AXUIElementSetAttributeValue(_wel0, _sp0, _vp0)
+                            cf.CFRelease(_vp0)
+            finally:
+                cf.CFRelease(_w0.value)
+    finally:
+        for _k0 in (_sw0, _st0, _sp0):
+            if _k0:
+                cf.CFRelease(_k0)
+
+    try:
+        with objc.autorelease_pool():
+            rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
+            if rapp is not None:
+                rapp.unhide()
+                rapp.activateWithOptions_(3)
+    except Exception:
+        pass
+    time.sleep(0.14)
 
     s_wins = _cfstr("AXWindows")
     s_role = _cfstr("AXRole")
@@ -6596,6 +6598,60 @@ def _ax_update_bookmark_display_mode(
                 cf.CFRelease(w_pre_clean)
         _dismiss_disconnect_modal()
 
+        # Tọa độ giấu ngầm ở góc viền dưới-phải màn MacBook (chỉ chừa 2x2px sát góc bo đen vật lý -> 0px lộ trên màn hình nhưng vẫn giữ responder chain!)
+        mx_m, my_m, mw_m, mh_m = 0.0, 0.0, 1512.0, 982.0
+        if q is not None:
+            try:
+                mb_m = q.CGDisplayBounds(q.CGMainDisplayID())
+                mx_m, my_m, mw_m, mh_m = float(mb_m.origin.x), float(mb_m.origin.y), float(mb_m.size.width), float(mb_m.size.height)
+            except Exception:
+                pass
+        park_x, park_y = mx_m + mw_m - 2.0, my_m + mh_m - 2.0
+
+        def _park_cc_offscreen() -> bool:
+            ex_fs = False
+            w_pk = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_pk)) == 0 and w_pk.value:
+                try:
+                    for wi in range(cf.CFArrayGetCount(w_pk.value)):
+                        wel_k = cf.CFArrayGetValueAtIndex(w_pk.value, wi)
+                        if not wel_k:
+                            continue
+                        wt_k = _gs(wel_k, s_title).strip().lower()
+                        if not wt_k or wt_k in ("microsoft remote desktop", "windows app", "connection center", "pcs", "devices"):
+                            if _gb(wel_k, s_fs):
+                                ax.AXUIElementSetAttributeValue(wel_k, s_fs, kFalse)
+                                ex_fs = True
+                            pt_pk = _CGPoint(park_x, park_y)
+                            vp_pk = ax.AXValueCreate(1, ctypes.byref(pt_pk))
+                            if vp_pk:
+                                ax.AXUIElementSetAttributeValue(wel_k, s_pos, vp_pk)
+                                cf.CFRelease(vp_pk)
+                finally:
+                    cf.CFRelease(w_pk)
+            return ex_fs
+
+        def _move_cc_pos(px_c: float, py_c: float) -> None:
+            w_mv = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_mv)) == 0 and w_mv.value:
+                try:
+                    for wi in range(cf.CFArrayGetCount(w_mv.value)):
+                        wel_v = cf.CFArrayGetValueAtIndex(w_mv.value, wi)
+                        if not wel_v:
+                            continue
+                        wt_v = _gs(wel_v, s_title).strip().lower()
+                        if not wt_v or wt_v in ("microsoft remote desktop", "windows app", "connection center", "pcs", "devices"):
+                            pt_mv = _CGPoint(px_c, py_c)
+                            vp_mv = ax.AXValueCreate(1, ctypes.byref(pt_mv))
+                            if vp_mv:
+                                ax.AXUIElementSetAttributeValue(wel_v, s_pos, vp_mv)
+                                cf.CFRelease(vp_mv)
+                finally:
+                    cf.CFRelease(w_mv)
+
+        # 0B) Giấu sẵn Connection Center ra ngoài góc dưới-phải TRƯỚC KHI đóng PC Hieu để không bao giờ lộ bảng chọn trắng!
+        _park_cc_offscreen()
+
         # 1) Đóng cửa sổ phiên đang mở của target_title (timeout 0.65s chống treo runModal + tự bấm Disconnect!)
         closed_sess = False
         w_arr = ctypes.c_void_p()
@@ -6625,7 +6681,7 @@ def _ax_update_bookmark_display_mode(
         if closed_sess:
             time.sleep(0.22)
             _dismiss_disconnect_modal()
-            time.sleep(0.45)
+            time.sleep(0.35)
         else:
             if _click_menu_item(("window", "cửa sổ"), (t_low,)):
                 time.sleep(0.12)
@@ -6633,69 +6689,91 @@ def _ax_update_bookmark_display_mode(
                     closed_sess = True
                     time.sleep(0.22)
                     _dismiss_disconnect_modal()
-                    time.sleep(0.45)
+                    time.sleep(0.35)
 
-        # 2) Đưa MRD lên frontmost qua `open -a` (sau khi đóng phiên cũ) & kéo Connection Center về giữa màn chính!
+        # 2) Mở Connection Center ở vị trí giấu ngầm (park_x, park_y = 1510, 980) để bảng Edit PC chạy ngầm 100% ngoài màn hình!
         try:
-            subprocess.run(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1.5)
+            with objc.autorelease_pool():
+                rapp_cc = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
+                if rapp_cc is not None:
+                    rapp_cc.unhide()
+                    rapp_cc.activateWithOptions_(3)
         except Exception:
             pass
-        time.sleep(0.15)
         _click_menu_item(("window", "cửa sổ"), ("connection center", "pcs"))
-        time.sleep(0.20)
-        w_cc = ctypes.c_void_p()
+        # Đẩy ngay Connection Center vào góc giấu ngầm trong vòng < 10ms (nhỏ hơn 1 khung hình 60Hz -> không lộ 1 frame nào!)
         exited_cc_fs = False
-        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_cc)) == 0 and w_cc.value:
-            try:
-                for wi in range(cf.CFArrayGetCount(w_cc.value)):
-                    wel = cf.CFArrayGetValueAtIndex(w_cc.value, wi)
-                    if not wel:
-                        continue
-                    wt = _gs(wel, s_title).strip().lower()
-                    if not wt or wt in ("microsoft remote desktop", "windows app", "connection center", "pcs", "devices"):
-                        if _gb(wel, s_fs):
-                            ax.AXUIElementSetAttributeValue(wel, s_fs, kFalse)
-                            exited_cc_fs = True
-                        pt_cc = _CGPoint(40.0, 60.0)
-                        vp_cc = ax.AXValueCreate(1, ctypes.byref(pt_cc))
-                        if vp_cc:
-                            ax.AXUIElementSetAttributeValue(wel, s_pos, vp_cc)
-                            cf.CFRelease(vp_cc)
-                        ax.AXUIElementSetAttributeValue(wel, s_main, kTrue)
-                        ax.AXUIElementSetAttributeValue(wel, s_focused, kTrue)
-                        ax.AXUIElementPerformAction(wel, s_raise)
+        cc_ready = False
+        for _ in range(18):
+            w_cc = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_cc)) == 0 and w_cc.value:
+                try:
+                    for wi in range(cf.CFArrayGetCount(w_cc.value)):
+                        wel = cf.CFArrayGetValueAtIndex(w_cc.value, wi)
+                        if not wel:
+                            continue
+                        wt = _gs(wel, s_title).strip().lower()
+                        if not wt or wt in ("microsoft remote desktop", "windows app", "connection center", "pcs", "devices"):
+                            if _gb(wel, s_fs):
+                                ax.AXUIElementSetAttributeValue(wel, s_fs, kFalse)
+                                exited_cc_fs = True
+                            pt_cc = _CGPoint(park_x, park_y)
+                            vp_cc = ax.AXValueCreate(1, ctypes.byref(pt_cc))
+                            if vp_cc:
+                                ax.AXUIElementSetAttributeValue(wel, s_pos, vp_cc)
+                                cf.CFRelease(vp_cc)
+                            ax.AXUIElementSetAttributeValue(wel, s_main, kTrue)
+                            ax.AXUIElementSetAttributeValue(wel, s_focused, kTrue)
+                            ax.AXUIElementPerformAction(wel, s_raise)
 
-                        def _ensure_pcs_tab(el_t: Any, depth_t: int) -> None:
-                            if not el_t or depth_t > 12:
-                                return
-                            if _gs(el_t, s_role).strip() == "AXRadioButton":
-                                lbl_t = (_gs(el_t, s_title) or _gs(el_t, s_desc)).strip().lower()
-                                if lbl_t in ("pcs", "icon view"):
-                                    if _gi(el_t, s_val) == 0 and _gb(el_t, s_enabled):
-                                        _ax_press_fast(el_t, 0.45)
-                                        rc_pt = _grect(el_t)
-                                        if rc_pt and _gi(el_t, s_val) == 0:
-                                            _cg_click_once(rc_pt[0] + rc_pt[2] * 0.5, rc_pt[1] + rc_pt[3] * 0.5)
+                            def _ensure_pcs_tab(el_t: Any, depth_t: int) -> None:
+                                if not el_t or depth_t > 12:
                                     return
-                            ch_t = ctypes.c_void_p()
-                            if ax.AXUIElementCopyAttributeValue(el_t, s_children, ctypes.byref(ch_t)) == 0 and ch_t.value:
-                                try:
-                                    for ci_t in range(min(cf.CFArrayGetCount(ch_t.value), 60)):
-                                        _ensure_pcs_tab(cf.CFArrayGetValueAtIndex(ch_t.value, ci_t), depth_t + 1)
-                                finally:
-                                    cf.CFRelease(ch_t.value)
+                                if _gs(el_t, s_role).strip() == "AXRadioButton":
+                                    lbl_t = (_gs(el_t, s_title) or _gs(el_t, s_desc)).strip().lower()
+                                    if lbl_t in ("pcs", "icon view"):
+                                        if _gi(el_t, s_val) == 0 and _gb(el_t, s_enabled):
+                                            _ax_press_fast(el_t, 0.45)
+                                        return
+                                ch_t = ctypes.c_void_p()
+                                if ax.AXUIElementCopyAttributeValue(el_t, s_children, ctypes.byref(ch_t)) == 0 and ch_t.value:
+                                    try:
+                                        for ci_t in range(min(cf.CFArrayGetCount(ch_t.value), 60)):
+                                            _ensure_pcs_tab(cf.CFArrayGetValueAtIndex(ch_t.value, ci_t), depth_t + 1)
+                                    finally:
+                                        cf.CFRelease(ch_t.value)
 
-                        _ensure_pcs_tab(wel, 0)
-                        time.sleep(0.10)
-            finally:
-                cf.CFRelease(w_cc.value)
+                            _ensure_pcs_tab(wel, 0)
+                            cc_ready = True
+                finally:
+                    cf.CFRelease(w_cc.value)
+            if cc_ready:
+                break
+            time.sleep(0.01)
+        time.sleep(0.06)
         if exited_cc_fs:
-            time.sleep(0.90)
+            time.sleep(0.85)
+            _park_cc_offscreen()
 
         opened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc...", "edit"))
+        # Nếu chưa có thẻ nào được chọn sẵn trong Connection Center: bấm phím mũi tên Phải (vk=124) chọn thẻ đầu tiên hoàn toàn ngầm!
+        if not opened_edit and q is not None:
+            ra_d = q.CGEventCreateKeyboardEvent(None, 124, True)
+            ra_u = q.CGEventCreateKeyboardEvent(None, 124, False)
+            q.CGEventSetFlags(ra_d, 0)
+            q.CGEventSetFlags(ra_u, 0)
+            q.CGEventPost(q.kCGHIDEventTap, ra_d)
+            q.CGEventPost(q.kCGHIDEventTap, ra_u)
+            time.sleep(0.10)
+            opened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc...", "edit"))
+
         cands: List[Tuple[float, float, float, float]] = []
         vis_c = [0]
         if not opened_edit:
+            # Dự phòng hiếm: kéo nhẹ lên chọn thẻ trong 0.1s rồi lập tức giấu lại về (park_x, park_y)
+            _move_cc_pos(40.0, 60.0)
+            time.sleep(0.08)
+
             def _find_card(el: Any, depth: int) -> None:
                 if not el or depth > 18 or vis_c[0] > 2500:
                     return
@@ -6714,18 +6792,9 @@ def _ax_update_bookmark_display_mode(
                     finally:
                         cf.CFRelease(ch.value)
 
-            for _ in range(6):
+            for _ in range(4):
                 cands.clear()
                 vis_c[0] = 0
-                try:
-                    with objc.autorelease_pool():
-                        rapp_f = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
-                        if rapp_f is not None:
-                            rapp_f.unhide()
-                            rapp_f.activateWithOptions_(3)
-                except Exception:
-                    pass
-                _click_menu_item(("window", "cửa sổ"), ("connection center", "pcs"))
                 w_scan = ctypes.c_void_p()
                 if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_scan)) == 0 and w_scan.value:
                     try:
@@ -6740,7 +6809,7 @@ def _ax_update_bookmark_display_mode(
                         cf.CFRelease(w_scan.value)
                 if cands:
                     break
-                time.sleep(0.22)
+                time.sleep(0.18)
 
             if cands:
                 bx, by, bw, bh = cands[0]
@@ -6749,11 +6818,12 @@ def _ax_update_bookmark_display_mode(
                 cy2 = by + bh * 0.5
                 for cy_try in (cy1, cy2):
                     _cg_click_once(cx, cy_try)
-                    time.sleep(0.22)
+                    time.sleep(0.16)
                     opened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc...", "edit"))
                     if opened_edit:
                         break
                 cy = cy1
+            _park_cc_offscreen()
                 # Dự phòng: Chuột phải trực tiếp lên thẻ PC Hieu -> bấm "Edit" trong menu ngữ cảnh
                 if not opened_edit and q is not None:
                     rd = q.CGEventCreateMouseEvent(None, q.kCGEventRightMouseDown, (cx, cy), q.kCGMouseButtonRight)
@@ -6978,6 +7048,27 @@ def _ax_update_bookmark_display_mode(
                             finally:
                                 cf.CFRelease(ch.value)
 
+                    direct_pressed = [False]
+
+                    def _try_silent_pop_item(el_m: Any, d_m: int) -> None:
+                        if not el_m or d_m > 6 or direct_pressed[0]:
+                            return
+                        if _gs(el_m, s_role).strip() == "AXMenuItem":
+                            mt_d = _gs(el_m, s_title).strip()
+                            if w_str in mt_d and (h_str in mt_d or alt_h_str in mt_d):
+                                if _ax_press_fast(el_m, 0.35) == 0:
+                                    direct_pressed[0] = True
+                                    return
+                        ch_m = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(el_m, s_children, ctypes.byref(ch_m)) == 0 and ch_m.value:
+                            try:
+                                for ci_m in range(min(cf.CFArrayGetCount(ch_m.value), 80)):
+                                    _try_silent_pop_item(cf.CFArrayGetValueAtIndex(ch_m.value, ci_m), d_m + 1)
+                                    if direct_pressed[0]:
+                                        break
+                            finally:
+                                cf.CFRelease(ch_m.value)
+
                     def _find_res_pop_rect(el: Any, depth: int) -> None:
                         if not el or depth > 16 or already_has[0] or pop_rects:
                             return
@@ -6986,6 +7077,8 @@ def _ax_update_bookmark_display_mode(
                             if w_str in cur_txt and (h_str in cur_txt or alt_h_str in cur_txt):
                                 already_has[0] = True
                                 return
+                            # Ưu tiên bấm AXPress thẳng vào AXMenuItem con của NSPopUpButton mà KHÔNG bung popup menu lên màn hình!
+                            _try_silent_pop_item(el, 0)
                             rc_p = _grect(el)
                             if rc_p:
                                 pop_rects.append(rc_p)
@@ -7000,6 +7093,28 @@ def _ax_update_bookmark_display_mode(
                             finally:
                                 cf.CFRelease(ch.value)
 
+                    def _open_res_pop_offscreen_ax(el: Any, depth: int, opened_f: List[bool], s_sm: Any) -> None:
+                        if not el or depth > 16 or opened_f[0]:
+                            return
+                        ok_p, _ = _is_res_pop_el(el)
+                        if ok_p:
+                            ax.AXUIElementSetAttributeValue(el, s_focused, kTrue)
+                            _set_tmo(el, 0.30)
+                            rc_sm = ax.AXUIElementPerformAction(el, s_sm) if s_sm else -1
+                            if rc_sm != 0:
+                                ax.AXUIElementPerformAction(el, s_press)
+                            opened_f[0] = True
+                            return
+                        ch = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                            try:
+                                for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
+                                    _open_res_pop_offscreen_ax(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1, opened_f, s_sm)
+                                    if opened_f[0]:
+                                        break
+                            finally:
+                                cf.CFRelease(ch.value)
+
                     wp_w = ctypes.c_void_p()
                     if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_w)) == 0 and wp_w.value:
                         try:
@@ -7009,19 +7124,68 @@ def _ax_update_bookmark_display_mode(
                             cf.CFRelease(wp_w.value)
                     if already_has[0]:
                         return True, ["already"]
+                    if direct_pressed[0]:
+                        time.sleep(0.32)
+                        v_dir = _read_res_pop_val()
+                        if w_str in v_dir and (h_str in v_dir or alt_h_str in v_dir):
+                            return True, ["silent_ax_item", f"val={v_dir}"]
                     if not pop_rects:
                         return False, ["no_popup"]
 
                     pr0 = pop_rects[0]
-                    _cg_click_once(pr0[0] + pr0[2] * 0.5, pr0[1] + pr0[3] * 0.5)
-                    time.sleep(0.18)
-                    wp_m = ctypes.c_void_p()
-                    if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_m)) == 0 and wp_m.value:
-                        try:
-                            for wi in range(cf.CFArrayGetCount(wp_m.value)):
-                                _scan_menu_items(cf.CFArrayGetValueAtIndex(wp_m.value, wi), 0)
-                        finally:
-                            cf.CFRelease(wp_m.value)
+                    is_offscreen_pop = (pr0[0] >= mx_m + mw_m - 6.0) or (pr0[1] >= my_m + mh_m - 6.0)
+                    s_sm_ref = _cfstr("AXShowMenu")
+                    try:
+                        if is_offscreen_pop:
+                            op_f = [False]
+                            wp_ax = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_ax)) == 0 and wp_ax.value:
+                                try:
+                                    for wi in range(cf.CFArrayGetCount(wp_ax.value)):
+                                        _open_res_pop_offscreen_ax(cf.CFArrayGetValueAtIndex(wp_ax.value, wi), 0, op_f, s_sm_ref)
+                                finally:
+                                    cf.CFRelease(wp_ax.value)
+                        else:
+                            _cg_click_once(pr0[0] + pr0[2] * 0.5, pr0[1] + pr0[3] * 0.5)
+                        time.sleep(0.16)
+                        wp_m = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_m)) == 0 and wp_m.value:
+                            try:
+                                for wi in range(cf.CFArrayGetCount(wp_m.value)):
+                                    _scan_menu_items(cf.CFArrayGetValueAtIndex(wp_m.value, wi), 0)
+                            finally:
+                                cf.CFRelease(wp_m.value)
+
+                        # Nếu macOS không cho bung NSMenu khi cửa sổ đang giấu ngoài mép -> nhích nhẹ vào chọn trong 0.15s rồi giấu lại ngay lập tức!
+                        slid_temp = False
+                        if not found_in_menu[0] and is_offscreen_pop:
+                            _move_cc_pos(40.0, 60.0)
+                            slid_temp = True
+                            time.sleep(0.08)
+                            pop_rects.clear()
+                            seen_items.clear()
+                            item_rects.clear()
+                            wp_w2 = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_w2)) == 0 and wp_w2.value:
+                                try:
+                                    for wi in range(cf.CFArrayGetCount(wp_w2.value)):
+                                        _find_res_pop_rect(cf.CFArrayGetValueAtIndex(wp_w2.value, wi), 0)
+                                finally:
+                                    cf.CFRelease(wp_w2.value)
+                            if pop_rects:
+                                pr0 = pop_rects[0]
+                                _cg_click_once(pr0[0] + pr0[2] * 0.5, pr0[1] + pr0[3] * 0.5)
+                                time.sleep(0.16)
+                                wp_m2 = ctypes.c_void_p()
+                                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_m2)) == 0 and wp_m2.value:
+                                    try:
+                                        for wi in range(cf.CFArrayGetCount(wp_m2.value)):
+                                            _scan_menu_items(cf.CFArrayGetValueAtIndex(wp_m2.value, wi), 0)
+                                    finally:
+                                        cf.CFRelease(wp_m2.value)
+                    finally:
+                        if s_sm_ref:
+                            cf.CFRelease(s_sm_ref)
 
                     if not found_in_menu[0]:
                         if q is not None:
@@ -7029,28 +7193,32 @@ def _ax_update_bookmark_display_mode(
                             esc_u = q.CGEventCreateKeyboardEvent(None, 53, False)
                             q.CGEventPost(q.kCGHIDEventTap, esc_d)
                             q.CGEventPost(q.kCGHIDEventTap, esc_u)
-                            time.sleep(0.10)
+                            time.sleep(0.08)
+                        _park_cc_offscreen()
                         return False, ["missing_item"] + seen_items[-6:]
 
                     after_v = ""
-                    # Cách 1: Click trực tiếp tâm dòng "3024 x 1832" ngay khi menu đang mở & chờ 0.45s cho NSMenu nháy xong để commit Cocoa Binding!
+                    # Cách 1: Click trực tiếp tâm dòng "3024 x 1832" ngay khi menu đang mở, giấu lại ngay và chờ 0.45s commit Cocoa Binding!
                     if item_rects:
                         ir0 = item_rects[0]
                         _cg_click_once(ir0[0] + ir0[2] * 0.5, ir0[1] + ir0[3] * 0.5)
+                        if slid_temp:
+                            _park_cc_offscreen()
                         time.sleep(0.45)
                         after_v = _read_res_pop_val()
 
-                    # Cách 2 (Dự phòng chuẩn xác 100% bất kể cuộn dài): Option+Up về dòng đầu -> bấm Down đúng số dòng -> Enter!
+                    # Cách 2: Option+Up về dòng đầu -> bấm Down đúng số dòng -> Enter!
                     if (w_str not in after_v or (h_str not in after_v and alt_h_str not in after_v)) and q is not None:
-                        _cg_click_once(pr0[0] + pr0[2] * 0.5, pr0[1] + pr0[3] * 0.5)
-                        time.sleep(0.18)
+                        if not is_offscreen_pop or slid_temp:
+                            _cg_click_once(pr0[0] + pr0[2] * 0.5, pr0[1] + pr0[3] * 0.5)
+                            time.sleep(0.16)
                         up_d = q.CGEventCreateKeyboardEvent(None, 126, True)
                         up_u = q.CGEventCreateKeyboardEvent(None, 126, False)
                         q.CGEventSetFlags(up_d, q.kCGEventFlagMaskAlternate | 0x00000020)
                         q.CGEventSetFlags(up_u, q.kCGEventFlagMaskAlternate | 0x00000020)
                         q.CGEventPost(q.kCGHIDEventTap, up_d)
                         q.CGEventPost(q.kCGHIDEventTap, up_u)
-                        time.sleep(0.06)
+                        time.sleep(0.05)
                         steps_down = max(0, len(seen_items) - 1)
                         for _ in range(steps_down):
                             dn_d = q.CGEventCreateKeyboardEvent(None, 125, True)
@@ -7060,16 +7228,18 @@ def _ax_update_bookmark_display_mode(
                             q.CGEventPost(q.kCGHIDEventTap, dn_d)
                             q.CGEventPost(q.kCGHIDEventTap, dn_u)
                             time.sleep(0.012)
-                        time.sleep(0.06)
+                        time.sleep(0.05)
                         ret_d = q.CGEventCreateKeyboardEvent(None, 36, True)
                         ret_u = q.CGEventCreateKeyboardEvent(None, 36, False)
                         q.CGEventSetFlags(ret_d, 0)
                         q.CGEventSetFlags(ret_u, 0)
                         q.CGEventPost(q.kCGHIDEventTap, ret_d)
                         q.CGEventPost(q.kCGHIDEventTap, ret_u)
-                        time.sleep(0.22)
+                        _park_cc_offscreen()
+                        time.sleep(0.42)
                         after_v = _read_res_pop_val()
 
+                    _park_cc_offscreen()
                     ok_sel = (w_str in after_v and (h_str in after_v or alt_h_str in after_v))
                     if not ok_sel and q is not None:
                         esc_d2 = q.CGEventCreateKeyboardEvent(None, 53, True)
@@ -7463,7 +7633,7 @@ def _ax_update_bookmark_display_mode(
                         btn_seen.append(bt)
                     if bt.lower() in want_names and _gb(el, s_enabled):
                         rb_s = _grect(el)
-                        if rb_s:
+                        if rb_s and (0.0 <= rb_s[0] < mx_m + mw_m - 6.0) and (0.0 <= rb_s[1] < my_m + mh_m - 6.0):
                             _cg_click_once(rb_s[0] + rb_s[2] * 0.5, rb_s[1] + rb_s[3] * 0.5)
                             saved_ok[0] = True
                             return
@@ -7505,10 +7675,33 @@ def _ax_update_bookmark_display_mode(
             time.sleep(0.38)
 
         if connect_after:
-            if not _click_menu_item(("connections", "connection"), ("connect",)):
+            _park_cc_offscreen()
+            connected_menu = _click_menu_item(("connections", "connection"), ("connect",))
+            if not connected_menu and q is not None:
+                # Bấm Enter (vk=36) trên thẻ PC Hieu đang chọn trong Connection Center ngầm!
+                rk_d = q.CGEventCreateKeyboardEvent(None, 36, True)
+                rk_u = q.CGEventCreateKeyboardEvent(None, 36, False)
+                q.CGEventSetFlags(rk_d, 0)
+                q.CGEventSetFlags(rk_u, 0)
+                q.CGEventPost(q.kCGHIDEventTap, rk_d)
+                q.CGEventPost(q.kCGHIDEventTap, rk_u)
+                time.sleep(0.16)
+            if not _has_rdp_session_or_connecting(rdp_pid, target_title):
                 _ax_close_session_and_relaunch(rdp_pid, target_title, close_existing_session=False)
+            # Ẩn ngay toàn bộ Microsoft Remote Desktop (giấu tiệt bảng Connecting... 540x340 & Connection Center) trong lúc chờ phiên kết nối xong!
+            try:
+                with objc.autorelease_pool():
+                    rapp_hide = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
+                    if rapp_hide is not None:
+                        rapp_hide.hide()
+                    if orig_front_pid > 0 and orig_front_pid != rdp_pid:
+                        prev_app_c = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(orig_front_pid)
+                        if prev_app_c is not None:
+                            prev_app_c.activateWithOptions_(2)
+            except Exception:
+                pass
         else:
-            # Nếu chỉ đồng bộ nền khi chưa mở phiên -> đóng Connection Center và trả lại focus cho app cũ
+            # Nếu chỉ đồng bộ nền khi chưa mở phiên -> đóng Connection Center, ẩn MRD và trả lại focus cho app cũ
             w_cl = ctypes.c_void_p()
             if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_cl)) == 0 and w_cl.value:
                 try:
@@ -7521,11 +7714,18 @@ def _ax_update_bookmark_display_mode(
                             br = ctypes.c_void_p()
                             if ax.AXUIElementCopyAttributeValue(wel, s_close, ctypes.byref(br)) == 0 and br.value:
                                 try:
-                                    ax.AXUIElementPerformAction(br.value, s_press)
+                                    _ax_press_fast(br.value, 0.45)
                                 finally:
                                     cf.CFRelease(br.value)
                 finally:
                     cf.CFRelease(w_cl.value)
+            try:
+                with objc.autorelease_pool():
+                    rapp_idle = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
+                    if rapp_idle is not None:
+                        rapp_idle.hide()
+            except Exception:
+                pass
             if orig_front_pid > 0 and orig_front_pid != rdp_pid:
                 try:
                     with objc.autorelease_pool():
@@ -7668,17 +7868,6 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
             cf.CFRelease(rs.value)
         return (float(pt.x), float(pt.y), float(sz.w), float(sz.h)) if ok else None
 
-    try:
-        with objc.autorelease_pool():
-            rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
-            if rapp is not None:
-                if bool(rapp.isHidden()):
-                    rapp.unhide()
-                rapp.activateWithOptions_(3)
-    except Exception:
-        pass
-    time.sleep(0.15)
-
     app_ax = ax.AXUIElementCreateApplication(rdp_pid)
     if not app_ax:
         return False
@@ -7695,6 +7884,46 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
     s_menubar = _cfstr("AXMenuBar")
     s_children = _cfstr("AXChildren")
     s_enabled = _cfstr("AXEnabled")
+
+    mx_r, my_r, mw_r, mh_r = 0.0, 0.0, 1512.0, 982.0
+    if q is not None:
+        try:
+            mb_r = q.CGDisplayBounds(q.CGMainDisplayID())
+            mx_r, my_r, mw_r, mh_r = float(mb_r.origin.x), float(mb_r.origin.y), float(mb_r.size.width), float(mb_r.size.height)
+        except Exception:
+            pass
+    park_rx, park_ry = mx_r + mw_r - 2.0, my_r + mh_r - 2.0
+
+    def _set_cc_pos_r(px_v: float, py_v: float) -> None:
+        w_pr = ctypes.c_void_p()
+        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_pr)) == 0 and w_pr.value:
+            try:
+                for wi in range(cf.CFArrayGetCount(w_pr.value)):
+                    wel_r = cf.CFArrayGetValueAtIndex(w_pr.value, wi)
+                    if not wel_r:
+                        continue
+                    wt_r = _gs(wel_r, s_title).strip().lower()
+                    if not wt_r or wt_r in ("microsoft remote desktop", "windows app", "connection center", "pcs", "devices"):
+                        pt_r = _CGPoint(px_v, py_v)
+                        vp_r = ax.AXValueCreate(1, ctypes.byref(pt_r))
+                        if vp_r:
+                            ax.AXUIElementSetAttributeValue(wel_r, s_pos, vp_r)
+                            cf.CFRelease(vp_r)
+            finally:
+                cf.CFRelease(w_pr.value)
+
+    # Đẩy sẵn Connection Center ra góc giấu ngầm TRƯỚC KHI unhide/activate!
+    _set_cc_pos_r(park_rx, park_ry)
+    try:
+        with objc.autorelease_pool():
+            rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
+            if rapp is not None:
+                if bool(rapp.isHidden()):
+                    rapp.unhide()
+                rapp.activateWithOptions_(3)
+    except Exception:
+        pass
+    time.sleep(0.10)
 
     def _click_menu_item(bar_names: Tuple[str, ...], item_exact: str) -> bool:
         mb = ctypes.c_void_p()
@@ -7750,33 +7979,46 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
     s_raise = _cfstr("AXRaise")
     kTrue = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue").value
     kFalse = ctypes.c_void_p.in_dll(cf, "kCFBooleanFalse").value
+
     try:
-        # 1) Bật Connection Center lên trước + thoát Full-Screen nếu Connection Center bị kẹt ở Space riêng!
+        # 1) Bật Connection Center ở góc giấu ngầm (park_rx, park_ry) trong < 10ms + thoát Full-Screen nếu bị kẹt!
         _click_menu_item(("window", "cửa sổ"), "connection center")
-        time.sleep(0.20)
-        w_cc = ctypes.c_void_p()
         exited_cc_fs = False
-        if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_cc)) == 0 and w_cc.value:
-            try:
-                for wi in range(cf.CFArrayGetCount(w_cc.value)):
-                    wel = cf.CFArrayGetValueAtIndex(w_cc.value, wi)
-                    if not wel:
-                        continue
-                    wt = _gs(wel, s_title).strip().lower()
-                    if not wt or wt in ("microsoft remote desktop", "windows app", "connection center", "pcs", "devices"):
-                        if _gb(wel, s_fs):
-                            ax.AXUIElementSetAttributeValue(wel, s_fs, kFalse)
-                            exited_cc_fs = True
-                        ax.AXUIElementSetAttributeValue(wel, s_main, kTrue)
-                        ax.AXUIElementSetAttributeValue(wel, s_focused, kTrue)
-                        ax.AXUIElementPerformAction(wel, s_raise)
-            finally:
-                cf.CFRelease(w_cc.value)
+        cc_parked_r = False
+        for _ in range(18):
+            w_cc = ctypes.c_void_p()
+            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_cc)) == 0 and w_cc.value:
+                try:
+                    for wi in range(cf.CFArrayGetCount(w_cc.value)):
+                        wel = cf.CFArrayGetValueAtIndex(w_cc.value, wi)
+                        if not wel:
+                            continue
+                        wt = _gs(wel, s_title).strip().lower()
+                        if not wt or wt in ("microsoft remote desktop", "windows app", "connection center", "pcs", "devices"):
+                            if _gb(wel, s_fs):
+                                ax.AXUIElementSetAttributeValue(wel, s_fs, kFalse)
+                                exited_cc_fs = True
+                            pt_pk2 = _CGPoint(park_rx, park_ry)
+                            vp_pk2 = ax.AXValueCreate(1, ctypes.byref(pt_pk2))
+                            if vp_pk2:
+                                ax.AXUIElementSetAttributeValue(wel, s_pos, vp_pk2)
+                                cf.CFRelease(vp_pk2)
+                            ax.AXUIElementSetAttributeValue(wel, s_main, kTrue)
+                            ax.AXUIElementSetAttributeValue(wel, s_focused, kTrue)
+                            ax.AXUIElementPerformAction(wel, s_raise)
+                            cc_parked_r = True
+                finally:
+                    cf.CFRelease(w_cc.value)
+            if cc_parked_r:
+                break
+            time.sleep(0.01)
+        time.sleep(0.05)
         if not exited_cc_fs and not close_existing_session:
             if _click_menu_item(("window", "view", "cửa sổ", "xem"), "exit full screen"):
                 exited_cc_fs = True
         if exited_cc_fs:
-            time.sleep(1.05)
+            time.sleep(0.95)
+            _set_cc_pos_r(park_rx, park_ry)
             try:
                 with objc.autorelease_pool():
                     rapp = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
@@ -7784,7 +8026,7 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                         rapp.activateWithOptions_(3)
             except Exception:
                 pass
-            time.sleep(0.20)
+            time.sleep(0.16)
 
         # 2) Đóng cửa sổ phiên 1 màn cũ (nếu có)
         if close_existing_session:
@@ -7837,15 +8079,39 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                     q.CGEventSetFlags(ku_c, 0)
                     q.CGEventPost(q.kCGHIDEventTap, kd_c)
                     q.CGEventPost(q.kCGHIDEventTap, ku_c)
-            time.sleep(0.45)
+            time.sleep(0.38)
             _click_menu_item(("window", "cửa sổ"), "connection center")
-            time.sleep(0.20)
+            time.sleep(0.14)
+            _set_cc_pos_r(park_rx, park_ry)
 
-        # 3) Thử bấm Connections -> Connect nếu thẻ PC Hieu đang được chọn sẵn
+        # 3) Thử bấm Connections -> Connect hoàn toàn ngầm (hoặc mũi tên Phải chọn thẻ + Connect/Enter)
         if _click_menu_item(("connections", "connection"), "connect"):
             launched = True
-        else:
-            # 4) Tìm đúng thẻ PC Hieu trong Connection Center -> chọn + mở
+        elif q is not None:
+            ra_d2 = q.CGEventCreateKeyboardEvent(None, 124, True)
+            ra_u2 = q.CGEventCreateKeyboardEvent(None, 124, False)
+            q.CGEventSetFlags(ra_d2, 0)
+            q.CGEventSetFlags(ra_u2, 0)
+            q.CGEventPost(q.kCGHIDEventTap, ra_d2)
+            q.CGEventPost(q.kCGHIDEventTap, ra_u2)
+            time.sleep(0.08)
+            if _click_menu_item(("connections", "connection"), "connect"):
+                launched = True
+            else:
+                rk_d2 = q.CGEventCreateKeyboardEvent(None, 36, True)
+                rk_u2 = q.CGEventCreateKeyboardEvent(None, 36, False)
+                q.CGEventSetFlags(rk_d2, 0)
+                q.CGEventSetFlags(rk_u2, 0)
+                q.CGEventPost(q.kCGHIDEventTap, rk_d2)
+                q.CGEventPost(q.kCGHIDEventTap, rk_u2)
+                time.sleep(0.15)
+                if _has_rdp_session_or_connecting(rdp_pid, target_title):
+                    launched = True
+
+        if not launched:
+            # 4) Dự phòng hiếm: nhích nhẹ Connection Center lên chọn thẻ trong 0.1s rồi lập tức giấu lại!
+            _set_cc_pos_r(40.0, 60.0)
+            time.sleep(0.08)
             t_low = target_title.strip().lower()
             candidates: List[Tuple[float, float, float, float]] = []
             visited = [0]
@@ -7881,21 +8147,18 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
             if candidates:
                 bx, by, bw, bh = candidates[0]
                 if q is not None:
-                    # Nếu bel là nhãn chữ mỏng (bh < 32), tâm ảnh thu nhỏ của thẻ PC nằm ngay phía trên nhãn ~36px
                     cx = bx + bw * 0.5
                     cy = (by - 36.0) if (bh < 32.0 and by > 120.0) else (by + min(32.0, bh * 0.4))
                     orig_ev = q.CGEventCreate(None)
                     orig_pt = q.CGEventGetLocation(orig_ev) if orig_ev is not None else None
-                    # 1) Click đơn chọn thẻ -> chờ 0.14s cho Cocoa cập nhật trạng thái chọn -> bấm menu Connections -> Connect
                     d1 = q.CGEventCreateMouseEvent(None, q.kCGEventLeftMouseDown, (cx, cy), q.kCGMouseButtonLeft)
                     u1 = q.CGEventCreateMouseEvent(None, q.kCGEventLeftMouseUp, (cx, cy), q.kCGMouseButtonLeft)
                     q.CGEventSetIntegerValueField(d1, q.kCGMouseEventClickState, 1)
                     q.CGEventSetIntegerValueField(u1, q.kCGMouseEventClickState, 1)
                     q.CGEventPost(q.kCGHIDEventTap, d1)
                     q.CGEventPost(q.kCGHIDEventTap, u1)
-                    time.sleep(0.15)
+                    time.sleep(0.14)
                     if not _click_menu_item(("connections", "connection"), "connect"):
-                        # 2) Dự phòng: Double-click liền mạch không ngắt quãng ngay tâm thẻ PC
                         for clk in (1, 2):
                             de = q.CGEventCreateMouseEvent(None, q.kCGEventLeftMouseDown, (cx, cy), q.kCGMouseButtonLeft)
                             ue = q.CGEventCreateMouseEvent(None, q.kCGEventLeftMouseUp, (cx, cy), q.kCGMouseButtonLeft)
@@ -7910,9 +8173,8 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                             q.CGWarpMouseCursorPosition((float(orig_pt.x), float(orig_pt.y)))
                         except Exception:
                             pass
-                    time.sleep(0.22)
-                    _click_menu_item(("window", "cửa sổ"), target_title.strip().lower())
                     launched = True
+            _set_cc_pos_r(park_rx, park_ry)
     finally:
         cf.CFRelease(app_ax)
         for sr in (
@@ -8130,59 +8392,215 @@ def _has_rdp_session_or_connecting(target_pid: int, target_sess: str) -> bool:
     return False
 
 
+def _has_real_rdp_session_window(target_pid: int, target_sess: str) -> Tuple[bool, float, float]:
+    """Kiểm tra cửa sổ phiên Remote thật (đã qua bước Connecting 540x340, đạt cỡ >= 680x420) ngay cả khi MRD đang ẩn (isHidden=True)."""
+    if not IS_MACOS or target_pid <= 0:
+        return False, 0.0, 0.0
+    q = injector._quartz
+    if q is None:
+        try:
+            import Quartz as q  # type: ignore
+        except Exception:
+            return False, 0.0, 0.0
+    import objc  # type: ignore
+
+    t_low = target_sess.strip().lower()
+    with objc.autorelease_pool():
+        wlist = q.CGWindowListCopyWindowInfo(
+            q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements,
+            q.kCGNullWindowID,
+        ) or []
+        for w in wlist:
+            if int(w.get("kCGWindowOwnerPID", 0) or 0) != target_pid:
+                continue
+            if int(w.get("kCGWindowLayer", -1)) != 0:
+                continue
+            wb = w.get("kCGWindowBounds") or {}
+            ww = float(wb.get("Width", 0.0))
+            wh = float(wb.get("Height", 0.0))
+            wn = str(w.get("kCGWindowName", "") or "").strip().lower()
+            if ww >= 680.0 and wh >= 420.0 and wn and (wn == t_low or (t_low and t_low in wn and wn not in ("microsoft remote desktop", "windows app", "connection center"))):
+                return True, ww, wh
+    return False, 0.0, 0.0
+
+
+def _close_cc_silently_while_hidden(target_pid: int) -> None:
+    """Đóng sạch cửa sổ trắng Connection Center ngay trong lúc MRD vẫn đang ẩn (trước khi unhide hiện phiên Remote)."""
+    if not IS_MACOS or target_pid <= 0 or mac_vdisp is None or not mac_vdisp._init_ax_libs():
+        return
+    import ctypes
+    import objc  # type: ignore
+    from mac_virtual_display import _CGPoint
+
+    q = injector._quartz
+    pk_x, pk_y = 1510.0, 980.0
+    if q is not None:
+        try:
+            mb_c = q.CGDisplayBounds(q.CGMainDisplayID())
+            pk_x = float(mb_c.origin.x) + float(mb_c.size.width) - 2.0
+            pk_y = float(mb_c.origin.y) + float(mb_c.size.height) - 2.0
+        except Exception:
+            pass
+
+    ax = mac_vdisp._ax_lib
+    cf = mac_vdisp._cf_lib
+    a_ax = ax.AXUIElementCreateApplication(target_pid)
+    if not a_ax:
+        return
+    sw_k = cf.CFStringCreateWithCString(None, b"AXWindows", 0x08000100)
+    st_k = cf.CFStringCreateWithCString(None, b"AXTitle", 0x08000100)
+    spos_k = cf.CFStringCreateWithCString(None, b"AXPosition", 0x08000100)
+    sc_k = cf.CFStringCreateWithCString(None, b"AXCloseButton", 0x08000100)
+    sp_k = cf.CFStringCreateWithCString(None, b"AXPress", 0x08000100)
+    try:
+        try:
+            ax.AXUIElementSetMessagingTimeout(a_ax, ctypes.c_float(0.45))
+        except Exception:
+            pass
+        wr = ctypes.c_void_p()
+        if ax.AXUIElementCopyAttributeValue(a_ax, sw_k, ctypes.byref(wr)) == 0 and wr.value:
+            try:
+                for wi in range(cf.CFArrayGetCount(wr.value)):
+                    wel = cf.CFArrayGetValueAtIndex(wr.value, wi)
+                    if not wel:
+                        continue
+                    wt = ""
+                    tr = ctypes.c_void_p()
+                    if ax.AXUIElementCopyAttributeValue(wel, st_k, ctypes.byref(tr)) == 0 and tr.value:
+                        with objc.autorelease_pool():
+                            wt = str(objc.objc_object(c_void_p=tr.value) or "").strip().lower()
+                        cf.CFRelease(tr.value)
+                    if not wt or wt in ("microsoft remote desktop", "windows app", "connection center", "pcs", "devices"):
+                        # Lưu frame autosave của Connection Center ở góc (1510, 980) trước khi đóng để lần sau mở lại mặc định ở ngoài màn hình!
+                        pt_k = _CGPoint(pk_x, pk_y)
+                        vp_k = ax.AXValueCreate(1, ctypes.byref(pt_k))
+                        if vp_k:
+                            ax.AXUIElementSetAttributeValue(wel, spos_k, vp_k)
+                            cf.CFRelease(vp_k)
+                        br = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(wel, sc_k, ctypes.byref(br)) == 0 and br.value:
+                            try:
+                                try:
+                                    ax.AXUIElementSetMessagingTimeout(br.value, ctypes.c_float(0.45))
+                                except Exception:
+                                    pass
+                                ax.AXUIElementPerformAction(br.value, sp_k)
+                            finally:
+                                cf.CFRelease(br.value)
+            finally:
+                cf.CFRelease(wr.value)
+    finally:
+        cf.CFRelease(a_ax)
+        for k_r in (sw_k, st_k, spos_k, sc_k, sp_k):
+            if k_r:
+                cf.CFRelease(k_r)
+
+
 def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
-    """Đóng êm phiên cũ -> chỉnh trực tiếp Edit PC -> Display -> Save bằng AXUIElement (KHÔNG thoát MRD, KHÔNG đụng mật khẩu Keychain, khóa Fit to Window = ON chống zoom 200%) -> tự nối lại target_sess."""
-    global _LAST_DOWNGRADED_1MON_PID
+    """Chuyển đổi 1 màn <-> 2 màn CHẠY NGẦM 100%:
+    - Giấu toàn bộ bảng Connection Center, Edit PC và hộp thoại Connecting... (540x340) ở chế độ ẩn nền.
+    - CHỈ hiện duy nhất cửa sổ Remote Mac (PC Hieu) lên màn hình SAU KHI đã kết nối xong và căn chuẩn kích thước!"""
+    global _LAST_DOWNGRADED_1MON_PID, _RESTORE_1MON_BOUNDS_UNTIL, _RDP_RECONNECT_UNTIL
     import AppKit  # type: ignore
     import objc  # type: ignore
 
-    new_pid = _ax_update_bookmark_display_mode(
-        enable_multimon=enable_multimon,
-        target_title=target_sess,
-        connect_after=True,
-    )
-    if new_pid <= 0:
-        return
-    if not enable_multimon:
-        _LAST_DOWNGRADED_1MON_PID = new_pid
-    else:
-        _LAST_DOWNGRADED_1MON_PID = 0
-
-    for _ in range(4):
-        if _has_rdp_session_or_connecting(new_pid, target_sess):
-            break
-        _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
-        for _ in range(6):
-            time.sleep(0.18)
-            if _has_rdp_session_or_connecting(new_pid, target_sess):
-                break
-        if _has_rdp_session_or_connecting(new_pid, target_sess):
-            break
-
-    # Đảm bảo cửa sổ PC Hieu nổi hẳn lên trên Connection Center
+    _RDP_RECONNECT_UNTIL = max(_RDP_RECONNECT_UNTIL, time.monotonic() + 14.0)
+    pre_front_pid = 0
     try:
         with objc.autorelease_pool():
-            rapp2 = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(new_pid)
-            if rapp2 is not None:
-                rapp2.activateWithOptions_(3)
+            fa_p = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            if fa_p is not None:
+                pre_front_pid = int(fa_p.processIdentifier())
     except Exception:
         pass
 
-    # Khi về 1 màn cửa sổ thường: chờ hộp Connecting (540x340) xong hẳn rồi trả về đúng kích thước cửa sổ ban đầu của người dùng!
-    if not enable_multimon:
-        global _RESTORE_1MON_BOUNDS_UNTIL
-        _RESTORE_1MON_BOUNDS_UNTIL = time.monotonic() + 14.0
-        first_matched = False
-        for _ in range(28):
-            time.sleep(0.25)
-            ok_m, _, _ = _apply_full_mac_window_bounds(new_pid, target_sess)
-            if ok_m:
-                first_matched = True
+    try:
+        new_pid = _ax_update_bookmark_display_mode(
+            enable_multimon=enable_multimon,
+            target_title=target_sess,
+            connect_after=True,
+        )
+        if new_pid <= 0:
+            return
+        if not enable_multimon:
+            _LAST_DOWNGRADED_1MON_PID = new_pid
+        else:
+            _LAST_DOWNGRADED_1MON_PID = 0
+
+        for _ in range(4):
+            if _has_rdp_session_or_connecting(new_pid, target_sess):
                 break
-        if first_matched:
-            for extra_wait in (0.55, 0.90):
+            _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=False)
+            for _ in range(5):
+                time.sleep(0.14)
+                if _has_rdp_session_or_connecting(new_pid, target_sess):
+                    break
+            if _has_rdp_session_or_connecting(new_pid, target_sess):
+                break
+
+        # Giữ MRD ẩn hoàn toàn (rapp.hide) suốt quá trình hộp thoại Connecting... (540x340) đang bắt tay RDP!
+        try:
+            with objc.autorelease_pool():
+                rapp_bg = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(new_pid)
+                if rapp_bg is not None:
+                    rapp_bg.hide()
+                if pre_front_pid > 0 and pre_front_pid != new_pid:
+                    prev_fg = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pre_front_pid)
+                    if prev_fg is not None:
+                        prev_fg.activateWithOptions_(2)
+        except Exception:
+            pass
+
+        sess_ready = False
+        fin_w, fin_h = 0.0, 0.0
+        ready_tick = 0
+        for tick_i in range(75):
+            ok_real, rw_c, rh_c = _has_real_rdp_session_window(new_pid, target_sess)
+            if ok_real:
+                sess_ready = True
+                fin_w, fin_h = rw_c, rh_c
+                ready_tick = tick_i
+                break
+            try:
+                with objc.autorelease_pool():
+                    rapp_chk = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(new_pid)
+                    if rapp_chk is not None and not bool(rapp_chk.isHidden()):
+                        rapp_chk.hide()
+            except Exception:
+                pass
+            time.sleep(0.08)
+
+        # Trong khi MRD vẫn đang ẩn: đóng sạch Connection Center + ép sẵn kích thước cửa sổ 1512x944 trước khi hiện lên màn hình!
+        _close_cc_silently_while_hidden(new_pid)
+        if not enable_multimon:
+            _RESTORE_1MON_BOUNDS_UNTIL = time.monotonic() + 12.0
+            if sess_ready:
+                time.sleep(0.14)
+                _, bw_pre, bh_pre = _apply_full_mac_window_bounds(new_pid, target_sess)
+                if bw_pre > 0.0:
+                    fin_w, fin_h = bw_pre, bh_pre
+
+        # Chạy xong 100% -> Bây giờ mới unhide & hiện duy nhất cửa sổ Remote Mac (PC Hieu) lên màn hình!
+        _, app_nm_fin = _get_mrd_cli_info()
+        try:
+            with objc.autorelease_pool():
+                rapp_show = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(new_pid)
+                if rapp_show is not None:
+                    rapp_show.unhide()
+                    rapp_show.activateWithOptions_(3)
+                elif app_nm_fin:
+                    subprocess.run(["open", "-a", app_nm_fin], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1.5)
+        except Exception:
+            pass
+        _close_cc_silently_while_hidden(new_pid)
+        _RDP_CLOSER_DIAG["stealth_reveal"] = f"ready={int(sess_ready)},ticks={ready_tick},sz={int(fin_w)}x{int(fin_h)}"
+
+        if not enable_multimon:
+            for extra_wait in (0.12, 0.45, 0.85):
                 time.sleep(extra_wait)
                 _apply_full_mac_window_bounds(new_pid, target_sess)
+    finally:
+        _RDP_RECONNECT_UNTIL = time.monotonic() + 1.5
 
 
 def trigger_smart_rdp_multimon_sync(
