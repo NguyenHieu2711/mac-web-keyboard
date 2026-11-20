@@ -7877,7 +7877,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                 is_fs = _get_bool(w_ax, s_fullscreen)
                                 sw, sh = _get_size(w_ax, s_size)
                                 ax_summary.append(f"{title_raw or '<empty>'}|{sub_s}|fs={int(is_fs)}|{int(sw)}x{int(sh)}")
-                                if sub_s in ("AXDialog", "AXSheet") or any(k in title_l for k in dialog_keywords):
+                                if (sub_s in ("AXDialog", "AXSheet") and sw >= 240.0 and sh >= 110.0) or any(k in title_l for k in dialog_keywords):
                                     ax_has_dialog = True
                                     break
                                 if title_l in session_titles_lower:
