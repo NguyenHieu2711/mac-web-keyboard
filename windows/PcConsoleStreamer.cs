@@ -757,10 +757,6 @@ namespace MacWebKeyboard
         public static int Main()
         {
             InitDpiAndCodec();
-            if (!CanCaptureInteractiveDesktop())
-            {
-                return 2;
-            }
 
             _isChildSession = DetectIsChildSession();
             int bindPort = _isChildSession ? CHILD_LISTEN_PORT : CONSOLE_LISTEN_PORT;
