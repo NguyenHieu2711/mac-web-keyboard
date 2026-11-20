@@ -6246,8 +6246,12 @@ def _ax_update_bookmark_display_mode(
                                 still_stuck = True
                                 break
                 if still_stuck and not _rdp_probe_vdisp_state()[1]:
-                    os.kill(rdp_pid, signal.SIGTERM)
-                    time.sleep(0.50)
+                    old_hung_pid = rdp_pid
+                    os.kill(old_hung_pid, signal.SIGKILL)
+                    for _ in range(15):
+                        time.sleep(0.10)
+                        if old_hung_pid not in _find_live_mrd_pids():
+                            break
                     rdp_pid = 0
         except Exception:
             pass
