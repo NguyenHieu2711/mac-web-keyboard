@@ -7106,7 +7106,7 @@ def _ax_update_bookmark_display_mode(
 
                     # Cửa sổ nhập độ phân giải mới của MRD 10.9.10 là cửa sổ modal riêng tên "Untitled" (380x148)!
                     _MODAL_RES_TITLES = ("untitled", "add resolution", "custom resolution", "")
-                    tf_items: List[Tuple[Tuple[float, float, float, float], Any]] = []
+                    tf_rects: List[Tuple[float, float, float, float]] = []
 
                     def _collect_tfs(el: Any, depth: int) -> None:
                         if not el or depth > 16:
@@ -7114,8 +7114,7 @@ def _ax_update_bookmark_display_mode(
                         if _gs(el, s_role).strip() == "AXTextField":
                             rb = _grect(el)
                             if rb and rb[2] >= 30.0 and rb[3] >= 14.0:
-                                cf.CFRetain(el)
-                                tf_items.append((rb, el))
+                                tf_rects.append(rb)
                         ch = ctypes.c_void_p()
                         if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
                             try:
@@ -7138,23 +7137,19 @@ def _ax_update_bookmark_display_mode(
                                     ax.AXUIElementSetAttributeValue(wel_u, s_focused, kTrue)
                                     ax.AXUIElementPerformAction(wel_u, s_raise)
                                     _collect_tfs(wel_u, 0)
-                            if len(tf_items) < 2:
-                                for _, old_tf in tf_items:
-                                    cf.CFRelease(old_tf)
-                                tf_items.clear()
+                            if len(tf_rects) < 2:
+                                tf_rects.clear()
                                 for wi in range(cf.CFArrayGetCount(wp_tf.value)):
                                     wel_p = cf.CFArrayGetValueAtIndex(wp_tf.value, wi)
                                     if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
                                         _collect_tfs(wel_p, 0)
                         finally:
                             cf.CFRelease(wp_tf.value)
-                    tf_items.sort(key=lambda pair: (round(pair[0][1] / 24.0), pair[0][0]))
+                    tf_rects.sort(key=lambda r: (round(r[1] / 24.0), r[0]))
                     confirmed_add = [False]
                     pref_btns: List[str] = []
-                    tf_readback = ""
 
-                    def _type_into_tf(tf_rc: Tuple[float, float, float, float], tf_el: Any, digits_txt: str) -> None:
-                        ax.AXUIElementSetAttributeValue(tf_el, s_focused, kTrue)
+                    def _type_into_tf(tf_rc: Tuple[float, float, float, float], digits_txt: str) -> None:
                         _cg_click_once(tf_rc[0] + tf_rc[2] * 0.5, tf_rc[1] + tf_rc[3] * 0.5)
                         time.sleep(0.05)
                         _cg_tap_vk(0, cmd_flag=True)
@@ -7165,74 +7160,67 @@ def _ax_update_bookmark_display_mode(
                         _cg_tap_vk(48)
                         time.sleep(0.07)
 
-                    tf_cnt = len(tf_items)
-                    try:
-                        if tf_cnt >= 2:
-                            (r0, tf0_el), (r1, tf1_el) = tf_items[0], tf_items[1]
-                            for try_h in (h_str, alt_h_str):
-                                pref_btns.clear()
-                                _type_into_tf(r0, tf0_el, w_str)
-                                _type_into_tf(r1, tf1_el, try_h)
-                                tf_readback = f"{_gs(tf0_el, s_val)}x{_gs(tf1_el, s_val)}"
+                    tf_cnt = len(tf_rects)
+                    if tf_cnt >= 2:
+                        r0, r1 = tf_rects[0], tf_rects[1]
+                        for try_h in (h_str, alt_h_str):
+                            pref_btns.clear()
+                            _type_into_tf(r0, w_str)
+                            _type_into_tf(r1, try_h)
 
-                                def _click_confirm_add(el: Any, depth: int, allow_any_non_cancel: bool) -> None:
-                                    if not el or depth > 16 or confirmed_add[0]:
-                                        return
-                                    if _gs(el, s_role).strip() == "AXButton":
-                                        bt_raw = _gs(el, s_title).strip()
-                                        bt_c = bt_raw.lower()
-                                        en_c = _gb(el, s_enabled)
-                                        rb_c = _grect(el)
-                                        if bt_raw:
-                                            pref_btns.append(f"{bt_raw}:{int(en_c)}")
-                                        if en_c:
-                                            if bt_c in ("add", "ok", "create", "save", "done", "confirm", "apply", "thêm"):
-                                                if rb_c:
-                                                    _cg_click_once(rb_c[0] + rb_c[2] * 0.5, rb_c[1] + rb_c[3] * 0.5)
-                                                    confirmed_add[0] = True
-                                                    return
-                                                if _ax_press_fast(el, 0.50) in (0, -25204):
-                                                    confirmed_add[0] = True
-                                                    return
-                                            elif allow_any_non_cancel and bt_raw and bt_c not in ("cancel", "hủy", "close") and rb_c and rb_c[2] >= 45.0:
+                            def _click_confirm_add(el: Any, depth: int, allow_any_non_cancel: bool) -> None:
+                                if not el or depth > 16 or confirmed_add[0]:
+                                    return
+                                if _gs(el, s_role).strip() == "AXButton":
+                                    bt_raw = _gs(el, s_title).strip()
+                                    bt_c = bt_raw.lower()
+                                    en_c = _gb(el, s_enabled)
+                                    rb_c = _grect(el)
+                                    if bt_raw:
+                                        pref_btns.append(f"{bt_raw}:{int(en_c)}")
+                                    if en_c:
+                                        if bt_c in ("add", "ok", "create", "save", "done", "confirm", "apply", "thêm"):
+                                            if rb_c:
                                                 _cg_click_once(rb_c[0] + rb_c[2] * 0.5, rb_c[1] + rb_c[3] * 0.5)
                                                 confirmed_add[0] = True
                                                 return
-                                    ch = ctypes.c_void_p()
-                                    if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
-                                        try:
-                                            for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
-                                                _click_confirm_add(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1, allow_any_non_cancel)
-                                                if confirmed_add[0]:
-                                                    break
-                                        finally:
-                                            cf.CFRelease(ch.value)
-
-                                wp_cf = ctypes.c_void_p()
-                                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_cf)) == 0 and wp_cf.value:
+                                            if _ax_press_fast(el, 0.50) in (0, -25204):
+                                                confirmed_add[0] = True
+                                                return
+                                        elif allow_any_non_cancel and bt_raw and bt_c not in ("cancel", "hủy", "close") and rb_c and rb_c[2] >= 45.0:
+                                            _cg_click_once(rb_c[0] + rb_c[2] * 0.5, rb_c[1] + rb_c[3] * 0.5)
+                                            confirmed_add[0] = True
+                                            return
+                                ch = ctypes.c_void_p()
+                                if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
                                     try:
-                                        for wi in range(cf.CFArrayGetCount(wp_cf.value)):
-                                            wel_u = cf.CFArrayGetValueAtIndex(wp_cf.value, wi)
-                                            if not wel_u:
-                                                continue
-                                            wtu = _gs(wel_u, s_title).strip().lower()
-                                            rcu = _grect(wel_u)
-                                            if wtu in _MODAL_RES_TITLES and rcu and rcu[2] <= 540.0 and rcu[3] <= 340.0:
-                                                _click_confirm_add(wel_u, 0, True)
+                                        for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
+                                            _click_confirm_add(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1, allow_any_non_cancel)
+                                            if confirmed_add[0]:
+                                                break
                                     finally:
-                                        cf.CFRelease(wp_cf.value)
-                                if confirmed_add[0] or try_h == alt_h_str:
-                                    break
-                            if not confirmed_add[0]:
-                                # Nếu Untitled vẫn mở (Add không bật hoặc đã tồn tại) -> bấm Cancel để đóng sạch Untitled trước khi đóng Preferences!
-                                _cg_tap_vk(53)
-                                time.sleep(0.15)
-                            time.sleep(0.20)
-                    finally:
-                        for _, tf_ref in tf_items:
-                            cf.CFRelease(tf_ref)
+                                        cf.CFRelease(ch.value)
+
+                            wp_cf = ctypes.c_void_p()
+                            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_cf)) == 0 and wp_cf.value:
+                                try:
+                                    for wi in range(cf.CFArrayGetCount(wp_cf.value)):
+                                        wel_u = cf.CFArrayGetValueAtIndex(wp_cf.value, wi)
+                                        if not wel_u:
+                                            continue
+                                        wtu = _gs(wel_u, s_title).strip().lower()
+                                        rcu = _grect(wel_u)
+                                        if wtu in _MODAL_RES_TITLES and rcu and rcu[2] <= 540.0 and rcu[3] <= 340.0:
+                                            _click_confirm_add(wel_u, 0, True)
+                                finally:
+                                    cf.CFRelease(wp_cf.value)
+                            if confirmed_add[0] or try_h == alt_h_str:
+                                break
+                        if not confirmed_add[0]:
+                            _cg_tap_vk(53)
+                            time.sleep(0.15)
+                        time.sleep(0.20)
                     _RDP_CLOSER_DIAG["pref_btns_seen"] = pref_btns[-10:]
-                    _RDP_CLOSER_DIAG["tf_readback"] = tf_readback
 
                     # Đóng cửa sổ Preferences
                     wp_cl = ctypes.c_void_p()
