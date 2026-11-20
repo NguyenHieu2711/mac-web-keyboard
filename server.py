@@ -4599,6 +4599,26 @@ async def mac_virtual_display_diag() -> dict:
                             out["mrd_cli_list"] = (list_txt + "\n---\n" + ex_s)[:1800]
                         else:
                             out["mrd_cli_list"] = list_txt[:800]
+                        import sqlite3
+                        c_root = Path.home() / "Library/Containers/com.microsoft.rdc.macos/Data/Library/Application Support"
+                        sq_files = [str(p) for p in c_root.rglob("*.sqlite*")] if c_root.exists() else []
+                        sq_main = [p for p in sq_files if p.endswith(".sqlite")]
+                        sq_dump: Dict[str, Any] = {"files": sq_files[:10]}
+                        if sq_main:
+                            con = sqlite3.connect(f"file:{sq_main[0]}?mode=ro", uri=True, timeout=1.5)
+                            con.row_factory = sqlite3.Row
+                            try:
+                                tbls = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+                                sq_dump["tables"] = tbls
+                                for tb in tbls:
+                                    cols = [r[1] for r in con.execute(f"PRAGMA table_info('{tb}')").fetchall()]
+                                    if any("WIDTH" in c.upper() or "MULTIMON" in c.upper() or "SCREEN" in c.upper() or "BOOKMARK" in tb.upper() for c in cols + [tb]):
+                                        rows = [dict(r) for r in con.execute(f"SELECT * FROM '{tb}' LIMIT 3").fetchall()]
+                                        clean_rows = [{k: (v if not isinstance(v, bytes) else f"<bytes:{len(v)}>") for k, v in rw.items()} for rw in rows]
+                                        sq_dump[tb] = {"cols": cols, "rows": clean_rows}
+                            finally:
+                                con.close()
+                        out["mrd_sqlite"] = sq_dump
                 except Exception as me:
                     out["mrd_bookmarks_err"] = str(me)[:120]
                 out["displays"] = disps
