@@ -5216,13 +5216,15 @@ async def mac_virtual_display_toggle(req: Request) -> dict:
             mac_vdisp.start(logical_w=logical_w, logical_h=logical_h, hidpi=hidpi)
             trigger_smart_rdp_multimon_sync(enable_multimon=True, upgrade_running=True)
         else:
-            _, sess_before, was_2mon = _rdp_probe_vdisp_state()
+            was_vdisp_active = bool(mac_vdisp.is_active())
+            _, _, was_2mon = _rdp_probe_vdisp_state()
             mac_vdisp.stop()
-            trigger_smart_rdp_multimon_sync(
-                enable_multimon=False,
-                upgrade_running=False,
-                downgrade_running=bool(was_2mon or sess_before),
-            )
+            if was_vdisp_active and was_2mon:
+                trigger_smart_rdp_multimon_sync(
+                    enable_multimon=False,
+                    upgrade_running=False,
+                    downgrade_running=True,
+                )
         return mac_vdisp.status(injector._quartz)
 
     return await asyncio.to_thread(_run_toggle)
@@ -7598,12 +7600,12 @@ def _ax_update_bookmark_display_mode(
                             finally:
                                 cf.CFRelease(wp_m.value)
 
-                        # Nếu macOS không cho bung NSMenu khi cửa sổ đang giấu ngoài mép -> nhích nhẹ vào chọn trong 0.15s rồi giấu lại ngay lập tức!
+                        # Nếu macOS không cho bung NSMenu khi cửa sổ đang giấu ngoài mép -> nhích nhẹ vào chọn trong 0.2s rồi giấu lại ngay lập tức!
                         slid_temp = False
                         if not found_in_menu[0] and is_offscreen_pop:
                             _move_cc_pos(40.0, 60.0)
                             slid_temp = True
-                            time.sleep(0.08)
+                            time.sleep(0.22)
                             pop_rects.clear()
                             seen_items.clear()
                             item_rects.clear()
@@ -7617,7 +7619,7 @@ def _ax_update_bookmark_display_mode(
                             if pop_rects:
                                 pr0 = pop_rects[0]
                                 _cg_click_once(pr0[0] + pr0[2] * 0.5, pr0[1] + pr0[3] * 0.5)
-                                time.sleep(0.16)
+                                time.sleep(0.18)
                                 wp_m2 = ctypes.c_void_p()
                                 if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_m2)) == 0 and wp_m2.value:
                                     try:
@@ -7637,7 +7639,10 @@ def _ax_update_bookmark_display_mode(
                             q.CGEventPost(q.kCGHIDEventTap, esc_u)
                             time.sleep(0.08)
                         _park_cc_offscreen()
-                        return False, ["missing_item"] + seen_items[-6:]
+                        # CHỈ báo missing_item khi menu thực sự đã mở và liệt kê >= 3 độ phân giải mà chưa có 3024x1832!
+                        if len(seen_items) >= 3:
+                            return False, ["missing_item"] + seen_items[-6:]
+                        return False, ["menu_not_opened"] + seen_items[-6:]
 
                     after_v = ""
                     # Cách 1: Click trực tiếp tâm dòng "3024 x 1832" ngay khi menu đang mở, giấu lại ngay và chờ 0.45s commit Cocoa Binding!
@@ -8957,11 +8962,30 @@ def _restart_mrd_and_connect(enable_multimon: bool, target_sess: str) -> None:
         pass
 
     try:
-        new_pid = _ax_update_bookmark_display_mode(
-            enable_multimon=enable_multimon,
-            target_title=target_sess,
-            connect_after=True,
-        )
+        bmks_fast = _list_mrd_bookmarks()
+        # Nếu cấu hình bookmark ĐÃ KHỚP SẴN chế độ đích (VD: 3024x1832 + Fit to Window = ON ở 1 màn) -> BỎ QUA 100% Edit PC & Preferences, chỉ đóng phiên cũ và kết nối thẳng!
+        if _bookmark_already_matches(bmks_fast, want_multimon=enable_multimon):
+            live_pids_f = _find_live_mrd_pids()
+            if not live_pids_f:
+                _, app_nm_c = _get_mrd_cli_info()
+                if app_nm_c:
+                    subprocess.Popen(["open", "-g", "-j", "-a", app_nm_c], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    for _ in range(20):
+                        time.sleep(0.15)
+                        live_pids_f = _find_live_mrd_pids()
+                        if live_pids_f:
+                            break
+                    time.sleep(0.35)
+            new_pid = live_pids_f[0] if live_pids_f else 0
+            if new_pid > 0:
+                has_open_s = bool(_rdp_probe_vdisp_state()[1])
+                _ax_close_session_and_relaunch(new_pid, target_sess, close_existing_session=has_open_s)
+        else:
+            new_pid = _ax_update_bookmark_display_mode(
+                enable_multimon=enable_multimon,
+                target_title=target_sess,
+                connect_after=True,
+            )
         if new_pid <= 0:
             return
         if not enable_multimon:
@@ -9068,16 +9092,20 @@ def trigger_smart_rdp_multimon_sync(
                 _RDP_CLOSER_DIAG["worker_trace"] = f"start:mm={int(enable_multimon)},up={int(upgrade_running)},dn={int(downgrade_running)},rep={int(repair_clamped)},bmk={len(bookmarks)}"
 
                 if not enable_multimon:
-                    rpid, sess, _ = _rdp_probe_vdisp_state()
+                    rpid, sess, was_2mon_now = _rdp_probe_vdisp_state()
                     # NGUYÊN TẮC BẮT BUỘC: Nếu Remote Mac KHÔNG đang mở (not sess) -> MẶC KỆ 100%, tuyệt đối không tự bật hay đụng vào Microsoft Remote Desktop!
                     if not sess:
                         _RDP_CLOSER_DIAG["worker_trace"] += "|idle_no_sess_1mon"
                         return
-                    need_downgrade = bool(downgrade_running)
+                    # Nếu phiên ĐÃ ở 1 màn hình và cấu hình bookmark đã chuẩn 1 màn -> TUYỆT ĐỐI KHÔNG tắt đi mở lại!
+                    if not was_2mon_now and _bookmark_already_matches(bookmarks, want_multimon=False):
+                        _RDP_CLOSER_DIAG["worker_trace"] += "|already_1mon_noop"
+                        return
+                    need_downgrade = bool(downgrade_running and was_2mon_now)
                     if not need_downgrade and repair_clamped:
                         if _bookmark_needs_retina_or_dyn_repair(bookmarks):
                             need_downgrade = True
-                    _RDP_CLOSER_DIAG["worker_trace"] += f"|rpid={rpid},sess={len(sess)},nd={int(need_downgrade)}"
+                    _RDP_CLOSER_DIAG["worker_trace"] += f"|rpid={rpid},sess={len(sess)},w2={int(was_2mon_now)},nd={int(need_downgrade)}"
 
                     if need_downgrade:
                         now_d = time.monotonic()
@@ -9648,10 +9676,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                                         has_fs_session = True
                                     elif sub_s == "AXStandardWindow":
                                         has_windowed_session = True
-                                        # Phát hiện cửa sổ bị ép ngang 2 màn hình chia đôi (VD: 1511x459, tỷ lệ ~3.3:1) sau khi thoát Full-Screen!
-                                        if sw >= 800.0 and sh > 120.0 and sw >= sh * 2.15:
-                                            has_squished_2mon_window = True
-                                        elif _is_mrd_tiny_default_box(sw, sh):
+                                        if _is_mrd_tiny_default_box(sw, sh):
                                             need_expand_tiny_title = title_raw
                                         elif not _RDP_CLOSER_DIAG.get("sec_display_active") and now_m > _RESTORE_1MON_BOUNDS_UNTIL:
                                             wx_p, wy_p = _get_pos(w_ax, s_pos)
@@ -9695,16 +9720,10 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
 
                     if has_fs_session:
                         _LAST_DOWNGRADED_1MON_PID = 0
-                    if need_expand_tiny_title and not ax_has_dialog and not has_squished_2mon_window:
+                    if need_expand_tiny_title and not ax_has_dialog:
                         ok_exp, ew, eh = _apply_full_mac_window_bounds(rdp_pid, need_expand_tiny_title)
                         if ok_exp:
                             _RDP_CLOSER_DIAG["last_action"] = f"restored_bounds:{int(ew)}x{int(eh)}@{time.strftime('%H:%M:%S')}"
-                    if has_squished_2mon_window and not ax_has_dialog and rdp_pid != _LAST_DOWNGRADED_1MON_PID:
-                        trigger_smart_rdp_multimon_sync(
-                            enable_multimon=False,
-                            upgrade_running=False,
-                            downgrade_running=True,
-                        )
 
                     # Khi PC Hieu đang ở cửa sổ thường (fs=0): tự bật Fit Session to Window nếu bị bỏ tích để không bị phóng to 2x cắt màn hình!
                     if (
@@ -9766,12 +9785,6 @@ if __name__ == "__main__":
     check_macos_screen_recording(prompt=True)
     start_notification_auto_dismisser(max_seconds=4.0)
     start_clipboard_retina_normalizer(poll_sec=0.25)
-    _init_has_2mon = (_get_secondary_mac_display_bounds(None) is not None)
-    trigger_smart_rdp_multimon_sync(
-        enable_multimon=_init_has_2mon,
-        upgrade_running=_init_has_2mon,
-        repair_clamped=(not _init_has_2mon),
-    )
     start_rdp_launcher_auto_closer(poll_sec=0.15)
     start_git_auto_updater(check_every_sec=45.0)
     banner_ips = detect_network_ips()
