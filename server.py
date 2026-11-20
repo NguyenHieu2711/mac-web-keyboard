@@ -5870,8 +5870,8 @@ def _detect_boot_git_sha() -> str:
 
 _SERVER_BOOT_SHA: str = _detect_boot_git_sha()
 _RDP_RECONNECT_UNTIL: float = 0.0
-_LAST_2MON_SYNC_AT: float = 0.0
-_LAST_1MON_SYNC_AT: float = 0.0
+_LAST_2MON_SYNC_AT: float = -100.0
+_LAST_1MON_SYNC_AT: float = -100.0
 _LAST_DOWNGRADED_1MON_PID: int = 0
 _LAST_APPLIED_BOOKMARK_MODE: Optional[bool] = None
 _RESTORE_1MON_BOUNDS_UNTIL: float = 0.0
@@ -8059,11 +8059,13 @@ def trigger_smart_rdp_multimon_sync(
 
                     if need_downgrade and (sess or reopen_repaired):
                         now_d = time.monotonic()
-                        if (now_d - _LAST_1MON_SYNC_AT) < 3.5:
+                        if _LAST_1MON_SYNC_AT > 0.0 and (now_d - _LAST_1MON_SYNC_AT) < 3.5:
+                            _RDP_CLOSER_DIAG["ax_stage"] = f"debounced:{now_d:.2f}"
                             return
                         _LAST_1MON_SYNC_AT = now_d
                         target_sess = sess[0] if sess else default_title
                         _RDP_RECONNECT_UNTIL = time.monotonic() + 14.0
+                        _RDP_CLOSER_DIAG["ax_stage"] = f"calling_restart:{target_sess}"
                         try:
                             time.sleep(0.25)
                             _restart_mrd_and_connect(enable_multimon=False, target_sess=target_sess)
