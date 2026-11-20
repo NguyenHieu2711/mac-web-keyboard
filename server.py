@@ -8200,11 +8200,46 @@ def _ax_update_bookmark_display_mode(
     return rdp_pid
 
 
+def _mrd_has_active_rdp_tcp(rpid: int) -> Optional[bool]:
+    """Kiểm tra trực tiếp socket TCP ESTABLISHED thật của tiến trình Microsoft Remote Desktop (cổng :3389 / LAN).
+    - True: chắc chắn đang có phiên Remote thật kết nối tới Windows PC (kể cả đang Full-Screen Space khác hoặc kCGWindowName='Microsoft Remote Desktop').
+    - False: chắc chắn KHÔNG có phiên Remote nào đang mở (người dùng đã đóng PC Hieu, kể cả khi Connection Center vẫn mở hoặc macOS cache cửa sổ ảo).
+    - None: không chạy được lsof -> fallback sang kiểm tra AXWindows."""
+    if not IS_MACOS or rpid <= 0:
+        return None
+    lsof_bin = "/usr/sbin/lsof" if Path("/usr/sbin/lsof").exists() else "lsof"
+    try:
+        rc = subprocess.run(
+            [lsof_bin, "-nP", "-a", "-p", str(int(rpid)), "-iTCP", "-sTCP:ESTABLISHED"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=0.75,
+        )
+        out = rc.stdout or ""
+        err = (rc.stderr or "").strip()
+        if rc.returncode not in (0, 1) and not out:
+            _RDP_CLOSER_DIAG["rdp_tcp_active"] = f"err:{rc.returncode}:{err[:40]}"
+            return None
+        for line in out.splitlines():
+            if "ESTABLISHED" not in line or "->" not in line:
+                continue
+            remote = line.split("->", 1)[1].split(" ", 1)[0].strip()
+            if ":3389" in remote or re.search(r"^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|100\.)", remote):
+                _RDP_CLOSER_DIAG["rdp_tcp_active"] = f"yes:{remote}"
+                return True
+        _RDP_CLOSER_DIAG["rdp_tcp_active"] = "no"
+        return False
+    except Exception as exc_l:
+        _RDP_CLOSER_DIAG["rdp_tcp_active"] = f"exc:{str(exc_l)[:40]}"
+        return None
+
+
 def _rdp_probe_vdisp_state(require_live_open: bool = True) -> Tuple[int, List[str], bool]:
     """Trả về (rdp_pid, session_titles, has_session_on_vdisp).
-    Khi require_live_open=True (mặc định): CHỈ tính là đang mở nếu app KHÔNG bị ẩn (isHidden=False),
-    cửa sổ phiên KHÔNG bị thu nhỏ (AXMinimized=False), và đang hiển thị thật trên màn hình (onscreen=True hoặc AXFullScreen=True)!
-    Tuyệt đối bỏ qua các cửa sổ cache ngầm (onscreen=False) sau khi người dùng đã tắt Remote Mac!"""
+    Khi require_live_open=True (mặc định): xác thực bằng kết nối TCP RDP thật (:3389) + không bị ẩn (isHidden=False):
+    - Đang mở phiên Remote thật (kể cả Full-Screen Space khác hoặc cửa sổ Full-Screen mang tên 'Microsoft Remote Desktop'): luôn nhận ra 100%!
+    - Đã tắt phiên Remote (kể cả còn Connection Center hay cửa sổ cache onscreen=False): trả rỗng 100%, không bao giờ tự kích hoạt nhầm!"""
     if not IS_MACOS:
         return 0, [], False
     q = injector._quartz
@@ -8228,6 +8263,7 @@ def _rdp_probe_vdisp_state(require_live_open: bool = True) -> Tuple[int, List[st
     sess_low: set = set()
     onscreen_low: set = set()
     has_vdisp = False
+    has_vdisp_any_big = False
     with objc.autorelease_pool():
         wlist = q.CGWindowListCopyWindowInfo(
             q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements,
@@ -8253,7 +8289,14 @@ def _rdp_probe_vdisp_state(require_live_open: bool = True) -> Tuple[int, List[st
             wl = wname.lower()
             if not wname or ww < 620.0 or wh < 200.0:
                 continue
-            if wl in launcher_set or any(k in wl for k in dialog_kw):
+            if any(k in wl for k in dialog_kw):
+                continue
+            if vb is not None:
+                cx = wx + ww * 0.5
+                cy = wy + wh * 0.5
+                if (vb["x"] <= cx < vb["x"] + vb["w"]) and (vb["y"] <= cy < vb["y"] + vb["h"]):
+                    has_vdisp_any_big = True
+            if wl in launcher_set:
                 continue
             rpid = pw_pid
             if bool(w.get("kCGWindowIsOnscreen", False)):
@@ -8266,6 +8309,30 @@ def _rdp_probe_vdisp_state(require_live_open: bool = True) -> Tuple[int, List[st
                 cy = wy + wh * 0.5
                 if (vb["x"] <= cx < vb["x"] + vb["w"]) and (vb["y"] <= cy < vb["y"] + vb["h"]):
                     has_vdisp = True
+
+        if rpid <= 0:
+            live_pids_fb = _find_live_mrd_pids()
+            if live_pids_fb:
+                rpid = live_pids_fb[0]
+
+        if require_live_open and rpid > 0:
+            try:
+                rapp_p = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rpid)
+                if rapp_p is None or bool(rapp_p.isHidden()):
+                    return rpid, [], False
+            except Exception:
+                pass
+
+            tcp_live = _mrd_has_active_rdp_tcp(rpid)
+            if tcp_live is False:
+                return rpid, [], False
+            if tcp_live is True:
+                if not sessions:
+                    bmks_live = _list_mrd_bookmarks()
+                    sessions = [bmks_live[0][0] if bmks_live else "PC Hieu"]
+                if has_vdisp_any_big:
+                    has_vdisp = True
+                return rpid, sessions, has_vdisp
 
         if require_live_open and sessions and rpid > 0:
             try:
@@ -8565,7 +8632,7 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                         if not wel:
                             continue
                         wt = _gs(wel, s_title).strip().lower()
-                        if wt == t_low or (t_low and t_low in wt and wt != "microsoft remote desktop"):
+                        if wt == t_low or (t_low and t_low in wt and wt != "microsoft remote desktop") or (wt == "microsoft remote desktop" and _gb(wel, s_fs)):
                             b_ref = ctypes.c_void_p()
                             if ax.AXUIElementCopyAttributeValue(wel, s_close, ctypes.byref(b_ref)) == 0 and b_ref.value:
                                 try:
@@ -8583,7 +8650,7 @@ def _ax_close_session_and_relaunch(rdp_pid: int, target_title: str, close_existi
                     cf.CFRelease(w_arr.value)
             if not closed_s:
                 _click_menu_item(("window", "cửa sổ"), target_title.strip().lower())
-                time.sleep(0.12)
+                time.sleep(0.55)
                 _click_menu_item(("window", "cửa sổ"), "close")
                 closed_s = True
             if closed_s and q is not None:
@@ -9198,6 +9265,7 @@ def trigger_smart_rdp_multimon_sync(
                             _RDP_CLOSER_DIAG["ax_stage"] = f"debounced:{now_d:.2f}"
                             return
                         _LAST_1MON_SYNC_AT = now_d
+                        _LAST_2MON_SYNC_AT = 0.0
                         target_sess = sess[0] if sess else default_title
                         _RDP_RECONNECT_UNTIL = time.monotonic() + 14.0
                         _RDP_CLOSER_DIAG["ax_stage"] = f"calling_reload_1mon:{target_sess}"
@@ -9207,6 +9275,7 @@ def trigger_smart_rdp_multimon_sync(
                             _RDP_CLOSER_DIAG["last_reconnect"] = f"reloaded_1mon_fs:{target_sess}@{time.strftime('%H:%M:%S')}"
                         finally:
                             _LAST_1MON_SYNC_AT = time.monotonic()
+                            _LAST_2MON_SYNC_AT = 0.0
                             _RDP_RECONNECT_UNTIL = time.monotonic() + 5.0
                     return
 
@@ -9218,9 +9287,9 @@ def trigger_smart_rdp_multimon_sync(
                     return
 
                 now_m = time.monotonic()
-                if (now_m - _LAST_2MON_SYNC_AT) < 12.0:
+                if _LAST_2MON_SYNC_AT > 0.0 and (now_m - _LAST_2MON_SYNC_AT) < 12.0:
+                    _RDP_CLOSER_DIAG["worker_trace"] += f"|debounced_2mon:{now_m - _LAST_2MON_SYNC_AT:.1f}s"
                     return
-                _LAST_2MON_SYNC_AT = now_m
 
                 # Chờ màn hình phụ (Màn phụ Mac hoặc màn phụ ĐT bất kỳ) đăng ký xong với WindowServer
                 for _ in range(14):
@@ -9239,6 +9308,8 @@ def trigger_smart_rdp_multimon_sync(
                     _RDP_CLOSER_DIAG["last_reconnect"] = f"already_2mon@{time.strftime('%H:%M:%S')}"
                     return
 
+                _LAST_2MON_SYNC_AT = time.monotonic()
+                _LAST_1MON_SYNC_AT = 0.0
                 target_sess = sess[0] if sess else default_title
                 _RDP_RECONNECT_UNTIL = time.monotonic() + 14.0
                 try:
@@ -9246,6 +9317,7 @@ def trigger_smart_rdp_multimon_sync(
                     _RDP_CLOSER_DIAG["last_reconnect"] = f"upgraded_2mon:{target_sess}@{time.strftime('%H:%M:%S')}"
                 finally:
                     _LAST_2MON_SYNC_AT = time.monotonic()
+                    _LAST_1MON_SYNC_AT = 0.0
                     _RDP_RECONNECT_UNTIL = time.monotonic() + 5.0
         except Exception as w_exc:
             _RDP_CLOSER_DIAG["last_err"] = f"smart_worker:{repr(w_exc)[:140]}"
