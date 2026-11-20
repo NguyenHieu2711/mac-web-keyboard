@@ -8347,6 +8347,8 @@ def _rdp_probe_vdisp_state(require_live_open: bool = True) -> Tuple[int, List[st
                     valid_ax_low: set = set()
                     try:
                         try:
+                            ax_l.AXUIElementSetMessagingTimeout.argtypes = [ctypes.c_void_p, ctypes.c_float]
+                            ax_l.AXUIElementSetMessagingTimeout.restype = ctypes.c_int32
                             ax_l.AXUIElementSetMessagingTimeout(a_el, ctypes.c_float(0.35))
                         except Exception:
                             pass

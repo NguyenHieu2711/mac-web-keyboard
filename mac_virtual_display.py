@@ -1107,6 +1107,8 @@ class MacVirtualDisplayManager:
             ax.AXValueGetValue.restype = ctypes.c_bool
             ax.AXValueCreate.argtypes = [ctypes.c_int32, ctypes.c_void_p]
             ax.AXValueCreate.restype = ctypes.c_void_p
+            ax.AXUIElementSetMessagingTimeout.argtypes = [ctypes.c_void_p, ctypes.c_float]
+            ax.AXUIElementSetMessagingTimeout.restype = ctypes.c_int32
 
             self._ax_lib = ax
             self._cf_lib = cf
