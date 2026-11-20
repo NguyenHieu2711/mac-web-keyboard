@@ -6218,6 +6218,39 @@ def _ax_update_bookmark_display_mode(
 
     live_pids = _find_live_mrd_pids()
     rdp_pid = live_pids[0] if live_pids else 0
+    # Nếu tiến trình MRD cũ đang kẹt hộp thoại modal "Untitled" (380x148) làm nghẽn cổng Mach Accessibility -> gỡ ngay trước khi gọi AX!
+    if rdp_pid > 0 and q is not None:
+        try:
+            has_stuck_untitled = False
+            with objc.autorelease_pool():
+                for wu_chk in (q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements, q.kCGNullWindowID) or []):
+                    if int(wu_chk.get("kCGWindowOwnerPID", 0) or 0) == rdp_pid and int(wu_chk.get("kCGWindowLayer", -1)) == 0:
+                        if str(wu_chk.get("kCGWindowName", "") or "").strip().lower() == "untitled":
+                            has_stuck_untitled = True
+                            break
+            if has_stuck_untitled:
+                ed0 = q.CGEventCreateKeyboardEvent(None, 53, True)
+                eu0 = q.CGEventCreateKeyboardEvent(None, 53, False)
+                if hasattr(q, "CGEventPostToPid"):
+                    q.CGEventPostToPid(rdp_pid, ed0)
+                    q.CGEventPostToPid(rdp_pid, eu0)
+                else:
+                    q.CGEventPost(q.kCGHIDEventTap, ed0)
+                    q.CGEventPost(q.kCGHIDEventTap, eu0)
+                time.sleep(0.25)
+                still_stuck = False
+                with objc.autorelease_pool():
+                    for wu_chk2 in (q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements, q.kCGNullWindowID) or []):
+                        if int(wu_chk2.get("kCGWindowOwnerPID", 0) or 0) == rdp_pid and int(wu_chk2.get("kCGWindowLayer", -1)) == 0:
+                            if str(wu_chk2.get("kCGWindowName", "") or "").strip().lower() == "untitled":
+                                still_stuck = True
+                                break
+                if still_stuck and not _rdp_probe_vdisp_state()[1]:
+                    os.kill(rdp_pid, signal.SIGTERM)
+                    time.sleep(0.50)
+                    rdp_pid = 0
+        except Exception:
+            pass
     if rdp_pid <= 0:
         subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(20):
@@ -6231,7 +6264,12 @@ def _ax_update_bookmark_display_mode(
         return 0
 
     try:
-        subprocess.Popen(["caffeinate", "-u", "-t", "6"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["caffeinate", "-u", "-t", "8"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    # Dùng `open -a` qua LaunchServices để đưa MRD lên frontmost 100% trên macOS Sonoma/Sequoia!
+    try:
+        subprocess.run(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
     except Exception:
         pass
     try:
@@ -6242,7 +6280,7 @@ def _ax_update_bookmark_display_mode(
                 rapp.activateWithOptions_(3)
     except Exception:
         pass
-    time.sleep(0.22)
+    time.sleep(0.25)
 
     app_ax = ax.AXUIElementCreateApplication(rdp_pid)
     if not app_ax:
@@ -6331,10 +6369,12 @@ def _ax_update_bookmark_display_mode(
         return (float(pt.x), float(pt.y), float(sz.w), float(sz.h)) if ok else None
 
     def _click_menu_item(bar_names: Tuple[str, ...], item_exact_set: Tuple[str, ...]) -> bool:
+        _set_tmo(app_ax, 0.50)
         mb = ctypes.c_void_p()
         if ax.AXUIElementCopyAttributeValue(app_ax, s_menubar, ctypes.byref(mb)) != 0 or not mb.value:
             return False
         try:
+            _set_tmo(mb.value, 0.50)
             bars = ctypes.c_void_p()
             if ax.AXUIElementCopyAttributeValue(mb.value, s_children, ctypes.byref(bars)) != 0 or not bars.value:
                 return False
@@ -6351,6 +6391,7 @@ def _ax_update_bookmark_display_mode(
                         if cf.CFArrayGetCount(sub.value) <= 0:
                             continue
                         mel = cf.CFArrayGetValueAtIndex(sub.value, 0)
+                        _set_tmo(mel, 0.50)
                         its = ctypes.c_void_p()
                         if mel and ax.AXUIElementCopyAttributeValue(mel, s_children, ctypes.byref(its)) == 0 and its.value:
                             try:
@@ -6361,7 +6402,7 @@ def _ax_update_bookmark_display_mode(
                                         continue
                                     it_l = _gs(iel, s_title).strip().lower()
                                     if it_l in item_exact_set and _gb(iel, s_enabled):
-                                        if ax.AXUIElementPerformAction(iel, s_press) == 0:
+                                        if _ax_press_fast(iel, 0.50) == 0:
                                             return True
                             finally:
                                 cf.CFRelease(its.value)
@@ -6863,7 +6904,8 @@ def _ax_update_bookmark_display_mode(
                                 cf.CFRelease(ch.value)
 
                     try:
-                        for try_click in (False, True):
+                        # Ưu tiên click chuột trực tiếp vào AXPopUpButton trước (không khóa cổng Mach Accessibility của MRD!)
+                        for try_click in (True, False):
                             pop_rects.clear()
                             wp_w = ctypes.c_void_p()
                             if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(wp_w)) == 0 and wp_w.value:
@@ -6941,8 +6983,12 @@ def _ax_update_bookmark_display_mode(
                         fl = (q.kCGEventFlagMaskCommand | 0x00000008) if cmd_flag else 0
                         q.CGEventSetFlags(kd, fl)
                         q.CGEventSetFlags(ku, fl)
-                        q.CGEventPost(q.kCGHIDEventTap, kd)
-                        q.CGEventPost(q.kCGHIDEventTap, ku)
+                        if hasattr(q, "CGEventPostToPid"):
+                            q.CGEventPostToPid(rdp_pid, kd)
+                            q.CGEventPostToPid(rdp_pid, ku)
+                        else:
+                            q.CGEventPost(q.kCGHIDEventTap, kd)
+                            q.CGEventPost(q.kCGHIDEventTap, ku)
 
                     opened_pref_menu = _click_menu_item(
                         ("microsoft remote desktop", "windows app"),
@@ -7007,30 +7053,30 @@ def _ax_update_bookmark_display_mode(
                     time.sleep(0.22)
 
                     # Bấm nút "+" thêm độ phân giải mới (ưu tiên khớp tên "+"/"add", dự phòng nút nhỏ bên trái nhất ở chân bảng)
+                    # Bấm nút "+" BẰNG CLICK CHUỘT THẬT (_cg_click_once) — TUYỆT ĐỐI KHÔNG gọi AXPress lên "+" vì runModalForWindow: sẽ khóa cổng Mach Accessibility!
                     plus_ok = [False]
+                    plus_exact_btns: List[Tuple[float, float, float, float]] = []
                     footer_small_btns: List[Tuple[float, float, float, float]] = []
                     py_min = (pref_win_rc[0][1] + pref_win_rc[0][3] * 0.55) if pref_win_rc else 420.0
 
-                    def _click_plus_btn(el: Any, depth: int) -> None:
-                        if not el or depth > 14 or plus_ok[0]:
+                    def _find_plus_btn_rect(el: Any, depth: int) -> None:
+                        if not el or depth > 14 or plus_exact_btns:
                             return
                         if _gs(el, s_role).strip() == "AXButton" and _gb(el, s_enabled):
                             bt = _gs(el, s_title).strip()
                             bd = _gs(el, s_desc).strip().lower()
                             rb = _grect(el)
-                            if bt == "+" or bt.lower() == "add" or "add" in bd:
-                                # BẮT BUỘC dùng _ax_press_fast vì nút "+" mở cửa sổ modal "Untitled" (380x148) qua runModalForWindow:!
-                                if _ax_press_fast(el, 0.45) in (0, -25204):
-                                    plus_ok[0] = True
-                                    return
+                            if rb and (bt == "+" or bt.lower() == "add" or "add" in bd):
+                                plus_exact_btns.append(rb)
+                                return
                             if bt == "" and rb and 14.0 <= rb[2] <= 42.0 and 14.0 <= rb[3] <= 36.0 and rb[1] >= py_min:
                                 footer_small_btns.append(rb)
                         ch = ctypes.c_void_p()
                         if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
                             try:
                                 for ci in range(min(cf.CFArrayGetCount(ch.value), 80)):
-                                    _click_plus_btn(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
-                                    if plus_ok[0]:
+                                    _find_plus_btn_rect(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                                    if plus_exact_btns:
                                         break
                             finally:
                                 cf.CFRelease(ch.value)
@@ -7041,23 +7087,22 @@ def _ax_update_bookmark_display_mode(
                             for wi in range(cf.CFArrayGetCount(wp_pl.value)):
                                 wel_p = cf.CFArrayGetValueAtIndex(wp_pl.value, wi)
                                 if wel_p and _gs(wel_p, s_title).strip().lower() in _PREF_WIN_TITLES:
-                                    _click_plus_btn(wel_p, 0)
+                                    _find_plus_btn_rect(wel_p, 0)
                         finally:
                             cf.CFRelease(wp_pl.value)
-                    if not plus_ok[0] and footer_small_btns:
+                    chosen_plus = plus_exact_btns[0] if plus_exact_btns else None
+                    if chosen_plus is None and footer_small_btns:
                         footer_small_btns.sort(key=lambda r: (round(r[1] / 20.0), r[0]))
-                        bx_p, by_p, bw_p, bh_p = footer_small_btns[0]
-                        _cg_click_once(bx_p + bw_p * 0.5, by_p + bh_p * 0.5)
+                        chosen_plus = footer_small_btns[0]
+                    if chosen_plus is not None:
+                        try:
+                            subprocess.run(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1.5)
+                        except Exception:
+                            pass
+                        time.sleep(0.10)
+                        _cg_click_once(chosen_plus[0] + chosen_plus[2] * 0.5, chosen_plus[1] + chosen_plus[3] * 0.5)
                         plus_ok[0] = True
-                    time.sleep(0.24)
-                    try:
-                        with objc.autorelease_pool():
-                            rapp_u = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
-                            if rapp_u is not None:
-                                rapp_u.activateWithOptions_(3)
-                    except Exception:
-                        pass
-                    time.sleep(0.08)
+                    time.sleep(0.28)
 
                     # Cửa sổ nhập độ phân giải mới của MRD 10.9.10 là cửa sổ modal riêng tên "Untitled" (380x148)!
                     _MODAL_RES_TITLES = ("untitled", "add resolution", "custom resolution", "")
