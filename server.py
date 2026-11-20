@@ -6218,43 +6218,33 @@ def _ax_update_bookmark_display_mode(
 
     live_pids = _find_live_mrd_pids()
     rdp_pid = live_pids[0] if live_pids else 0
-    # Nếu tiến trình MRD cũ đang kẹt hộp thoại modal "Untitled" (380x148) làm nghẽn cổng Mach Accessibility -> gỡ ngay trước khi gọi AX!
-    if rdp_pid > 0 and q is not None:
+    # Nếu tiến trình MRD cũ đang kẹt hộp thoại modal "Untitled" (380x148) khi chưa mở phiên nào -> SIGKILL dứt điểm ngay lập tức!
+    if q is not None:
         try:
-            has_stuck_untitled = False
+            stuck_pids: List[int] = []
             with objc.autorelease_pool():
                 for wu_chk in (q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements, q.kCGNullWindowID) or []):
-                    if int(wu_chk.get("kCGWindowOwnerPID", 0) or 0) == rdp_pid and int(wu_chk.get("kCGWindowLayer", -1)) == 0:
-                        if str(wu_chk.get("kCGWindowName", "") or "").strip().lower() == "untitled":
-                            has_stuck_untitled = True
-                            break
-            if has_stuck_untitled:
-                ed0 = q.CGEventCreateKeyboardEvent(None, 53, True)
-                eu0 = q.CGEventCreateKeyboardEvent(None, 53, False)
-                if hasattr(q, "CGEventPostToPid"):
-                    q.CGEventPostToPid(rdp_pid, ed0)
-                    q.CGEventPostToPid(rdp_pid, eu0)
-                else:
-                    q.CGEventPost(q.kCGHIDEventTap, ed0)
-                    q.CGEventPost(q.kCGHIDEventTap, eu0)
-                time.sleep(0.25)
-                still_stuck = False
-                with objc.autorelease_pool():
-                    for wu_chk2 in (q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionAll | q.kCGWindowListExcludeDesktopElements, q.kCGNullWindowID) or []):
-                        if int(wu_chk2.get("kCGWindowOwnerPID", 0) or 0) == rdp_pid and int(wu_chk2.get("kCGWindowLayer", -1)) == 0:
-                            if str(wu_chk2.get("kCGWindowName", "") or "").strip().lower() == "untitled":
-                                still_stuck = True
-                                break
-                if still_stuck and not _rdp_probe_vdisp_state()[1]:
-                    old_hung_pid = rdp_pid
-                    os.kill(old_hung_pid, signal.SIGKILL)
-                    for _ in range(15):
-                        time.sleep(0.10)
-                        if old_hung_pid not in _find_live_mrd_pids():
-                            break
-                    rdp_pid = 0
-        except Exception:
-            pass
+                    if int(wu_chk.get("kCGWindowLayer", -1)) == 0 and str(wu_chk.get("kCGWindowName", "") or "").strip().lower() == "untitled":
+                        ol_u = str(wu_chk.get("kCGWindowOwnerName", "") or "").strip().lower()
+                        if "microsoft remote desktop" in ol_u or "windows app" in ol_u:
+                            spid = int(wu_chk.get("kCGWindowOwnerPID", 0) or 0)
+                            if spid > 0 and spid not in stuck_pids:
+                                stuck_pids.append(spid)
+            if stuck_pids and not _rdp_probe_vdisp_state()[1]:
+                for spid in stuck_pids:
+                    try:
+                        os.kill(spid, signal.SIGKILL)
+                    except Exception:
+                        pass
+                for _ in range(15):
+                    time.sleep(0.10)
+                    cur_live = _find_live_mrd_pids()
+                    if all(sp not in cur_live for sp in stuck_pids):
+                        break
+                live_pids = _find_live_mrd_pids()
+                rdp_pid = live_pids[0] if live_pids else 0
+        except Exception as exc_k:
+            _RDP_CLOSER_DIAG["kill_stuck_err"] = str(exc_k)[:120]
     if rdp_pid <= 0:
         subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(20):
@@ -6987,12 +6977,8 @@ def _ax_update_bookmark_display_mode(
                         fl = (q.kCGEventFlagMaskCommand | 0x00000008) if cmd_flag else 0
                         q.CGEventSetFlags(kd, fl)
                         q.CGEventSetFlags(ku, fl)
-                        if hasattr(q, "CGEventPostToPid"):
-                            q.CGEventPostToPid(rdp_pid, kd)
-                            q.CGEventPostToPid(rdp_pid, ku)
-                        else:
-                            q.CGEventPost(q.kCGHIDEventTap, kd)
-                            q.CGEventPost(q.kCGHIDEventTap, ku)
+                        q.CGEventPost(q.kCGHIDEventTap, kd)
+                        q.CGEventPost(q.kCGHIDEventTap, ku)
 
                     opened_pref_menu = _click_menu_item(
                         ("microsoft remote desktop", "windows app"),
@@ -7186,13 +7172,17 @@ def _ax_update_bookmark_display_mode(
                                     pref_btns.append(f"{bt_raw}:{int(en_c)}")
                                 if en_c:
                                     if bt_c in ("add", "ok", "create", "save", "done", "confirm", "apply", "thêm"):
+                                        if rb_c:
+                                            _cg_click_once(rb_c[0] + rb_c[2] * 0.5, rb_c[1] + rb_c[3] * 0.5)
+                                            confirmed_add[0] = True
+                                            return
                                         if _ax_press_fast(el, 0.50) in (0, -25204):
                                             confirmed_add[0] = True
                                             return
                                     elif allow_any_non_cancel and bt_raw and bt_c not in ("cancel", "hủy", "close") and rb_c and rb_c[2] >= 45.0:
-                                        if _ax_press_fast(el, 0.50) in (0, -25204):
-                                            confirmed_add[0] = True
-                                            return
+                                        _cg_click_once(rb_c[0] + rb_c[2] * 0.5, rb_c[1] + rb_c[3] * 0.5)
+                                        confirmed_add[0] = True
+                                        return
                             ch = ctypes.c_void_p()
                             if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
                                 try:
