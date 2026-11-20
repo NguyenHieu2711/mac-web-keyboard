@@ -1216,21 +1216,54 @@ namespace MacWebKeyboard
                     TryLoadLayoutStateLocked();
                 }
 
-                CheckTopologyAndSnapshot(true, false);
+                var wakeEvt = new AutoResetEvent(false);
+                int pendingForce = 1;
+                int pendingReattach = 0;
 
-                SystemEvents.DisplaySettingsChanged += (s, e) => CheckTopologyAndSnapshot(true, false);
+                var pollWorker = new Thread(() =>
+                {
+                    if (_defaultDesktop != IntPtr.Zero)
+                    {
+                        try { SetThreadDesktop(_defaultDesktop); } catch { }
+                    }
+                    while (true)
+                    {
+                        bool forceNow = Interlocked.Exchange(ref pendingForce, 0) != 0;
+                        bool reattachNow = Interlocked.Exchange(ref pendingReattach, 0) != 0;
+                        if (reattachNow)
+                        {
+                            try
+                            {
+                                IntPtr hd2 = OpenDesktop("Default", 0, false, 0x01FF);
+                                if (hd2 != IntPtr.Zero)
+                                {
+                                    _defaultDesktop = hd2;
+                                    SetThreadDesktop(hd2);
+                                }
+                            }
+                            catch { }
+                        }
+                        try { CheckTopologyAndSnapshot(forceNow, reattachNow); } catch { }
+                        wakeEvt.WaitOne(650);
+                    }
+                });
+                pollWorker.IsBackground = true;
+                pollWorker.Start();
+
+                SystemEvents.DisplaySettingsChanged += (s, e) =>
+                {
+                    Interlocked.Exchange(ref pendingForce, 1);
+                    wakeEvt.Set();
+                };
                 SystemEvents.SessionSwitch += (s, e) =>
                 {
                     bool isReattach = (e.Reason == SessionSwitchReason.RemoteConnect ||
                                        e.Reason == SessionSwitchReason.ConsoleConnect ||
                                        e.Reason == SessionSwitchReason.SessionUnlock);
-                    CheckTopologyAndSnapshot(true, isReattach);
+                    Interlocked.Exchange(ref pendingForce, 1);
+                    if (isReattach) Interlocked.Exchange(ref pendingReattach, 1);
+                    wakeEvt.Set();
                 };
-
-                var timer = new System.Windows.Forms.Timer();
-                timer.Interval = 650;
-                timer.Tick += (s, e) => CheckTopologyAndSnapshot(false, false);
-                timer.Start();
 
                 Application.Run();
                 GC.KeepAlive(mutex);

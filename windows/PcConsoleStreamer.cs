@@ -93,6 +93,22 @@ namespace MacWebKeyboard
         [DllImport("user32.dll")]
         private static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
 
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr OpenDesktop(string lpszDesktop, uint dwFlags, bool fInherit, uint dwDesiredAccess);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetThreadDesktop(IntPtr hDesktop);
+
+        private static void AttachThreadToDefaultDesktop()
+        {
+            try
+            {
+                IntPtr hd = OpenDesktop("Default", 0, false, 0x01FF);
+                if (hd != IntPtr.Zero) SetThreadDesktop(hd);
+            }
+            catch { }
+        }
+
         [DllImport("user32.dll")]
         private static extern bool GetCursorPos(out POINT lpPoint);
 
@@ -707,6 +723,7 @@ namespace MacWebKeyboard
 
                     if (cmd == "INPUT")
                     {
+                        AttachThreadToDefaultDesktop();
                         string line;
                         while ((line = reader.ReadLine()) != null)
                         {
@@ -716,12 +733,14 @@ namespace MacWebKeyboard
                     }
 
                     if (cmd != "STREAM") return;
+                    AttachThreadToDefaultDesktop();
 
                     bool running = true;
                     object writeLock = new object();
 
                     var inputThread = new Thread(() =>
                     {
+                        AttachThreadToDefaultDesktop();
                         try
                         {
                             string line;
@@ -815,6 +834,7 @@ namespace MacWebKeyboard
 
             var restoreWatcher = new Thread(() =>
             {
+                AttachThreadToDefaultDesktop();
                 while (true)
                 {
                     Thread.Sleep(120);
