@@ -6650,8 +6650,8 @@ def _rdp_probe_vdisp_state() -> Tuple[int, List[str], bool]:
             wh = float(wb.get("Height", 0))
             wname = str(w.get("kCGWindowName", "") or "").strip()
             wl = wname.lower()
-            # Ngưỡng >= 620x360 để KHÔNG BAO GIỜ nhận nhầm hộp Connecting (550x184) hoặc bảng mật khẩu (550x320) là phiên đã mở!
-            if not wname or ww < 620.0 or wh < 360.0:
+            # Ngưỡng ww >= 620, wh >= 200 để loại hộp Connecting/Password (rộng 550px) nhưng bắt trúng cửa sổ 2 màn bị bẹp (1008x315)!
+            if not wname or ww < 620.0 or wh < 200.0:
                 continue
             if wl in launcher_set or any(k in wl for k in dialog_kw):
                 continue
@@ -7491,7 +7491,7 @@ def start_rdp_launcher_auto_closer(poll_sec: float = 0.20) -> None:
                             all_has_dialog = True
                         elif wname_l in launcher_titles:
                             all_has_launcher = True
-                        elif wname_raw and ww >= 620.0 and wh >= 360.0:
+                        elif wname_raw and ww >= 620.0 and wh >= 200.0:
                             rdp_pid = pid_w
                             if wname_l not in session_titles_lower:
                                 session_titles_lower.add(wname_l)
