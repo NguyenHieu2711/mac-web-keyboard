@@ -6282,11 +6282,10 @@ def _ax_update_bookmark_display_mode(
         if exited_cc_fs:
             time.sleep(0.90)
 
-        opened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc..."))
+        opened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc...", "edit"))
+        cands: List[Tuple[float, float, float, float]] = []
+        vis_c = [0]
         if not opened_edit:
-            cands: List[Tuple[float, float, float, float]] = []
-            vis_c = [0]
-
             def _find_card(el: Any, depth: int) -> None:
                 if not el or depth > 18 or vis_c[0] > 2500:
                     return
@@ -6305,20 +6304,81 @@ def _ax_update_bookmark_display_mode(
                     finally:
                         cf.CFRelease(ch.value)
 
-            w_scan = ctypes.c_void_p()
-            if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_scan)) == 0 and w_scan.value:
+            for _ in range(6):
+                cands.clear()
+                vis_c[0] = 0
                 try:
-                    for wi in range(cf.CFArrayGetCount(w_scan.value)):
-                        _find_card(cf.CFArrayGetValueAtIndex(w_scan.value, wi), 0)
-                finally:
-                    cf.CFRelease(w_scan.value)
+                    with objc.autorelease_pool():
+                        rapp_f = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(rdp_pid)
+                        if rapp_f is not None:
+                            rapp_f.unhide()
+                            rapp_f.activateWithOptions_(3)
+                except Exception:
+                    pass
+                _click_menu_item(("window", "cửa sổ"), ("connection center", "pcs"))
+                w_scan = ctypes.c_void_p()
+                if ax.AXUIElementCopyAttributeValue(app_ax, s_wins, ctypes.byref(w_scan)) == 0 and w_scan.value:
+                    try:
+                        for wi in range(cf.CFArrayGetCount(w_scan.value)):
+                            wel_s = cf.CFArrayGetValueAtIndex(w_scan.value, wi)
+                            if wel_s:
+                                ax.AXUIElementSetAttributeValue(wel_s, s_main, kTrue)
+                                ax.AXUIElementSetAttributeValue(wel_s, s_focused, kTrue)
+                                ax.AXUIElementPerformAction(wel_s, s_raise)
+                                _find_card(wel_s, 0)
+                    finally:
+                        cf.CFRelease(w_scan.value)
+                if cands:
+                    break
+                time.sleep(0.22)
+
             if cands:
                 bx, by, bw, bh = cands[0]
                 cx = bx + bw * 0.5
                 cy = (by - 36.0) if (bh < 32.0 and by > 120.0) else (by + min(32.0, bh * 0.4))
                 _cg_click_once(cx, cy)
-                time.sleep(0.16)
-                opened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc..."))
+                time.sleep(0.22)
+                opened_edit = _click_menu_item(("connections", "connection"), ("edit pc", "edit pc...", "edit"))
+                # Dự phòng: Chuột phải trực tiếp lên thẻ PC Hieu -> bấm "Edit" trong menu ngữ cảnh
+                if not opened_edit and q is not None:
+                    rd = q.CGEventCreateMouseEvent(None, q.kCGEventRightMouseDown, (cx, cy), q.kCGMouseButtonRight)
+                    ru = q.CGEventCreateMouseEvent(None, q.kCGEventRightMouseUp, (cx, cy), q.kCGMouseButtonRight)
+                    q.CGEventPost(q.kCGHIDEventTap, rd)
+                    q.CGEventPost(q.kCGHIDEventTap, ru)
+                    time.sleep(0.20)
+                    ctx_ok = [False]
+
+                    def _click_ctx_edit(el: Any, depth: int) -> None:
+                        if not el or depth > 10 or ctx_ok[0]:
+                            return
+                        if _gs(el, s_role).strip() == "AXMenuItem":
+                            mt = _gs(el, s_title).strip().lower()
+                            if mt in ("edit", "edit...", "edit pc", "edit pc...", "chỉnh sửa") and _gb(el, s_enabled):
+                                if ax.AXUIElementPerformAction(el, s_press) == 0:
+                                    ctx_ok[0] = True
+                                    return
+                        ch = ctypes.c_void_p()
+                        if ax.AXUIElementCopyAttributeValue(el, s_children, ctypes.byref(ch)) == 0 and ch.value:
+                            try:
+                                nc = cf.CFArrayGetCount(ch.value)
+                                for ci in range(min(nc, 60)):
+                                    _click_ctx_edit(cf.CFArrayGetValueAtIndex(ch.value, ci), depth + 1)
+                                    if ctx_ok[0]:
+                                        break
+                            finally:
+                                cf.CFRelease(ch.value)
+
+                    _click_ctx_edit(app_ax, 0)
+                    if ctx_ok[0]:
+                        opened_edit = True
+                    else:
+                        # Đóng menu chuột phải nếu không khớp bằng phím Esc
+                        esc_d = q.CGEventCreateKeyboardEvent(None, 53, True)
+                        esc_u = q.CGEventCreateKeyboardEvent(None, 53, False)
+                        q.CGEventPost(q.kCGHIDEventTap, esc_d)
+                        q.CGEventPost(q.kCGHIDEventTap, esc_u)
+
+        _RDP_CLOSER_DIAG["ax_edit_trace"] = f"cands={len(cands)},vis={vis_c[0]},open={int(opened_edit)}"
 
         if opened_edit:
             time.sleep(0.25)
