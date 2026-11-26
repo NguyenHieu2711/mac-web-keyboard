@@ -3901,20 +3901,24 @@ def _pid_has_established_rdp_socket(pid: int) -> bool:
     return pid in _ACTIVE_RDP_3389_PIDS
 
 
-_EVKEY_SENSITIVE_VKS: Set[int] = set(list(range(0, 52)) + [53])
-_EVKEY_REPEATABLE_VKS: Set[int] = set(range(0, 52))
+_EVKEY_RDP_EXCLUDE_BUNDLES: Tuple[str, ...] = (
+    "com.microsoft.rdc.macos",
+    "com.microsoft.rdc.osx",
+    "com.microsoft.rdc.macos.beta",
+    "com.microsoft.rdc.ios",
+)
 
 
 class MacRdpEvkeySyncBridge:
     """
     Đồng bộ 1:1 chế độ Tiếng Việt [V] / Tiếng Anh [E] giữa MacBook (EVKey / OpenKey / Bộ gõ Mac)
     và máy tính Windows từ xa (UniKeyNT) khi gõ trong Microsoft Remote Desktop / Windows App:
-    1) Khi cửa sổ phiên Remote PC đang active trên Mac: chuyển thẳng phím gõ chữ nguyên bản tới
-       tiến trình RDP qua `CGEventPostToPid` (bỏ qua hook `vk=0` gây lỗi font của EVKey trên Mac
-       nhưng vẫn giữ nguyên biểu tượng [V] / [E] trên thanh Menu Bar của MacBook), đồng thời tái tạo
-       chu kỳ lặp phím phần cứng (Key Repeat) mượt mà khi nhấn giữ Delete/Backspace, Space, ký tự...
-    2) Theo dõi thời gian thực trạng thái [V] / [E] (hoặc thoát EVKey) trên MacBook và đồng bộ tức thì
-       sang `UniKeyHookSharedMem` trên Windows PC qua cổng `:5051/sync-ime`.
+    1) Sử dụng cơ chế Loại trừ ứng dụng gốc (`EApp=1`, `BlackListApps`) của chính EVKey cho
+       `com.microsoft.rdc.macos` (không cài bất kỳ `CGEventTap` chặn phím nào trong `server.py`),
+       giúp bàn phím trên MacBook và phím giữ liên tục (`Delete`, `Space`, ký tự...) trong Remote PC
+       hoạt động 100% nguyên bản theo phần cứng macOS WindowServer mà vẫn giữ nguyên biểu tượng [V]/[E].
+    2) Theo dõi thụ động trạng thái [V] / [E] trên MacBook và đồng bộ sang `UniKeyHookSharedMem`
+       trên Windows PC qua cổng `:5051/sync-ime` khi đổi chế độ hoặc mở phiên mới.
     """
 
     def __init__(self) -> None:
@@ -3923,16 +3927,6 @@ class MacRdpEvkeySyncBridge:
         self.mac_vn_mode: bool = True
         self.ime_pid: int = 0
         self._last_rdp_pid: int = 0
-        self._bypassed_vks: Set[int] = set()
-        self._repeat_cond = threading.Condition()
-        self._repeat_seq: int = 0
-        self._repeat_item: Optional[
-            Tuple[int, int, int, int, float, float, float, int]
-        ] = None
-        self._repeat_init_delay: float = 0.28
-        self._repeat_interval: float = 0.032
-        self._tap_loop_ref: Any = None
-        self._tap_gen: int = 0
         self._last_pushed_vn: Optional[bool] = None
         self._last_push_at: float = 0.0
         self._last_synced_rdp_pid: int = 0
@@ -3946,9 +3940,8 @@ class MacRdpEvkeySyncBridge:
 
         if IS_MACOS:
             self._init_ax_attrs()
-            self._load_mac_key_repeat_prefs()
-            self._start_repeat_worker()
-            self._start_tap_worker()
+            self._ensure_evkey_native_rdp_exclusion()
+            self.available = True
             self._start_sync_watcher()
 
     def _init_ax_attrs(self) -> None:
@@ -3978,346 +3971,54 @@ class MacRdpEvkeySyncBridge:
         except Exception:
             self._carbon_lib = None
 
-    def _load_mac_key_repeat_prefs(self) -> None:
+    def _ensure_evkey_native_rdp_exclusion(self) -> None:
         try:
+            import CoreFoundation as cf_mod  # type: ignore
             import Foundation  # type: ignore
 
-            defs = Foundation.NSUserDefaults.standardUserDefaults()
-            init_obj = defs.objectForKey_("InitialKeyRepeat")
-            if init_obj is not None:
-                init_val = float(init_obj) * 0.015
-                if init_val > 0.0:
-                    self._repeat_init_delay = min(0.32, max(0.16, init_val))
-            rep_obj = defs.objectForKey_("KeyRepeat")
-            if rep_obj is not None:
-                rep_val = float(rep_obj) * 0.015
-                if rep_val > 0.0:
-                    self._repeat_interval = min(0.033, max(0.016, rep_val))
-        except Exception:
-            pass
+            domain = "com.lamquangminh.evkey"
+            eapp_obj = cf_mod.CFPreferencesCopyAppValue("EApp", domain)
+            sskey_obj = cf_mod.CFPreferencesCopyAppValue("SSKey", domain)
+            blk_obj = cf_mod.CFPreferencesCopyAppValue("BlackListApps", domain)
 
-    def _cancel_repeat(self, only_vk: Optional[int] = None) -> None:
-        with self._repeat_cond:
-            if self._repeat_item is None:
-                return
-            if only_vk is not None and self._repeat_item[1] != only_vk:
-                return
-            self._repeat_seq += 1
-            self._repeat_item = None
-            self._repeat_cond.notify_all()
+            eapp_val = int(eapp_obj) if eapp_obj is not None else 0
+            sskey_val = int(sskey_obj) if sskey_obj is not None else 0
+            raw_blk = str(blk_obj or "").strip()
 
-    def _arm_repeat(
-        self,
-        vk: int,
-        t_pid: int,
-        tap_gen: int,
-        flags: int,
-    ) -> None:
-        now = time.monotonic()
-        with self._repeat_cond:
-            self._repeat_seq += 1
-            self._repeat_item = (
-                self._repeat_seq,
-                vk,
-                t_pid,
-                tap_gen,
-                now + self._repeat_init_delay,
-                self._repeat_interval,
-                now + 15.0,
-                flags,
+            items: List[str] = []
+            seen_lower: Set[str] = set()
+            for part in raw_blk.split(";"):
+                clean = part.strip().lower()
+                if clean and clean not in seen_lower:
+                    seen_lower.add(clean)
+                    items.append(clean)
+
+            added_any = False
+            for req_bid in _EVKEY_RDP_EXCLUDE_BUNDLES:
+                if req_bid not in seen_lower:
+                    seen_lower.add(req_bid)
+                    items.append(req_bid)
+                    added_any = True
+
+            if not added_any and eapp_val == 1 and sskey_val == 0:
+                return
+
+            merged_blk = ";".join(items)
+            cf_mod.CFPreferencesSetAppValue("BlackListApps", merged_blk, domain)
+            cf_mod.CFPreferencesSetAppValue("EApp", 1, domain)
+            if sskey_val != 0:
+                cf_mod.CFPreferencesSetAppValue("SSKey", 0, domain)
+            cf_mod.CFPreferencesAppSynchronize(domain)
+
+            dnc = Foundation.NSDistributedNotificationCenter.defaultCenter()
+            dnc.postNotificationName_object_userInfo_deliverImmediately_(
+                "com.lamquangminh.evkey.configChanged",
+                None,
+                None,
+                True,
             )
-            self._repeat_cond.notify_all()
-
-    def _start_repeat_worker(self) -> None:
-        def _repeat_loop() -> None:
-            try:
-                import Quartz  # type: ignore
-
-                q = Quartz
-                ev_src = q.CGEventSourceCreate(q.kCGEventSourceStatePrivate)
-                mod_chord_mask = (
-                    int(q.kCGEventFlagMaskCommand)
-                    | int(q.kCGEventFlagMaskControl)
-                    | int(q.kCGEventFlagMaskAlternate)
-                )
-                keep_flags_mask = (
-                    int(q.kCGEventFlagMaskShift)
-                    | int(q.kCGEventFlagMaskAlphaShift)
-                    | 0x00000002
-                )
-            except Exception:
-                return
-
-            while True:
-                post_vk = -1
-                post_pid = 0
-                post_flags = 0
-                expected_seq = 0
-                with self._repeat_cond:
-                    while self._repeat_item is None:
-                        self._repeat_cond.wait()
-                    (
-                        seq,
-                        vk,
-                        t_pid,
-                        tap_gen,
-                        next_fire_at,
-                        rep_interval,
-                        max_until,
-                        init_flags,
-                    ) = self._repeat_item
-                    now = time.monotonic()
-                    if (
-                        t_pid <= 0
-                        or self.active_rdp_pid != t_pid
-                        or self._tap_gen != tap_gen
-                        or vk not in self._bypassed_vks
-                        or now >= max_until
-                    ):
-                        self._repeat_seq += 1
-                        self._repeat_item = None
-                        continue
-
-                    wait_s = next_fire_at - now
-                    if wait_s > 0.001:
-                        self._repeat_cond.wait(timeout=wait_s)
-                        continue
-
-                    if self._repeat_item is None or self._repeat_item[0] != seq:
-                        continue
-                    if (
-                        self.active_rdp_pid != t_pid
-                        or self._tap_gen != tap_gen
-                        or vk not in self._bypassed_vks
-                    ):
-                        self._repeat_seq += 1
-                        self._repeat_item = None
-                        continue
-
-                    try:
-                        cur_hid_flags = int(
-                            q.CGEventSourceFlagsState(q.kCGEventSourceStateHIDSystemState)
-                        )
-                        if (cur_hid_flags & mod_chord_mask) != 0:
-                            self._repeat_seq += 1
-                            self._repeat_item = None
-                            continue
-                    except Exception:
-                        pass
-
-                    new_next = max(now + 0.010, next_fire_at + rep_interval)
-                    self._repeat_item = (
-                        seq,
-                        vk,
-                        t_pid,
-                        tap_gen,
-                        new_next,
-                        rep_interval,
-                        max_until,
-                        init_flags,
-                    )
-                    post_vk = vk
-                    post_pid = t_pid
-                    post_flags = init_flags & keep_flags_mask
-                    expected_seq = seq
-
-                if post_vk >= 0 and post_pid > 0:
-                    try:
-                        objc_mod = injector._objc
-                        if objc_mod is not None:
-                            with objc_mod.autorelease_pool():
-                                if self._repeat_seq == expected_seq:
-                                    ev_up = q.CGEventCreateKeyboardEvent(
-                                        ev_src, post_vk, False
-                                    )
-                                    ev_dn = q.CGEventCreateKeyboardEvent(
-                                        ev_src, post_vk, True
-                                    )
-                                    if ev_up is not None and ev_dn is not None:
-                                        q.CGEventSetFlags(ev_up, post_flags)
-                                        q.CGEventSetFlags(ev_dn, post_flags)
-                                        q.CGEventSetIntegerValueField(
-                                            ev_up, q.kCGEventSourceUserData, 0x4D4B4232
-                                        )
-                                        q.CGEventSetIntegerValueField(
-                                            ev_dn, q.kCGEventSourceUserData, 0x4D4B4232
-                                        )
-                                        if self._repeat_seq == expected_seq:
-                                            q.CGEventPostToPid(post_pid, ev_up)
-                                            time.sleep(0.0015)
-                                            if self._repeat_seq == expected_seq:
-                                                q.CGEventPostToPid(post_pid, ev_dn)
-                        else:
-                            if self._repeat_seq == expected_seq:
-                                ev_up = q.CGEventCreateKeyboardEvent(
-                                    ev_src, post_vk, False
-                                )
-                                ev_dn = q.CGEventCreateKeyboardEvent(
-                                    ev_src, post_vk, True
-                                )
-                                if ev_up is not None and ev_dn is not None:
-                                    q.CGEventSetFlags(ev_up, post_flags)
-                                    q.CGEventSetFlags(ev_dn, post_flags)
-                                    q.CGEventSetIntegerValueField(
-                                        ev_up, q.kCGEventSourceUserData, 0x4D4B4232
-                                    )
-                                    q.CGEventSetIntegerValueField(
-                                        ev_dn, q.kCGEventSourceUserData, 0x4D4B4232
-                                    )
-                                    if self._repeat_seq == expected_seq:
-                                        q.CGEventPostToPid(post_pid, ev_up)
-                                        time.sleep(0.0015)
-                                        if self._repeat_seq == expected_seq:
-                                            q.CGEventPostToPid(post_pid, ev_dn)
-                    except Exception:
-                        pass
-
-        threading.Thread(target=_repeat_loop, daemon=True).start()
-
-    def _start_tap_worker(self) -> None:
-        self._tap_gen += 1
-        my_gen = self._tap_gen
-
-        def _run_tap() -> None:
-            try:
-                import Quartz  # type: ignore
-
-                q = Quartz
-                mod_chord_mask = (
-                    int(q.kCGEventFlagMaskCommand)
-                    | int(q.kCGEventFlagMaskControl)
-                    | int(q.kCGEventFlagMaskAlternate)
-                )
-                shift_mask = int(q.kCGEventFlagMaskShift)
-                tap_holder: List[Any] = [None]
-
-                def _key_cb(proxy, event_type, event, refcon):
-                    try:
-                        if event_type in (
-                            q.kCGEventTapDisabledByTimeout,
-                            q.kCGEventTapDisabledByUserInput,
-                        ):
-                            self._cancel_repeat()
-                            self._bypassed_vks.clear()
-                            if tap_holder[0] is not None:
-                                q.CGEventTapEnable(tap_holder[0], True)
-                            return event
-
-                        user_tag = int(
-                            q.CGEventGetIntegerValueField(event, q.kCGEventSourceUserData)
-                        )
-                        if user_tag == 0x4D4B4232:
-                            return event
-
-                        if event_type == q.kCGEventFlagsChanged:
-                            flags_now = int(q.CGEventGetFlags(event))
-                            if (flags_now & mod_chord_mask) != 0:
-                                self._cancel_repeat()
-                            else:
-                                cur_item = self._repeat_item
-                                if cur_item is not None and (flags_now & shift_mask) != (
-                                    cur_item[7] & shift_mask
-                                ):
-                                    self._cancel_repeat()
-                            return event
-
-                        vk = int(
-                            q.CGEventGetIntegerValueField(event, q.kCGKeyboardEventKeycode)
-                        )
-
-                        if event_type == q.kCGEventKeyUp:
-                            self._cancel_repeat(only_vk=vk)
-                            if vk in self._bypassed_vks:
-                                self._bypassed_vks.discard(vk)
-                                t_pid = self.active_rdp_pid or self._last_rdp_pid
-                                if t_pid > 0:
-                                    ev_cp = q.CGEventCreateCopy(event)
-                                    if ev_cp is not None:
-                                        q.CGEventSetIntegerValueField(
-                                            ev_cp, q.kCGEventSourceUserData, 0x4D4B4232
-                                        )
-                                        q.CGEventPostToPid(t_pid, ev_cp)
-                                        return None
-                            return event
-
-                        if event_type == q.kCGEventKeyDown:
-                            t_pid = self.active_rdp_pid
-                            if t_pid <= 0 or vk not in _EVKEY_SENSITIVE_VKS:
-                                self._cancel_repeat()
-                                return event
-                            flags = int(q.CGEventGetFlags(event))
-                            if (flags & mod_chord_mask) != 0:
-                                self._cancel_repeat()
-                                return event
-                            is_hw_repeat = int(
-                                q.CGEventGetIntegerValueField(
-                                    event, q.kCGKeyboardEventAutorepeat
-                                )
-                            )
-                            ev_cp = q.CGEventCreateCopy(event)
-                            if ev_cp is not None:
-                                q.CGEventSetIntegerValueField(
-                                    ev_cp, q.kCGEventSourceUserData, 0x4D4B4232
-                                )
-                                q.CGEventPostToPid(t_pid, ev_cp)
-                                self._bypassed_vks.add(vk)
-                                if vk in _EVKEY_REPEATABLE_VKS:
-                                    if is_hw_repeat == 0:
-                                        self._arm_repeat(vk, t_pid, my_gen, flags)
-                                    else:
-                                        self._cancel_repeat(only_vk=vk)
-                                else:
-                                    self._cancel_repeat()
-                                return None
-                        return event
-                    except Exception:
-                        return event
-
-                mask = (
-                    (1 << int(q.kCGEventKeyDown))
-                    | (1 << int(q.kCGEventKeyUp))
-                    | (1 << int(q.kCGEventFlagsChanged))
-                )
-                tap = q.CGEventTapCreate(
-                    q.kCGHIDEventTap,
-                    q.kCGHeadInsertEventTap,
-                    q.kCGEventTapOptionDefault,
-                    mask,
-                    _key_cb,
-                    None,
-                )
-                if tap is None:
-                    return
-                tap_holder[0] = tap
-                self.available = True
-                src = q.CFMachPortCreateRunLoopSource(None, tap, 0)
-                loop_ref = q.CFRunLoopGetCurrent()
-                if my_gen == self._tap_gen:
-                    self._tap_loop_ref = loop_ref
-                q.CFRunLoopAddSource(loop_ref, src, q.kCFRunLoopCommonModes)
-                q.CGEventTapEnable(tap, True)
-                q.CFRunLoopRun()
-                try:
-                    q.CGEventTapEnable(tap, False)
-                except Exception:
-                    pass
-            except Exception as exc:
-                logger.debug("MacRdpEvkeySyncBridge tap error: %s", exc)
-
-        threading.Thread(target=_run_tap, daemon=True).start()
-
-    def _reinsert_tap_ahead_of_ime(self) -> None:
-        self._cancel_repeat()
-        try:
-            import Quartz  # type: ignore
-
-            old_loop = self._tap_loop_ref
-            self._tap_loop_ref = None
-            if old_loop is not None:
-                Quartz.CFRunLoopStop(old_loop)
-        except Exception:
-            pass
-        self._start_tap_worker()
+        except Exception as exc:
+            logger.debug("EVKey native RDP exclusion setup error: %s", exc)
 
     def _cf_str_to_py(self, ptr_val: int) -> str:
         if not ptr_val or injector._objc is None:
@@ -4709,8 +4410,6 @@ class MacRdpEvkeySyncBridge:
                     prev_rdp = self.active_rdp_pid
                     cur_rdp = self._detect_frontmost_rdp_pid()
                     self.active_rdp_pid = cur_rdp
-                    if cur_rdp <= 0 or (prev_rdp > 0 and cur_rdp != prev_rdp):
-                        self._cancel_repeat()
                     if cur_rdp > 0:
                         self._last_rdp_pid = cur_rdp
 
@@ -4724,8 +4423,7 @@ class MacRdpEvkeySyncBridge:
 
                         if ime_pid > 0 and ime_pid != prev_ime_pid:
                             prev_ime_pid = ime_pid
-                            time.sleep(0.35)
-                            self._reinsert_tap_ahead_of_ime()
+                            self._ensure_evkey_native_rdp_exclusion()
                         elif ime_pid == 0:
                             prev_ime_pid = 0
 
@@ -5951,7 +5649,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.3.89",
+        "version": "2.3.90",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
