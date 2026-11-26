@@ -3927,7 +3927,7 @@ class MacRdpEvkeySyncBridge:
         self._repeat_cond = threading.Condition()
         self._repeat_seq: int = 0
         self._repeat_item: Optional[
-            Tuple[int, int, int, int, Any, float, float, float, int]
+            Tuple[int, int, int, int, float, float, float, int]
         ] = None
         self._repeat_init_delay: float = 0.28
         self._repeat_interval: float = 0.032
@@ -3935,6 +3935,7 @@ class MacRdpEvkeySyncBridge:
         self._tap_gen: int = 0
         self._last_pushed_vn: Optional[bool] = None
         self._last_push_at: float = 0.0
+        self._last_synced_rdp_pid: int = 0
         self._ax_win_attr: Any = None
         self._ax_title_attr: Any = None
         self._ax_extras_attr: Any = None
@@ -4007,22 +4008,11 @@ class MacRdpEvkeySyncBridge:
 
     def _arm_repeat(
         self,
-        q: Any,
         vk: int,
         t_pid: int,
         tap_gen: int,
-        src_event: Any,
         flags: int,
     ) -> None:
-        tmpl_ev = q.CGEventCreateCopy(src_event)
-        if tmpl_ev is None:
-            return
-        q.CGEventSetIntegerValueField(tmpl_ev, q.kCGEventSourceUserData, 0x4D4B4232)
-        q.CGEventSetIntegerValueField(
-            tmpl_ev,
-            q.kCGKeyboardEventAutorepeat,
-            1 if vk in (36, 48, 49, 51) else 0,
-        )
         now = time.monotonic()
         with self._repeat_cond:
             self._repeat_seq += 1
@@ -4031,7 +4021,6 @@ class MacRdpEvkeySyncBridge:
                 vk,
                 t_pid,
                 tap_gen,
-                tmpl_ev,
                 now + self._repeat_init_delay,
                 self._repeat_interval,
                 now + 15.0,
@@ -4045,17 +4034,24 @@ class MacRdpEvkeySyncBridge:
                 import Quartz  # type: ignore
 
                 q = Quartz
+                ev_src = q.CGEventSourceCreate(q.kCGEventSourceStatePrivate)
                 mod_chord_mask = (
                     int(q.kCGEventFlagMaskCommand)
                     | int(q.kCGEventFlagMaskControl)
                     | int(q.kCGEventFlagMaskAlternate)
                 )
+                keep_flags_mask = (
+                    int(q.kCGEventFlagMaskShift)
+                    | int(q.kCGEventFlagMaskAlphaShift)
+                    | 0x00000002
+                )
             except Exception:
                 return
 
             while True:
-                ev_to_post = None
+                post_vk = -1
                 post_pid = 0
+                post_flags = 0
                 expected_seq = 0
                 with self._repeat_cond:
                     while self._repeat_item is None:
@@ -4065,7 +4061,6 @@ class MacRdpEvkeySyncBridge:
                         vk,
                         t_pid,
                         tap_gen,
-                        tmpl_ev,
                         next_fire_at,
                         rep_interval,
                         max_until,
@@ -4116,30 +4111,64 @@ class MacRdpEvkeySyncBridge:
                         vk,
                         t_pid,
                         tap_gen,
-                        tmpl_ev,
                         new_next,
                         rep_interval,
                         max_until,
                         init_flags,
                     )
-                    ev_to_post = tmpl_ev
+                    post_vk = vk
                     post_pid = t_pid
+                    post_flags = init_flags & keep_flags_mask
                     expected_seq = seq
 
-                if ev_to_post is not None and post_pid > 0:
+                if post_vk >= 0 and post_pid > 0:
                     try:
                         objc_mod = injector._objc
                         if objc_mod is not None:
                             with objc_mod.autorelease_pool():
                                 if self._repeat_seq == expected_seq:
-                                    rep_cp = q.CGEventCreateCopy(ev_to_post)
-                                    if rep_cp is not None and self._repeat_seq == expected_seq:
-                                        q.CGEventPostToPid(post_pid, rep_cp)
+                                    ev_up = q.CGEventCreateKeyboardEvent(
+                                        ev_src, post_vk, False
+                                    )
+                                    ev_dn = q.CGEventCreateKeyboardEvent(
+                                        ev_src, post_vk, True
+                                    )
+                                    if ev_up is not None and ev_dn is not None:
+                                        q.CGEventSetFlags(ev_up, post_flags)
+                                        q.CGEventSetFlags(ev_dn, post_flags)
+                                        q.CGEventSetIntegerValueField(
+                                            ev_up, q.kCGEventSourceUserData, 0x4D4B4232
+                                        )
+                                        q.CGEventSetIntegerValueField(
+                                            ev_dn, q.kCGEventSourceUserData, 0x4D4B4232
+                                        )
+                                        if self._repeat_seq == expected_seq:
+                                            q.CGEventPostToPid(post_pid, ev_up)
+                                            time.sleep(0.0015)
+                                            if self._repeat_seq == expected_seq:
+                                                q.CGEventPostToPid(post_pid, ev_dn)
                         else:
                             if self._repeat_seq == expected_seq:
-                                rep_cp = q.CGEventCreateCopy(ev_to_post)
-                                if rep_cp is not None and self._repeat_seq == expected_seq:
-                                    q.CGEventPostToPid(post_pid, rep_cp)
+                                ev_up = q.CGEventCreateKeyboardEvent(
+                                    ev_src, post_vk, False
+                                )
+                                ev_dn = q.CGEventCreateKeyboardEvent(
+                                    ev_src, post_vk, True
+                                )
+                                if ev_up is not None and ev_dn is not None:
+                                    q.CGEventSetFlags(ev_up, post_flags)
+                                    q.CGEventSetFlags(ev_dn, post_flags)
+                                    q.CGEventSetIntegerValueField(
+                                        ev_up, q.kCGEventSourceUserData, 0x4D4B4232
+                                    )
+                                    q.CGEventSetIntegerValueField(
+                                        ev_dn, q.kCGEventSourceUserData, 0x4D4B4232
+                                    )
+                                    if self._repeat_seq == expected_seq:
+                                        q.CGEventPostToPid(post_pid, ev_up)
+                                        time.sleep(0.0015)
+                                        if self._repeat_seq == expected_seq:
+                                            q.CGEventPostToPid(post_pid, ev_dn)
                     except Exception:
                         pass
 
@@ -4187,7 +4216,7 @@ class MacRdpEvkeySyncBridge:
                             else:
                                 cur_item = self._repeat_item
                                 if cur_item is not None and (flags_now & shift_mask) != (
-                                    cur_item[8] & shift_mask
+                                    cur_item[7] & shift_mask
                                 ):
                                     self._cancel_repeat()
                             return event
@@ -4234,7 +4263,7 @@ class MacRdpEvkeySyncBridge:
                                 self._bypassed_vks.add(vk)
                                 if vk in _EVKEY_REPEATABLE_VKS:
                                     if is_hw_repeat == 0:
-                                        self._arm_repeat(q, vk, t_pid, my_gen, event, flags)
+                                        self._arm_repeat(vk, t_pid, my_gen, flags)
                                     else:
                                         self._cancel_repeat(only_vk=vk)
                                 else:
@@ -4701,11 +4730,16 @@ class MacRdpEvkeySyncBridge:
                             prev_ime_pid = 0
 
                         if has_any_rdp:
-                            just_focused = cur_rdp > 0 and prev_rdp == 0
+                            new_rdp_session = (
+                                cur_rdp > 0 and cur_rdp != self._last_synced_rdp_pid
+                            )
                             vn_changed = want_vn != self._last_pushed_vn
-                            heartbeat_due = cur_rdp > 0 and (now - self._last_push_at >= 2.5)
-                            if just_focused or vn_changed or heartbeat_due:
+                            if new_rdp_session or vn_changed:
                                 self._push_vn_to_pc(want_vn)
+                                if cur_rdp > 0:
+                                    self._last_synced_rdp_pid = cur_rdp
+                        else:
+                            self._last_synced_rdp_pid = 0
                 except Exception:
                     pass
 
@@ -5917,7 +5951,7 @@ async def health() -> dict:
     is_rem, foc_app = injector.detect_focused_app_info(force=True)
     return {
         "ok": True,
-        "version": "2.3.88",
+        "version": "2.3.89",
         "pid": os.getpid(),
         "platform": sys.platform,
         "vn_enabled": injector.vn_enabled,
